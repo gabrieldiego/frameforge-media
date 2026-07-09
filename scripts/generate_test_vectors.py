@@ -42,6 +42,7 @@ class TestVector:
     source: str | None
     crop_x: int | None
     crop_y: int | None
+    lossless: bool
 
     @property
     def filename(self) -> str:
@@ -178,6 +179,7 @@ def parse_vector(row: dict[str, str], path: Path) -> TestVector:
         source=optional_field(row.get("source", "")),
         crop_x=parse_optional_non_negative_int(row.get("crop_x", ""), "crop_x"),
         crop_y=parse_optional_non_negative_int(row.get("crop_y", ""), "crop_y"),
+        lossless=parse_optional_bool(row.get("lossless", ""), "lossless"),
     )
 
 
@@ -229,6 +231,18 @@ def parse_optional_non_negative_int(value: str | None, field: str) -> int | None
     if parsed < 0:
         raise ValueError(f"{field} expects a non-negative integer, got {parsed}")
     return parsed
+
+
+def parse_optional_bool(value: str | None, field: str) -> bool:
+    stripped = optional_field(value)
+    if stripped is None:
+        return False
+    normalized = stripped.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{field} expects a boolean, got '{stripped}'")
 
 
 def parse_optional_path(value: str | None) -> Path | None:

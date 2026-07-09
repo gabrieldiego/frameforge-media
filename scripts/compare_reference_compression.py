@@ -28,6 +28,7 @@ class ComparisonResult:
     frameforge_bytes: int
     reference_bytes: int
     ratio: float
+    lossless: bool
     log: Path
 
 
@@ -64,7 +65,8 @@ def main() -> int:
         result = run_case(vector, vector_path, reference_encoder, args)
         results.append(result)
         print(
-            "  FrameForge={ff} byte(s), reference={ref} byte(s), ratio={ratio:.3f}x".format(
+            "  mode={mode} FrameForge={ff} byte(s), reference={ref} byte(s), ratio={ratio:.3f}x".format(
+                mode="lossless" if result.lossless else "default",
                 ff=result.frameforge_bytes,
                 ref=result.reference_bytes,
                 ratio=result.ratio,
@@ -74,23 +76,24 @@ def main() -> int:
 
     print()
     print(f"FrameForge media compression comparison: {args.set} ({args.codec})")
-    print("| # | vector | FrameForge bytes | reference bytes | FF/reference | delta | log |")
-    print("|---:|---|---:|---:|---:|---:|---|")
+    print("| # | vector | mode | FrameForge bytes | reference bytes | FF/reference | delta | log |")
+    print("|---:|---|---|---:|---:|---:|---:|---|")
     total_ff = 0
     total_ref = 0
     for index, result in enumerate(results, start=1):
         total_ff += result.frameforge_bytes
         total_ref += result.reference_bytes
         delta = result.frameforge_bytes - result.reference_bytes
+        mode = "lossless" if result.lossless else "default"
         print(
-            f"| {index} | {result.vector_name} | {result.frameforge_bytes} | "
+            f"| {index} | {result.vector_name} | {mode} | {result.frameforge_bytes} | "
             f"{result.reference_bytes} | {result.ratio:.3f}x | {delta:+d} | "
             f"{relpath(result.log)} |"
         )
     if results:
         total_ratio = total_ff / total_ref if total_ref else float("inf")
         print(
-            f"| total | {len(results)} vector(s) | {total_ff} | {total_ref} | "
+            f"| total | {len(results)} vector(s) | mixed | {total_ff} | {total_ref} | "
             f"{total_ratio:.3f}x | {total_ff - total_ref:+d} | |"
         )
     print()
@@ -154,6 +157,8 @@ def run_case(
         "--encode",
         f"{args.codec}:{frameforge_output}",
     ]
+    if vector.lossless:
+        frameforge_cmd.extend(["--set", "lossless"])
     reference_cmd = reference_encode_command(vector, vector_path, reference_output, reference_encoder, args)
 
     frameforge_result = run_logged(frameforge_cmd)
@@ -180,6 +185,7 @@ def run_case(
         frameforge_bytes=frameforge_bytes,
         reference_bytes=reference_bytes,
         ratio=ratio,
+        lossless=vector.lossless,
         log=log,
     )
 
@@ -223,6 +229,8 @@ def reference_encode_command(
         "--quiet",
         "--disable-warning-prompt",
     ]
+    if vector.lossless:
+        command.append("--lossless=1")
     if vector.fmt == "yuv420p8":
         command.append("--i420")
     elif vector.fmt == "yuv444p8":
