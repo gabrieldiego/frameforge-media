@@ -8,6 +8,7 @@ pub(crate) const AV2_LUMA_PALETTE_BLOCK_SIZE: usize = 8;
 const AV2_LUMA_INTRA_TILE_SIZE: usize = 64;
 const AV2_LUMA_INTRA_MODE_SWITCH_SAD_MARGIN: usize = 64;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 124;
+const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 122;
 const AV2_ENABLE_LUMA_DPCM_444: bool = false;
 const LOSSLESS_DC_PREDICTOR: u8 = 128;
 const LOSSLESS_H_PRED_LEFT_EDGE: u8 = 129;
@@ -606,7 +607,10 @@ fn chroma_bdpcm_coeff_score(residual: &[i32; 16]) -> usize {
         if level == 0 {
             score
         } else {
-            score + AV2_CHROMA_BDPCM_NONZERO_COST + level.min(255) + level.saturating_sub(5) / 4
+            score
+                + AV2_CHROMA_BDPCM_NONZERO_COST
+                + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100
+                + level.saturating_sub(5) / 4
         }
     })
 }
