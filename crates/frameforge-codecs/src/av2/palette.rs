@@ -9,6 +9,8 @@ const AV2_LUMA_INTRA_TILE_SIZE: usize = 64;
 const AV2_LUMA_INTRA_MODE_SWITCH_SAD_MARGIN: usize = 64;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 124;
 const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 122;
+const AV2_CHROMA_BDPCM_HIGH_RANGE_BIT_COST: usize = 16;
+const AV2_SCORE_TX4X4_SCAN: [usize; 16] = [0, 4, 1, 8, 5, 2, 12, 9, 6, 3, 13, 10, 7, 14, 11, 15];
 const AV2_ENABLE_LUMA_DPCM_444: bool = false;
 const LOSSLESS_DC_PREDICTOR: u8 = 128;
 const LOSSLESS_H_PRED_LEFT_EDGE: u8 = 129;
@@ -601,18 +603,89 @@ fn chroma_bdpcm_coeff_score(residual: &[i32; 16]) -> usize {
     // exact lossless FWHT coefficients, so score the same coefficient domain
     // when choosing between legal chroma prediction families.
     let coefficients = av2_fwht4x4_for_score(residual);
-    coefficients.iter().fold(0usize, |score, coefficient| {
+    let mut levels = [0usize; 16];
+    let mut score = 0usize;
+    for (index, coefficient) in coefficients.iter().enumerate() {
         debug_assert_eq!(coefficient % 8, 0);
         let level = (coefficient.unsigned_abs() / 8) as usize;
+        levels[index] = level;
         if level == 0 {
-            score
+            continue;
         } else {
-            score
-                + AV2_CHROMA_BDPCM_NONZERO_COST
-                + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100
-                + level.saturating_sub(5) / 4
+            score += AV2_CHROMA_BDPCM_NONZERO_COST
+                + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100;
         }
-    })
+    }
+    score + chroma_high_range_score_bits(&levels) * AV2_CHROMA_BDPCM_HIGH_RANGE_BIT_COST
+}
+
+fn chroma_high_range_score_bits(levels: &[usize; 16]) -> usize {
+    let Some(eob) = AV2_SCORE_TX4X4_SCAN
+        .iter()
+        .rposition(|&pos| levels[pos] != 0)
+        .map(|index| index + 1)
+    else {
+        return 0;
+    };
+
+    let mut score = 0usize;
+    let mut hr_level_avg = 0usize;
+    for scan_index in (0..eob).rev() {
+        let pos = AV2_SCORE_TX4X4_SCAN[scan_index];
+        let level = levels[pos];
+        if level == 0 {
+            continue;
+        }
+        let lf = chroma_lf_limits_for_score(pos);
+        let threshold = if lf { 4 } else { 5 };
+        if level <= threshold {
+            continue;
+        }
+        let decoded_base = if lf { 5 } else { 6 };
+        let high_range = level.saturating_sub(decoded_base);
+        score += adaptive_high_range_score_bits(high_range, hr_level_avg);
+        hr_level_avg = (hr_level_avg + high_range) >> 1;
+    }
+    score
+}
+
+fn chroma_lf_limits_for_score(pos: usize) -> bool {
+    let row = pos / 4;
+    let col = pos % 4;
+    row + col < 1
+}
+
+fn adaptive_high_range_score_bits(value: usize, context: usize) -> usize {
+    let m = if context < 4 {
+        1
+    } else if context < 8 {
+        2
+    } else if context < 16 {
+        3
+    } else if context < 32 {
+        4
+    } else if context < 64 {
+        5
+    } else {
+        6
+    };
+    truncated_rice_score_bits(value, m, m + 1, (m + 4).min(6))
+}
+
+fn truncated_rice_score_bits(value: usize, m: usize, k: usize, cmax: usize) -> usize {
+    let q = value >> m;
+    if q >= cmax {
+        cmax + exp_golomb_score_bits(value - (cmax << m), k)
+    } else {
+        q + 1 + m
+    }
+}
+
+fn exp_golomb_score_bits(value: usize, k: usize) -> usize {
+    let x = value + (1usize << k);
+    let length = usize::BITS as usize - x.leading_zeros() as usize;
+    debug_assert!(length > k, "AV2 Exp-Golomb length must exceed order");
+    length - 1 - k + length
 }
 
 fn av2_fwht4x4_for_score(input: &[i32; 16]) -> [i32; 16] {
