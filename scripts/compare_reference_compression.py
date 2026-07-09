@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shlex
 import subprocess
 import sys
@@ -30,6 +32,7 @@ class ComparisonResult:
     reference_bytes: int
     ratio: float
     lossless: bool
+    reference_cached: bool
     log: Path
 
 
@@ -47,6 +50,11 @@ def main() -> int:
         "--reference-args",
         default="",
         help="extra shell-style arguments appended to the reference encoder command",
+    )
+    parser.add_argument(
+        "--refresh-reference",
+        action="store_true",
+        help="rerun reference encoders instead of reusing matching cached outputs",
     )
     args = parser.parse_args()
 
@@ -66,8 +74,9 @@ def main() -> int:
         result = run_case(vector, vector_path, reference_encoder, args)
         results.append(result)
         print(
-            "  mode={mode} FrameForge={ff} byte(s), reference={ref} byte(s), ratio={ratio:.3f}x".format(
+            "  mode={mode} reference={cache} FrameForge={ff} byte(s), reference={ref} byte(s), ratio={ratio:.3f}x".format(
                 mode="lossless" if result.lossless else "default",
+                cache="cached" if result.reference_cached else "fresh",
                 ff=result.frameforge_bytes,
                 ref=result.reference_bytes,
                 ratio=result.ratio,
@@ -77,8 +86,8 @@ def main() -> int:
 
     print()
     print(f"FrameForge media compression comparison: {args.set} ({args.codec})")
-    print("| # | vector | mode | FrameForge bytes | reference bytes | FF/reference | delta | log |")
-    print("|---:|---|---|---:|---:|---:|---:|---|")
+    print("| # | vector | mode | reference | FrameForge bytes | reference bytes | FF/reference | delta | log |")
+    print("|---:|---|---|---|---:|---:|---:|---:|---|")
     total_ff = 0
     total_ref = 0
     for index, result in enumerate(results, start=1):
@@ -86,15 +95,16 @@ def main() -> int:
         total_ref += result.reference_bytes
         delta = result.frameforge_bytes - result.reference_bytes
         mode = "lossless" if result.lossless else "default"
+        cache = "cached" if result.reference_cached else "fresh"
         print(
-            f"| {index} | {result.vector_name} | {mode} | {result.frameforge_bytes} | "
+            f"| {index} | {result.vector_name} | {mode} | {cache} | {result.frameforge_bytes} | "
             f"{result.reference_bytes} | {result.ratio:.3f}x | {delta:+d} | "
             f"{relpath(result.log)} |"
         )
     if results:
         total_ratio = total_ff / total_ref if total_ref else float("inf")
         print(
-            f"| total | {len(results)} vector(s) | mixed | {total_ff} | {total_ref} | "
+            f"| total | {len(results)} vector(s) | mixed | mixed | {total_ff} | {total_ref} | "
             f"{total_ratio:.3f}x | {total_ff - total_ref:+d} | |"
         )
     print()
@@ -148,11 +158,6 @@ def run_case(
     frameforge_output, reference_output, log = case_paths(vector_path.stem, args)
     if frameforge_output.exists():
         frameforge_output.unlink()
-    if reference_output.exists():
-        reference_output.unlink()
-    reference_recon = reference_recon_path(reference_output)
-    if reference_recon.exists():
-        reference_recon.unlink()
 
     frameforge_cmd = [
         str(args.ff),
@@ -164,20 +169,41 @@ def run_case(
     if vector.lossless:
         frameforge_cmd.extend(["--set", "lossless"])
     reference_cmd = reference_encode_command(vector, vector_path, reference_output, reference_encoder, args)
+    metadata = reference_cache_metadata(vector, vector_path, reference_encoder, reference_cmd, args)
+    metadata_path = reference_metadata_path(reference_output)
 
     frameforge_result = run_logged(frameforge_cmd)
-    reference_result = run_logged(reference_cmd)
+    reference_cached = False
+    reference_output_text = ""
+    if not args.refresh_reference and reference_cache_valid(
+        reference_output, metadata_path, metadata, args.codec
+    ):
+        reference_cached = True
+        reference_output_text = (
+            f"cached reference output: {relpath(reference_output)}\n"
+            f"cache metadata: {relpath(metadata_path)}\n"
+        )
+        reference_returncode = 0
+    else:
+        remove_reference_outputs(reference_output, args.codec)
+        reference_result = run_logged(reference_cmd)
+        reference_output_text = reference_result.stdout
+        reference_returncode = reference_result.returncode
+
     log.write_text(
         f"$ {shlex.join(frameforge_cmd)}\n\n{frameforge_result.stdout}\n\n"
-        f"$ {shlex.join(reference_cmd)}\n\n{reference_result.stdout}"
+        f"$ {shlex.join(reference_cmd)}\n\n{reference_output_text}"
     )
 
     if frameforge_result.returncode != 0:
         raise SystemExit(f"FrameForge encode failed for {vector_path.name}; see {relpath(log)}")
-    if reference_result.returncode != 0:
+    if reference_returncode != 0:
         raise SystemExit(f"reference encode failed for {vector_path.name}; see {relpath(log)}")
     require_non_empty(frameforge_output, "FrameForge", vector_path, log)
     require_non_empty(reference_output, "reference", vector_path, log)
+    require_reference_outputs(reference_output, args.codec, vector_path, log)
+    if not reference_cached:
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 
     frameforge_bytes = frameforge_output.stat().st_size
     reference_bytes = reference_output.stat().st_size
@@ -190,6 +216,7 @@ def run_case(
         reference_bytes=reference_bytes,
         ratio=ratio,
         lossless=vector.lossless,
+        reference_cached=reference_cached,
         log=log,
     )
 
@@ -208,6 +235,85 @@ def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path]:
 
 def reference_recon_path(output: Path) -> Path:
     return output.with_name(f"{output.stem}_recon.yuv")
+
+
+def reference_metadata_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}_metadata.json")
+
+
+def reference_outputs(output: Path, codec: str) -> list[Path]:
+    outputs = [output]
+    if codec == "vvc":
+        outputs.append(reference_recon_path(output))
+    return outputs
+
+
+def remove_reference_outputs(output: Path, codec: str) -> None:
+    for path in [*reference_outputs(output, codec), reference_metadata_path(output)]:
+        if path.exists():
+            path.unlink()
+
+
+def require_reference_outputs(
+    output: Path, codec: str, vector_path: Path, log: Path
+) -> None:
+    for path in reference_outputs(output, codec):
+        require_non_empty(path, "reference", vector_path, log)
+
+
+def reference_cache_valid(
+    output: Path,
+    metadata_path: Path,
+    expected_metadata: dict,
+    codec: str,
+) -> bool:
+    if not metadata_path.exists():
+        return False
+    for path in reference_outputs(output, codec):
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+    try:
+        existing_metadata = json.loads(metadata_path.read_text())
+    except json.JSONDecodeError:
+        return False
+    return existing_metadata == expected_metadata
+
+
+def reference_cache_metadata(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    reference_encoder: str,
+    reference_cmd: list[str],
+    args: argparse.Namespace,
+) -> dict:
+    encoder_path = Path(reference_encoder)
+    encoder_stat = encoder_path.stat()
+    return {
+        "version": 1,
+        "codec": args.codec,
+        "set": args.set,
+        "reference_args": args.reference_args,
+        "reference_command": reference_cmd,
+        "reference_encoder": {
+            "path": str(encoder_path),
+            "mtime_ns": encoder_stat.st_mtime_ns,
+            "size": encoder_stat.st_size,
+        },
+        "input": {
+            "path": str(vector_path),
+            "sha256": sha256_file(vector_path),
+            "size": vector_path.stat().st_size,
+        },
+        "vector": {
+            "filename": vector.filename,
+            "width": vector.width,
+            "height": vector.height,
+            "frames": vector.frames,
+            "format": vector.fmt,
+            "fps": vector.fps,
+            "lossless": vector.lossless,
+        },
+    }
 
 
 def reference_encode_command(
@@ -331,6 +437,14 @@ def require_non_empty(output: Path, label: str, vector_path: Path, log: Path) ->
         raise SystemExit(f"{label} encode produced no output for {vector_path.name}; see {relpath(log)}")
     if output.stat().st_size == 0:
         raise SystemExit(f"{label} encode produced empty output for {vector_path.name}; see {relpath(log)}")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def codec_extension(codec: str) -> str:
