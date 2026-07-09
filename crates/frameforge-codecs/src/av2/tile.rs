@@ -2659,16 +2659,17 @@ fn write_intrabc_explicit_dv(writer: &mut Av2EntropyWriter, dv: Av2IntrabcExplic
     // write_intrabc_info() appends row/col sign bits. The frame header forces
     // integer block-vector precision for this MVP path, so no
     // intrabc_bv_precision symbol is present. FrameForge stores IBC vectors
-    // in pixel units; AVM stores MV values in eighth-pel units and therefore
-    // shifts by start_lsb before calling this same shell syntax.
+    // in pixel units; AVM stores MV values in eighth-pel units, subtracts the
+    // reference there, and then right-shifts the magnitude to one-pel units
+    // for the shell syntax.
     let mv_row = i32::from(dv.mv_row) * 8;
     let mv_col = i32::from(dv.mv_col) * 8;
     let ref_row = i32::from(dv.ref_row) * 8;
     let ref_col = i32::from(dv.ref_col) * 8;
     let diff_row = mv_row - ref_row;
     let diff_col = mv_col - ref_col;
-    let scaled_row = diff_row.unsigned_abs() as usize;
-    let scaled_col = diff_col.unsigned_abs() as usize;
+    let scaled_row = (diff_row.unsigned_abs() >> 3) as usize;
+    let scaled_col = (diff_col.unsigned_abs() >> 3) as usize;
     write_intrabc_dv_magnitude(writer, scaled_row, scaled_col);
     if diff_row != 0 {
         writer.write_literal("tile.intrabc.dv.sign", u32::from(diff_row < 0), 1);

@@ -384,12 +384,15 @@ fn visit_local_ibc_block(
         )),
         (false, false) => None,
     };
-    // TODO(av2 ibc): re-enable intrabc_mode=0 only after the encoder mirrors
-    // AVM's ref-BV stack and local-range state closely enough to survive REF
-    // decode. A hash match plus a locally reconstructed default stack can
-    // produce a syntactically valid differential BV that AVM later rejects as
-    // out of range.
-    let explicit_candidate: Option<(Av2LocalIbcCopy, Av2LocalIbcVector)> = None;
+    let explicit_candidate = find_same_row_explicit_candidate(
+        blocks,
+        coded_blocks,
+        blocks_wide,
+        block_x,
+        block_y,
+        hash,
+        &bvp_stack,
+    );
     let candidate = direct_candidate
         .map(|(drl_idx, vector)| (Av2LocalIbcCopy::DirectDrl { drl_idx }, vector))
         .or(explicit_candidate);
@@ -407,6 +410,62 @@ fn visit_local_ibc_block(
     blocks[block_index].candidate_copy = candidate_copy;
     blocks[block_index].copy_vector = copy_vector;
     coded_blocks[block_index] = true;
+}
+
+fn find_same_row_explicit_candidate(
+    blocks: &[Av2LocalIbcBlock444],
+    coded_blocks: &[bool],
+    blocks_wide: usize,
+    block_x: usize,
+    block_y: usize,
+    hash: u32,
+    bvp_stack: &[Av2LocalIbcVector],
+) -> Option<(Av2LocalIbcCopy, Av2LocalIbcVector)> {
+    let tile_blocks = AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE;
+    let tile_block_x0 = (block_x / tile_blocks) * tile_blocks;
+    if block_x < tile_block_x0 + 2 {
+        return None;
+    }
+
+    for ref_block_x in (tile_block_x0..block_x - 1).rev() {
+        let ref_index = block_y * blocks_wide + ref_block_x;
+        if !coded_blocks[ref_index] || blocks[ref_index].hash != hash {
+            continue;
+        }
+        let vector = Av2LocalIbcVector {
+            row_px: 0,
+            col_px: ((ref_block_x as isize - block_x as isize) * AV2_IBC_HASH_BLOCK_SIZE as isize)
+                as i16,
+        };
+        let (drl_idx, ref_vector) = closest_explicit_ref_bv(bvp_stack, vector)?;
+        return Some((
+            Av2LocalIbcCopy::ExplicitDv(Av2IntrabcExplicitDv {
+                drl_idx,
+                mv_row: vector.row_px,
+                mv_col: vector.col_px,
+                ref_row: ref_vector.row_px,
+                ref_col: ref_vector.col_px,
+            }),
+            vector,
+        ));
+    }
+
+    None
+}
+
+fn closest_explicit_ref_bv(
+    bvp_stack: &[Av2LocalIbcVector],
+    vector: Av2LocalIbcVector,
+) -> Option<(u8, Av2LocalIbcVector)> {
+    bvp_stack
+        .iter()
+        .copied()
+        .enumerate()
+        .min_by_key(|(_, candidate)| {
+            (i32::from(vector.row_px) - i32::from(candidate.row_px)).unsigned_abs()
+                + (i32::from(vector.col_px) - i32::from(candidate.col_px)).unsigned_abs()
+        })
+        .map(|(index, candidate)| (index as u8, candidate))
 }
 
 fn mark_local_ibc_intra_leaf(
