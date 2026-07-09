@@ -1930,7 +1930,7 @@ mod tests {
             let edge = 16 + y as u8 * 28;
             input[y * 16 + 7] = edge;
             for x in 0..8usize {
-                input[y * 16 + 8 + x] = edge + x as u8;
+                input[y * 16 + 8 + x] = if x < 3 { edge } else { edge + 20 };
             }
         }
         let mut source = input.as_slice();

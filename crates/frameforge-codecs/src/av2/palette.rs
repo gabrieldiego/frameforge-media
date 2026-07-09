@@ -1,5 +1,6 @@
 use super::Av2VideoGeometry;
 use crate::picture::{Picture, PixelFormat};
+use std::cmp::Reverse;
 
 pub(crate) const AV2_LUMA_PALETTE_MIN_COLORS: usize = 2;
 pub(crate) const AV2_LUMA_PALETTE_MAX_COLORS: usize = 8;
@@ -971,20 +972,7 @@ fn build_luma_palette_block(
     let mut colors = if collected.len() == AV2_LUMA_PALETTE_MAX_COLORS
         && counts.iter().filter(|&&count| count != 0).count() > AV2_LUMA_PALETTE_MAX_COLORS
     {
-        let mut values: Vec<u8> = (0u16..=255)
-            .filter(|&value| counts[value as usize] != 0)
-            .map(|value| value as u8)
-            .collect();
-        values.sort_by_key(|&value| {
-            let value_index = usize::from(value);
-            (
-                std::cmp::Reverse(counts[value_index]),
-                first_positions[value_index],
-                value,
-            )
-        });
-        values.truncate(AV2_LUMA_PALETTE_MAX_COLORS);
-        values
+        quantized_luma_palette_values(&counts, &first_positions, AV2_LUMA_PALETTE_MAX_COLORS)
     } else {
         collected
     };
@@ -1018,4 +1006,99 @@ fn build_luma_palette_block(
     }
 
     Av2LumaPaletteBlock444 { colors, indices }
+}
+
+fn quantized_luma_palette_values(
+    counts: &[usize; 256],
+    first_positions: &[usize; 256],
+    target_colors: usize,
+) -> Vec<u8> {
+    let values: Vec<u8> = (0u16..=255)
+        .filter(|&value| counts[value as usize] != 0)
+        .map(|value| value as u8)
+        .collect();
+    if values.len() <= target_colors {
+        return values;
+    }
+
+    let n = values.len();
+    // Minimize weighted absolute luma prediction error over sorted value
+    // buckets. Residual coefficients still make reconstruction lossless.
+    let mut segment_cost = vec![vec![0usize; n]; n];
+    let mut segment_value = vec![vec![0u8; n]; n];
+    for start in 0..n {
+        for end in start..n {
+            let total_count: usize = values[start..=end]
+                .iter()
+                .map(|&value| counts[usize::from(value)])
+                .sum();
+            let median_threshold = total_count.div_ceil(2);
+            let mut cumulative = 0usize;
+            let mut median = values[start];
+            for &value in &values[start..=end] {
+                cumulative += counts[usize::from(value)];
+                if cumulative >= median_threshold {
+                    median = value;
+                    break;
+                }
+            }
+            segment_value[start][end] = median;
+            segment_cost[start][end] = values[start..=end]
+                .iter()
+                .map(|&value| usize::from(value.abs_diff(median)) * counts[usize::from(value)])
+                .sum();
+        }
+    }
+
+    let mut dp = vec![vec![usize::MAX; n + 1]; target_colors + 1];
+    let mut split = vec![vec![0usize; n + 1]; target_colors + 1];
+    dp[0][0] = 0;
+    for colors in 1..=target_colors {
+        for end in colors..=n {
+            for start in (colors - 1)..end {
+                let Some(cost) = dp[colors - 1][start].checked_add(segment_cost[start][end - 1])
+                else {
+                    continue;
+                };
+                if cost < dp[colors][end] {
+                    dp[colors][end] = cost;
+                    split[colors][end] = start;
+                }
+            }
+        }
+    }
+
+    let mut colors = Vec::with_capacity(target_colors);
+    let mut end = n;
+    for color_count in (1..=target_colors).rev() {
+        let start = split[color_count][end];
+        colors.push(segment_value[start][end - 1]);
+        end = start;
+    }
+    colors.reverse();
+    colors.sort_unstable();
+    colors.dedup();
+
+    if colors.len() < target_colors {
+        let mut frequent: Vec<u8> = values;
+        frequent.sort_by_key(|&value| {
+            let value_index = usize::from(value);
+            (
+                Reverse(counts[value_index]),
+                first_positions[value_index],
+                value,
+            )
+        });
+        for value in frequent {
+            if colors.len() == target_colors {
+                break;
+            }
+            if !colors.contains(&value) {
+                colors.push(value);
+            }
+        }
+        colors.sort_unstable();
+    }
+
+    colors
 }
