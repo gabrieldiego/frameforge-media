@@ -356,12 +356,11 @@ fn visit_local_ibc_block(
         stats.left_hash_matches_blocked_by_fixed_drl_guard += 1;
     }
 
-    // AV2 v1.0.0 av2_is_dv_in_local_range()/setup_ref_mv_list(): a selected
-    // IntraBC DRL index is only correct when the encoder mirrors AVM's
-    // decoded-BV and pseudo-coded availability state. The current fixed-8x8
-    // subset keeps direct above/left copies whose local BVP stack matches the
-    // adjacent repeated block. Non-adjacent explicit DVs remain disabled until
-    // their differential syntax and local range state are modeled as tightly.
+    // AV2 v1.0.0 av2_is_dv_in_local_range()/setup_ref_mv_list(): direct copies
+    // are cheapest when the local BVP stack already contains the adjacent
+    // vector. Explicit-DV copies can reference any already-coded 8x8 block in
+    // the same local tile as long as the source is outside the uncoded
+    // bottom-right overlap region.
     let above_match = default_above_bvp_supported && above_in_same_tile && direct_above_match;
     let left_match = default_left_bvp_supported && left_in_same_tile && direct_left_match;
     let direct_candidate = match (above_match, left_match) {
@@ -384,10 +383,11 @@ fn visit_local_ibc_block(
         )),
         (false, false) => None,
     };
-    let explicit_candidate = find_same_axis_explicit_candidate(
+    let explicit_candidate = find_local_explicit_candidate(
         blocks,
         coded_blocks,
         blocks_wide,
+        blocks_high,
         block_x,
         block_y,
         hash,
@@ -412,10 +412,11 @@ fn visit_local_ibc_block(
     coded_blocks[block_index] = true;
 }
 
-fn find_same_axis_explicit_candidate(
+fn find_local_explicit_candidate(
     blocks: &[Av2LocalIbcBlock444],
     coded_blocks: &[bool],
     blocks_wide: usize,
+    blocks_high: usize,
     block_x: usize,
     block_y: usize,
     hash: u32,
@@ -424,44 +425,36 @@ fn find_same_axis_explicit_candidate(
     let tile_blocks = AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE;
     let tile_block_x0 = (block_x / tile_blocks) * tile_blocks;
     let tile_block_y0 = (block_y / tile_blocks) * tile_blocks;
+    let tile_block_x1 = (tile_block_x0 + tile_blocks).min(blocks_wide);
+    let tile_block_y1 = (tile_block_y0 + tile_blocks).min(blocks_high);
     let mut best: Option<(Av2LocalIbcCopy, Av2LocalIbcVector, u32)> = None;
 
-    if block_x < tile_block_x0 + 2 {
-        // Immediate-left copies are handled by direct DRL mode; only use
-        // explicit-DV for non-adjacent references on the same row.
-    } else {
-        for ref_block_x in (tile_block_x0..block_x - 1).rev() {
-            let ref_index = block_y * blocks_wide + ref_block_x;
-            if !coded_blocks[ref_index] || blocks[ref_index].hash != hash {
-                continue;
-            }
-            let vector = Av2LocalIbcVector {
-                row_px: 0,
-                col_px: ((ref_block_x as isize - block_x as isize)
-                    * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
-            };
-            update_best_explicit_candidate(&mut best, bvp_stack, vector);
-            break;
-        }
-    }
-
-    if block_y >= tile_block_y0 + 2 {
-        for ref_block_y in (tile_block_y0..block_y - 1).rev() {
-            let ref_index = ref_block_y * blocks_wide + block_x;
+    for ref_block_y in tile_block_y0..tile_block_y1 {
+        for ref_block_x in tile_block_x0..tile_block_x1 {
+            let ref_index = ref_block_y * blocks_wide + ref_block_x;
             if !coded_blocks[ref_index] || blocks[ref_index].hash != hash {
                 continue;
             }
             let vector = Av2LocalIbcVector {
                 row_px: ((ref_block_y as isize - block_y as isize)
                     * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
-                col_px: 0,
+                col_px: ((ref_block_x as isize - block_x as isize)
+                    * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
             };
+            if !local_ibc_vector_is_valid_8x8(vector) {
+                continue;
+            }
             update_best_explicit_candidate(&mut best, bvp_stack, vector);
-            break;
         }
     }
 
     best.map(|(copy, vector, _)| (copy, vector))
+}
+
+fn local_ibc_vector_is_valid_8x8(vector: Av2LocalIbcVector) -> bool {
+    let width = AV2_IBC_HASH_BLOCK_SIZE as i16;
+    let height = AV2_IBC_HASH_BLOCK_SIZE as i16;
+    vector.col_px + width <= 0 || vector.row_px + height <= 0
 }
 
 fn update_best_explicit_candidate(
@@ -479,11 +472,12 @@ fn update_best_explicit_candidate(
         ref_row: ref_vector.row_px,
         ref_col: ref_vector.col_px,
     });
+    let score = distance * 8 + u32::from(drl_idx);
     if best
         .as_ref()
-        .is_none_or(|(_, _, best_distance)| distance < *best_distance)
+        .is_none_or(|(_, _, best_score)| score < *best_score)
     {
-        *best = Some((copy, vector, distance));
+        *best = Some((copy, vector, score));
     }
 }
 
