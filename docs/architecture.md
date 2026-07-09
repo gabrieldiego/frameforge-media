@@ -48,8 +48,9 @@ Initial command families:
 Raw video metadata should use the compact `WxH:pixfmt` form, for example
 `--video 1920x1080:yuv444p`, when it cannot be inferred from the raw input
 filename or needs to be overridden. File names imply metadata with
-`*_<WxH>[_<fps>][_<frames>f]_<pixfmt>.yuv`, for example
-`clip_1920x1080_30_1f_yuv444p8.yuv`.
+`*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
+`clip_1920x1080_30_1f_yuv444p8.yuv`. If a `.yuv` filename has dimensions but
+no pixel-format token, the CLI assumes `yuv420p8`.
 
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.

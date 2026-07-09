@@ -200,10 +200,11 @@ impl Av2EntropyWriter {
             }
         }
 
+        #[cfg(debug_assertions)]
+        let max_pending_words = self.precarry.max_pending_words;
         let out = self.precarry.finish();
         #[cfg(debug_assertions)]
         {
-            let max_pending_words = self.precarry.max_pending_words;
             let reverse = finalize_precarry_reverse(&self.reverse_precarry);
             debug_assert_eq!(
                 out, reverse,

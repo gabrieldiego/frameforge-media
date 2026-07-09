@@ -122,11 +122,12 @@ when a feature really needs them.
 
 Raw video metadata uses a compact `WxH:pixfmt` spelling when it cannot be
 inferred from the input filename or needs to be overridden. File names imply
-metadata with `*_<WxH>[_<fps>][_<frames>f]_<pixfmt>.yuv`, for example
+metadata with `*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
 `input_640x360_30_1f_yuv444p8.yuv`. Short 8-bit aliases such as `yuv444p` and
 `yuv420p` are accepted and normalized to `yuv444p8` and `yuv420p8` internally.
-Encode endpoints must name the codec and output path together, such as
-`--encode av2:output.obu`.
+If a `.yuv` filename has dimensions but no pixel-format token, the CLI assumes
+`yuv420p8`. Encode endpoints must name the codec and output path together, such
+as `--encode av2:output.obu`.
 
 ## Repository Layout
 

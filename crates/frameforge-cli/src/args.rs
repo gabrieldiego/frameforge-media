@@ -72,7 +72,7 @@ pub const INPUT_OPTIONS: &[HelpRow] = &[
     },
     HelpRow {
         syntax: "filename metadata",
-        summary: "Names imply metadata with *_<WxH>[_<fps>][_<frames>f]_<pixfmt>.yuv",
+        summary: "Names imply metadata with *_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv; bare .yuv defaults to yuv420p8",
     },
     HelpRow {
         syntax: "--video <WxH:fmt>",
@@ -439,6 +439,9 @@ fn find_pixel_format(text: &str) -> Result<Option<String>, String> {
             return Ok(Some(normalize_pixel_format(token)?));
         }
     }
+    if text.ends_with(".yuv") {
+        return Ok(Some("yuv420p8".to_string()));
+    }
     Ok(None)
 }
 
@@ -686,10 +689,28 @@ mod tests {
             Some(VideoSpec {
                 width: 416,
                 height: 240,
-                pixel_format: None
+                pixel_format: Some("yuv420p8".to_string())
             })
         );
         assert_eq!(args.fps.as_deref(), Some("30"));
+    }
+
+    #[test]
+    fn defaults_bare_yuv_filename_to_yuv420p8() {
+        let command =
+            parse_words(&["ff", "encode", "clip_64x32.yuv", "--encode", "av2:out.obu"]).unwrap();
+
+        let Command::Encode(args) = command else {
+            panic!("expected encode command");
+        };
+        assert_eq!(
+            args.video,
+            Some(VideoSpec {
+                width: 64,
+                height: 32,
+                pixel_format: Some("yuv420p8".to_string())
+            })
+        );
     }
 
     #[test]
@@ -843,7 +864,7 @@ mod tests {
         for expected in [
             "ff encode <input>",
             "filename metadata",
-            "*_<WxH>[_<fps>][_<frames>f]_<pixfmt>.yuv",
+            "*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv",
             "--encode <codec:path>",
             "--video <WxH:fmt>",
             "--fps <rate>",
