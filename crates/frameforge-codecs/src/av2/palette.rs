@@ -32,6 +32,8 @@ pub(crate) enum Av2ChromaIntraMode {
     Dc,
     Vertical,
     Horizontal,
+    Directional45,
+    Directional135,
     Smooth,
     SmoothVertical,
     SmoothHorizontal,
@@ -41,6 +43,13 @@ pub(crate) enum Av2ChromaIntraMode {
 impl Av2ChromaIntraMode {
     pub(crate) fn is_horizontal(self) -> bool {
         matches!(self, Self::Horizontal)
+    }
+
+    fn is_smooth(self) -> bool {
+        matches!(
+            self,
+            Self::Smooth | Self::SmoothVertical | Self::SmoothHorizontal
+        )
     }
 }
 
@@ -129,10 +138,13 @@ impl Av2LumaPalette444 {
         let mut intra_dc_score = 0usize;
         let mut intra_horz_score = 0usize;
         let mut intra_vert_score = 0usize;
+        let mut intra_d45_score = 0usize;
+        let mut intra_d135_score = 0usize;
         let mut intra_smooth_score = 0usize;
         let mut intra_smooth_v_score = 0usize;
         let mut intra_smooth_h_score = 0usize;
         let mut intra_paeth_score = 0usize;
+        let directional_allowed = self.chroma_directional_modes_are_unfiltered(x0, y0);
         for plane in [&self.u_plane, &self.v_plane] {
             for txb_y in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
                 for txb_x in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
@@ -172,6 +184,30 @@ impl Av2LumaPalette444 {
                         AV2_LUMA_PALETTE_BLOCK_SIZE,
                         Av2ChromaIntraMode::Vertical,
                     );
+                    let intra_d45_residual = directional_allowed.then(|| {
+                        self.chroma_intra_residuals(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            x0,
+                            y0,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            Av2ChromaIntraMode::Directional45,
+                        )
+                    });
+                    let intra_d135_residual = directional_allowed.then(|| {
+                        self.chroma_intra_residuals(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            x0,
+                            y0,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            Av2ChromaIntraMode::Directional135,
+                        )
+                    });
                     let intra_smooth_residual = self.chroma_intra_residuals(
                         plane,
                         txb_x0,
@@ -217,6 +253,12 @@ impl Av2LumaPalette444 {
                     intra_dc_score += chroma_bdpcm_coeff_score(&intra_dc_residual);
                     intra_horz_score += chroma_bdpcm_coeff_score(&intra_horz_residual);
                     intra_vert_score += chroma_bdpcm_coeff_score(&intra_vert_residual);
+                    if let Some(residual) = intra_d45_residual {
+                        intra_d45_score += chroma_bdpcm_coeff_score(&residual);
+                    }
+                    if let Some(residual) = intra_d135_residual {
+                        intra_d135_score += chroma_bdpcm_coeff_score(&residual);
+                    }
                     intra_smooth_score += chroma_bdpcm_coeff_score(&intra_smooth_residual);
                     intra_smooth_v_score += chroma_bdpcm_coeff_score(&intra_smooth_v_residual);
                     intra_smooth_h_score += chroma_bdpcm_coeff_score(&intra_smooth_h_residual);
@@ -230,6 +272,24 @@ impl Av2LumaPalette444 {
             (false, Av2ChromaIntraMode::Dc, intra_dc_score),
             (false, Av2ChromaIntraMode::Horizontal, intra_horz_score),
             (false, Av2ChromaIntraMode::Vertical, intra_vert_score),
+            (
+                false,
+                Av2ChromaIntraMode::Directional45,
+                if directional_allowed {
+                    intra_d45_score
+                } else {
+                    usize::MAX
+                },
+            ),
+            (
+                false,
+                Av2ChromaIntraMode::Directional135,
+                if directional_allowed {
+                    intra_d135_score
+                } else {
+                    usize::MAX
+                },
+            ),
             (false, Av2ChromaIntraMode::Smooth, intra_smooth_score),
             (
                 false,
@@ -404,6 +464,25 @@ impl Av2LumaPalette444 {
                             LOSSLESS_V_PRED_ABOVE_EDGE
                         }
                     }
+                    Av2ChromaIntraMode::Directional45 => {
+                        let above = self.chroma_d45_above_edge(
+                            plane, txb_x0, txb_y0, leaf_x0, leaf_y0, leaf_width,
+                        );
+                        above[local_y + local_x + 1]
+                    }
+                    Av2ChromaIntraMode::Directional135 => {
+                        let edges = self.chroma_d135_edges(plane, txb_x0, txb_y0, tile_x0, tile_y0);
+                        if local_x >= local_y {
+                            let offset = local_x - local_y;
+                            if offset == 0 {
+                                edges.above_left
+                            } else {
+                                edges.above[offset - 1]
+                            }
+                        } else {
+                            edges.left[local_y - local_x - 1]
+                        }
+                    }
                     Av2ChromaIntraMode::Smooth
                     | Av2ChromaIntraMode::SmoothVertical
                     | Av2ChromaIntraMode::SmoothHorizontal => {
@@ -444,6 +523,90 @@ impl Av2LumaPalette444 {
             }
         }
         residual
+    }
+
+    fn chroma_directional_modes_are_unfiltered(&self, x0: usize, y0: usize) -> bool {
+        let tile_x0 = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_y0 = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let above_smooth = (y0 != tile_y0)
+            .then(|| self.chroma_intra_mode_for_block(x0, y0 - AV2_LUMA_PALETTE_BLOCK_SIZE))
+            .is_some_and(Av2ChromaIntraMode::is_smooth);
+        let left_smooth = (x0 != tile_x0)
+            .then(|| self.chroma_intra_mode_for_block(x0 - AV2_LUMA_PALETTE_BLOCK_SIZE, y0))
+            .is_some_and(Av2ChromaIntraMode::is_smooth);
+        !above_smooth && !left_smooth
+    }
+
+    fn chroma_d45_above_edge(
+        &self,
+        plane: &[u8],
+        txb_x0: usize,
+        txb_y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+    ) -> [u8; 8] {
+        let tile_x0 = (txb_x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_y0 = (txb_y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_right = (tile_x0 + AV2_LUMA_INTRA_TILE_SIZE).min(self.width);
+        let have_top = txb_y0 > tile_y0;
+        let have_left = txb_x0 > tile_x0;
+        let mut above = [LOSSLESS_DC_PREDICTOR; 8];
+        if have_top {
+            for index in 0..above.len() {
+                let x = txb_x0 + index;
+                if x < leaf_x0 + leaf_width || (txb_y0 == leaf_y0 && x < tile_right) {
+                    above[index] = self.chroma_sample(plane, x, txb_y0 - 1);
+                } else if index > 0 {
+                    above[index] = above[index - 1];
+                }
+            }
+        } else if have_left {
+            above.fill(self.chroma_sample(plane, txb_x0 - 1, txb_y0));
+        }
+        above
+    }
+
+    fn chroma_d135_edges(
+        &self,
+        plane: &[u8],
+        txb_x0: usize,
+        txb_y0: usize,
+        tile_x0: usize,
+        tile_y0: usize,
+    ) -> ChromaD135Edges {
+        let have_top = txb_y0 > tile_y0;
+        let have_left = txb_x0 > tile_x0;
+        let mut above = [LOSSLESS_DC_PREDICTOR; 4];
+        let mut left = [LOSSLESS_DC_PREDICTOR; 4];
+        if have_top {
+            for local_x in 0..4 {
+                above[local_x] = self.chroma_sample(plane, txb_x0 + local_x, txb_y0 - 1);
+            }
+        } else if have_left {
+            above.fill(self.chroma_sample(plane, txb_x0 - 1, txb_y0));
+        }
+        if have_left {
+            for local_y in 0..4 {
+                left[local_y] = self.chroma_sample(plane, txb_x0 - 1, txb_y0 + local_y);
+            }
+        } else if have_top {
+            left.fill(self.chroma_sample(plane, txb_x0, txb_y0 - 1));
+        }
+        let above_left = if have_top && have_left {
+            self.chroma_sample(plane, txb_x0 - 1, txb_y0 - 1)
+        } else if have_top {
+            above[0]
+        } else if have_left {
+            left[0]
+        } else {
+            LOSSLESS_DC_PREDICTOR
+        };
+        ChromaD135Edges {
+            above_left,
+            above,
+            left,
+        }
     }
 
     fn chroma_smooth_edges(
@@ -560,6 +723,13 @@ fn paeth_predictor(left: u8, above: u8, above_left: u8) -> u8 {
     } else {
         above_left as u8
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChromaD135Edges {
+    above_left: u8,
+    above: [u8; 4],
+    left: [u8; 4],
 }
 
 pub(crate) fn av2_highbd_smooth_intra_predictor(

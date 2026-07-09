@@ -2933,7 +2933,10 @@ fn write_intra_chroma_mode(
         DEFAULT_UV_MODE_CTX0_CDF
     };
     let (name, index) = chroma_uv_mode_symbol(luma_mode, chroma_intra_mode);
-    writer.write_symbol(name, index, &mut uv_mode_cdf, 8, false);
+    writer.write_symbol(name, index.min(7), &mut uv_mode_cdf, 8, false);
+    if index >= 7 {
+        writer.write_literal("tile.intra.uv_mode_idx_ext", (index - 7) as u32, 3);
+    }
 }
 
 fn luma_mode_is_directional(mode: Av2LumaIntraMode) -> bool {
@@ -2951,6 +2954,8 @@ fn chroma_uv_mode_symbol(
         Av2ChromaIntraMode::Dc => "tile.intra.uv_mode_idx_dc",
         Av2ChromaIntraMode::Vertical => "tile.intra.uv_mode_idx_v",
         Av2ChromaIntraMode::Horizontal => "tile.intra.uv_mode_idx_h",
+        Av2ChromaIntraMode::Directional45 => "tile.intra.uv_mode_idx_d45",
+        Av2ChromaIntraMode::Directional135 => "tile.intra.uv_mode_idx_d135",
         Av2ChromaIntraMode::Smooth => "tile.intra.uv_mode_idx_smooth",
         Av2ChromaIntraMode::SmoothVertical => "tile.intra.uv_mode_idx_smooth_v",
         Av2ChromaIntraMode::SmoothHorizontal => "tile.intra.uv_mode_idx_smooth_h",
@@ -2999,6 +3004,8 @@ fn chroma_uv_mode_id(mode: Av2ChromaIntraMode) -> usize {
         Av2ChromaIntraMode::Dc => 0,
         Av2ChromaIntraMode::Vertical => 1,
         Av2ChromaIntraMode::Horizontal => 2,
+        Av2ChromaIntraMode::Directional45 => 3,
+        Av2ChromaIntraMode::Directional135 => 4,
         Av2ChromaIntraMode::Smooth => 9,
         Av2ChromaIntraMode::SmoothVertical => 10,
         Av2ChromaIntraMode::SmoothHorizontal => 11,
@@ -4302,6 +4309,35 @@ fn chroma_intra_tx4x4_coefficients(
                         127
                     }
                 }
+                Av2ChromaIntraMode::Directional45 => {
+                    let above = chroma_d45_above_edge(
+                        palette,
+                        plane,
+                        x0,
+                        y0,
+                        tile_origin_x,
+                        tile_origin_y,
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_width,
+                        coded_mi_context,
+                    );
+                    above[local_y + local_x + 1]
+                }
+                Av2ChromaIntraMode::Directional135 => {
+                    let edges =
+                        chroma_d135_edges(palette, plane, x0, y0, tile_origin_x, tile_origin_y);
+                    if local_x >= local_y {
+                        let offset = local_x - local_y;
+                        if offset == 0 {
+                            edges.above_left
+                        } else {
+                            edges.above[offset - 1]
+                        }
+                    } else {
+                        edges.left[local_y - local_x - 1]
+                    }
+                }
                 Av2ChromaIntraMode::Smooth
                 | Av2ChromaIntraMode::SmoothVertical
                 | Av2ChromaIntraMode::SmoothHorizontal => {
@@ -4344,6 +4380,92 @@ fn chroma_intra_tx4x4_coefficients(
     }
 
     av2_fwht4x4(&residual)
+}
+
+fn chroma_d45_above_edge(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    txb_x0: usize,
+    txb_y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_width: usize,
+    coded_mi_context: &Av2CodedMiContext,
+) -> [u8; 8] {
+    let tile_right = (tile_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
+    let have_top = txb_y0 > tile_origin_y;
+    let have_left = txb_x0 > tile_origin_x;
+    let mut above = [LOSSLESS_DC_PREDICTOR; 8];
+    if have_top {
+        for index in 0..above.len() {
+            let x = txb_x0 + index;
+            let external_top_right_coded = txb_y0 == leaf_y0
+                && x < tile_right
+                && coded_mi_context.is_coded(
+                    (txb_y0 - 1 - tile_origin_y) / MI_SIZE,
+                    (x - tile_origin_x) / MI_SIZE,
+                );
+            if x < leaf_x0 + leaf_width || external_top_right_coded {
+                above[index] = chroma_sample(palette, plane, x, txb_y0 - 1);
+            } else if index > 0 {
+                above[index] = above[index - 1];
+            }
+        }
+    } else if have_left {
+        above.fill(chroma_sample(palette, plane, txb_x0 - 1, txb_y0));
+    }
+    above
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChromaD135Edges {
+    above_left: u8,
+    above: [u8; 4],
+    left: [u8; 4],
+}
+
+fn chroma_d135_edges(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    txb_x0: usize,
+    txb_y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+) -> ChromaD135Edges {
+    let have_top = txb_y0 > tile_origin_y;
+    let have_left = txb_x0 > tile_origin_x;
+    let mut above = [LOSSLESS_DC_PREDICTOR; 4];
+    let mut left = [LOSSLESS_DC_PREDICTOR; 4];
+    if have_top {
+        for local_x in 0..4 {
+            above[local_x] = chroma_sample(palette, plane, txb_x0 + local_x, txb_y0 - 1);
+        }
+    } else if have_left {
+        above.fill(chroma_sample(palette, plane, txb_x0 - 1, txb_y0));
+    }
+    if have_left {
+        for local_y in 0..4 {
+            left[local_y] = chroma_sample(palette, plane, txb_x0 - 1, txb_y0 + local_y);
+        }
+    } else if have_top {
+        left.fill(chroma_sample(palette, plane, txb_x0, txb_y0 - 1));
+    }
+    let above_left = if have_top && have_left {
+        chroma_sample(palette, plane, txb_x0 - 1, txb_y0 - 1)
+    } else if have_top {
+        above[0]
+    } else if have_left {
+        left[0]
+    } else {
+        LOSSLESS_DC_PREDICTOR
+    };
+    ChromaD135Edges {
+        above_left,
+        above,
+        left,
+    }
 }
 
 fn chroma_above_left_predictor(
