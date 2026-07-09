@@ -10,7 +10,7 @@ pub mod packet;
 pub mod pipeline;
 
 pub use error::{MediaError, Result};
-pub use frame::{Frame, FrameInfo, PixelFormat};
+pub use frame::{ChromaSampling, Frame, FrameInfo, PixelFormat, SampleBitDepth};
 pub use packet::{Packet, StreamId, Timestamp};
 pub use pipeline::{Decoder, Encoder, Filter, Sink, Source};
 

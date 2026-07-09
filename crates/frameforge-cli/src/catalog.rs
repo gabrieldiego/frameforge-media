@@ -97,7 +97,7 @@ pub const CODECS: &[StageInfo] = &[
         kind: StageKind::Codec,
         feature: "codec-av2",
         compiled: cfg!(feature = "codec-av2"),
-        summary: "AV2 encoder scaffold",
+        summary: "imported experimental AV2 encoder model",
         settings: CODEC_SETTINGS,
     },
     StageInfo {
@@ -105,7 +105,7 @@ pub const CODECS: &[StageInfo] = &[
         kind: StageKind::Codec,
         feature: "codec-vvc",
         compiled: cfg!(feature = "codec-vvc"),
-        summary: "VVC/H.266 encoder scaffold",
+        summary: "imported experimental VVC/H.266 encoder model",
         settings: CODEC_SETTINGS,
     },
 ];

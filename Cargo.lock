@@ -6,6 +6,14 @@ version = 4
 name = "frameforge-cli"
 version = "0.1.0"
 dependencies = [
+ "frameforge-codecs",
+ "frameforge-core",
+]
+
+[[package]]
+name = "frameforge-codecs"
+version = "0.1.0"
+dependencies = [
  "frameforge-core",
 ]
 

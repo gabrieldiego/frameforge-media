@@ -15,8 +15,8 @@ to optimize for software APIs, usability, codec quality, and safe Rust
 performance.
 
 This repository is in bootstrap state. It currently provides project structure,
-shared media primitives, a placeholder CLI, and development workflow targets.
-It does not yet provide a functional AV2 or VVC encoder.
+shared media primitives, a CLI, and imported experimental AV2/VVC software
+models from the FrameForge hardware workspace.
 
 ## Goals
 
@@ -60,7 +60,7 @@ For a debug build, use:
 make debug
 ```
 
-Run the placeholder CLI:
+Run the CLI:
 
 ```sh
 make run ARGS="--help"
@@ -84,17 +84,19 @@ Codec and filter availability should be selected at build time. The intended
 shape is to use Cargo features or separate crates for optional media stages so a
 binary can include only the codecs and filters it needs.
 
-Example future shape:
+Example with both imported codec models enabled:
 
 ```sh
 make build CARGO_FEATURES="codec-av2 codec-vvc filter-scale"
 ```
 
-No optional codec or filter features are implemented yet.
+The `codec-av2` and `codec-vvc` features enable the imported experimental
+software models. Filter features are discovery placeholders for now; parsed
+filters are not executed yet.
 
 ## CLI Shape
 
-The CLI entry point is `ff`. The initial interface is scaffolded around stage
+The CLI entry point is `ff`. The initial interface is centered on stage
 discovery and a single encode action:
 
 ```sh
@@ -106,10 +108,10 @@ ff encode input_640x360_30_1f_yuv444p8.yuv \
   --filter identity --encode av2:output.obu
 ```
 
-The commands currently validate command-line structure and report stage
-availability, but codec/filter execution is not implemented yet. Build-time
-features such as `codec-av2`, `codec-vvc`, `filter-identity`, `filter-crop`,
-and `filter-scale` are placeholders for future stage crates or modules.
+The commands validate command-line structure and report stage availability.
+When built with `codec-av2` or `codec-vvc`, `ff encode` can encode raw YUV
+inputs through the imported software model for that codec. Filters are still
+parsed for the future pipeline shape but are not executed yet.
 
 Input options, such as `--video`, `--fps`, and `--frames`, belong after the
 input path. Filter options come next. Output/encoder options, such as
@@ -131,6 +133,7 @@ Encode endpoints must name the codec and output path together, such as
 ```text
 crates/
   frameforge-core/  Shared frame, packet, error, and pipeline primitives.
+  frameforge-codecs/  Imported experimental AV2/VVC software models.
   frameforge-cli/   Command-line entry point, installed as `ff`.
 docs/                     Architecture and validation notes.
 tests/                    Future integration tests and fixtures.

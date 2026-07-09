@@ -1,0 +1,18 @@
+[package]
+name = "frameforge-codecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Experimental codec models for FrameForge."
+
+[dependencies]
+frameforge-core = { path = "../frameforge-core" }
+
+[features]
+default = []
+av2 = []
+vvc = []
+
+[lints]
+workspace = true
