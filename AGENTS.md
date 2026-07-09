@@ -152,8 +152,9 @@ exist yet.
 ## Agent Workflow
 
 - Read this file before making changes.
-- Read the relevant instructions and notes under `docs/*.md` before changing
-  code or project structure.
+- Read `README.md`, `docs/architecture.md`, and `docs/validation.md` before
+  changing code or project structure. Also read any focused docs relevant to
+  the files being changed.
 - Check `git status --short` before edits.
 - Keep commits small and scoped.
 - Do not copy large chunks from FrameForge without preserving attribution and
@@ -163,3 +164,94 @@ exist yet.
   exists.
 - Keep generated artifacts out of version control unless they are intentionally
   committed fixtures.
+
+## Current Build And CLI Contract
+
+The main developer binary is `./ff`. `make build` should build a release binary
+with all workspace codec/filter features by default, then copy it to the repo
+root as `./ff`. Use `make debug` for debug artifacts.
+
+The current primary command shape is:
+
+```sh
+./ff encode [<input.yuv>] [input-options] [--filter <spec>] \
+  --encode <codec:output> [output-options]
+```
+
+Important current CLI behavior:
+
+- `--encode` must name the codec and output path together, e.g.
+  `--encode av2:out.obu`.
+- `--recon <path>` writes the encoder's internal reconstructed raw frame
+  stream and is used by validation.
+- Raw YUV dimensions, frame rate, frame count, and pixel format may be inferred
+  from filenames such as `clip_640x360_30_10f_yuv444p8.yuv`.
+- If a bare `.yuv` filename has dimensions but no pixel format suffix, the
+  current default is `yuv420p8`.
+- File inputs may omit `--frames`; encoding stops at EOF. Source filters do not
+  have EOF and must specify a frame count.
+- `--set lossless` is a global boolean setting. Keep new settings global unless
+  there is a clear codec-specific reason.
+
+Compressed input decode is not implemented yet. Avoid designing CLI flows that
+pretend compressed decode exists until a real decoder stage is present.
+
+## Reference Tools
+
+External reference tools are declared by manifests under:
+
+```text
+verification/reference_codecs/
+```
+
+Local reference source and build trees live under `verification/references/`
+and must remain uncommitted. Use:
+
+```sh
+make reference-list
+make reference-setup
+make reference-setup REFERENCE_CODEC=av2
+make reference-setup REFERENCE_CODEC=vvc
+```
+
+The validation runner uses reference decoders only for decode-side validation:
+FrameForge encodes the stream, the reference decoder decodes it, and the
+reference reconstruction must match the internal reconstruction checksum. Do not
+use AVM/VTM reference encoders as bitrate baselines in the normal validation
+path.
+
+`VALIDATION_REFERENCE_MODE` controls reference handling:
+
+- `auto`: use a reference decoder if it is already available, otherwise report
+  a skip.
+- `required`: fail if the reference decoder is missing or reconstruction
+  checksums differ.
+- `off`: skip reference decoding.
+
+Prefer `required` when validating a release or claiming reference compatibility.
+
+## Useful Commands
+
+Common local quality gates:
+
+```sh
+make check-tools
+make release-check
+make test
+make build
+```
+
+Validation examples:
+
+```sh
+make test-vectors TEST_VECTOR_SET=smoke
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+```
+
+For source-filter-generated vectors, add:
+
+```sh
+VALIDATION_SOURCE_FILTERS=1
+```
