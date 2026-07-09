@@ -965,17 +965,11 @@ fn build_luma_palette_block(
         collected.push(0);
     }
 
-    let target_colors = if collected.len() <= 2 {
-        2
-    } else if collected.len() <= 4 {
-        4
-    } else {
-        AV2_LUMA_PALETTE_MAX_COLORS
-    };
+    let unique_colors = counts.iter().filter(|&&count| count != 0).count();
+    let target_colors =
+        unique_colors.clamp(AV2_LUMA_PALETTE_MIN_COLORS, AV2_LUMA_PALETTE_MAX_COLORS);
 
-    let mut colors = if collected.len() == AV2_LUMA_PALETTE_MAX_COLORS
-        && counts.iter().filter(|&&count| count != 0).count() > AV2_LUMA_PALETTE_MAX_COLORS
-    {
+    let mut colors = if unique_colors > AV2_LUMA_PALETTE_MAX_COLORS {
         quantized_luma_palette_values(&counts, &first_positions, AV2_LUMA_PALETTE_MAX_COLORS)
     } else {
         collected
