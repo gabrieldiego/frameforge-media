@@ -8,11 +8,25 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - only needed for PNG-backed local manifests.
+    Image = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SET_DIR = REPO_ROOT / "verification" / "test_vector_sets"
 DEFAULT_OUT_DIR = REPO_ROOT / "verification" / "generated" / "test_vectors"
 LOCAL_SET_DIR = "local"
+
+
+@dataclass(frozen=True)
+class TestVectorSource:
+    id: str
+    path: Path
+    width: int
+    height: int
+    fmt: str
 
 
 @dataclass(frozen=True)
@@ -25,6 +39,9 @@ class TestVector:
     pattern: str
     fps: int | None
     source_path: Path | None
+    source: str | None
+    crop_x: int | None
+    crop_y: int | None
 
     @property
     def filename(self) -> str:
@@ -38,6 +55,7 @@ class TestVectorSet:
     manifest: Path
     description: str
     vectors: list[TestVector]
+    sources: dict[str, TestVectorSource]
 
 
 def main() -> int:
@@ -66,11 +84,12 @@ def generate_vectors(set_name: str, out_dir: Path, set_dir: Path = DEFAULT_SET_D
         choices = ", ".join(sorted(sets)) or "<none>"
         raise ValueError(f"unknown test vector set '{set_name}'; choices: {choices}")
 
+    vector_set = sets[set_name]
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
-    for vector in sets[set_name].vectors:
+    for vector in vector_set.vectors:
         path = out_dir / vector.filename
-        path.write_bytes(generate_yuv(vector))
+        path.write_bytes(generate_yuv(vector, vector_set.sources))
         paths.append(path)
     return paths
 
@@ -91,6 +110,7 @@ def vector_sets(set_dir: Path = DEFAULT_SET_DIR) -> dict[str, TestVectorSet]:
 
 def load_vector_set(path: Path) -> TestVectorSet:
     description = ""
+    sources: dict[str, TestVectorSource] = {}
     rows: list[str] = []
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()
@@ -100,6 +120,9 @@ def load_vector_set(path: Path) -> TestVectorSet:
             body = line[1:].strip()
             if body.startswith("description="):
                 description = body.removeprefix("description=").strip()
+            elif body.startswith("source="):
+                source = parse_source(body.removeprefix("source="))
+                sources[source.id] = source
             continue
         rows.append(raw_line)
 
@@ -116,7 +139,29 @@ def load_vector_set(path: Path) -> TestVectorSet:
         manifest=path,
         description=description,
         vectors=vectors,
+        sources=sources,
     )
+
+
+def parse_source(value: str) -> TestVectorSource:
+    fields = parse_key_value_fields(value)
+    return TestVectorSource(
+        id=required_field(fields, "id", "source"),
+        path=Path(required_field(fields, "path", "source")),
+        width=parse_positive_int(required_field(fields, "width", "source"), "source width"),
+        height=parse_positive_int(required_field(fields, "height", "source"), "source height"),
+        fmt=required_field(fields, "format", "source"),
+    )
+
+
+def parse_key_value_fields(value: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for field in next(csv.reader([value], skipinitialspace=True)):
+        key, sep, item = field.partition("=")
+        if not sep:
+            raise ValueError(f"expected key=value source field, got '{field}'")
+        out[key.strip()] = item.strip()
+    return out
 
 
 def parse_vector(row: dict[str, str], path: Path) -> TestVector:
@@ -130,6 +175,9 @@ def parse_vector(row: dict[str, str], path: Path) -> TestVector:
         pattern=required_field(row, "pattern", context),
         fps=parse_optional_int(row.get("fps", ""), "fps"),
         source_path=parse_optional_path(row.get("path", "")),
+        source=optional_field(row.get("source", "")),
+        crop_x=parse_optional_non_negative_int(row.get("crop_x", ""), "crop_x"),
+        crop_y=parse_optional_non_negative_int(row.get("crop_y", ""), "crop_y"),
     )
 
 
@@ -138,6 +186,13 @@ def required_field(row: dict[str, str], key: str, context: str) -> str:
     if not value:
         raise ValueError(f"missing {key} in {context}")
     return value
+
+
+def optional_field(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def parse_positive_int(value: str, field: str) -> int:
@@ -151,25 +206,42 @@ def parse_positive_int(value: str, field: str) -> int:
 
 
 def parse_optional_int(value: str | None, field: str) -> int | None:
-    if value is None or not value.strip():
+    stripped = optional_field(value)
+    if stripped is None:
         return None
     try:
-        parsed = int(value)
+        parsed = int(stripped)
     except ValueError as err:
-        raise ValueError(f"{field} expects an integer, got '{value}'") from err
+        raise ValueError(f"{field} expects an integer, got '{stripped}'") from err
     if parsed <= 0:
         raise ValueError(f"{field} expects a positive integer, got {parsed}")
     return parsed
 
 
-def parse_optional_path(value: str | None) -> Path | None:
-    if value is None or not value.strip():
+def parse_optional_non_negative_int(value: str | None, field: str) -> int | None:
+    stripped = optional_field(value)
+    if stripped is None:
         return None
-    return Path(value.strip())
+    try:
+        parsed = int(stripped)
+    except ValueError as err:
+        raise ValueError(f"{field} expects an integer, got '{stripped}'") from err
+    if parsed < 0:
+        raise ValueError(f"{field} expects a non-negative integer, got {parsed}")
+    return parsed
 
 
-def generate_yuv(vector: TestVector) -> bytes:
+def parse_optional_path(value: str | None) -> Path | None:
+    stripped = optional_field(value)
+    if stripped is None:
+        return None
+    return Path(stripped)
+
+
+def generate_yuv(vector: TestVector, sources: dict[str, TestVectorSource]) -> bytes:
     validate_vector(vector)
+    if vector.pattern == "source_crop":
+        return generate_source_crop(vector, sources)
     if vector.pattern == "source_file":
         return generate_source_file_clip(vector)
     if vector.fmt == "yuv420p8":
@@ -204,6 +276,79 @@ def generate_source_file_clip(vector: TestVector) -> bytes:
             f"{vector.name} source is too short: expected {byte_len} byte(s), got {len(data)}"
         )
     return data
+
+
+def generate_source_crop(vector: TestVector, sources: dict[str, TestVectorSource]) -> bytes:
+    if vector.source is None:
+        raise ValueError(f"{vector.filename} uses source_crop but has no source id")
+    if vector.source not in sources:
+        raise ValueError(f"{vector.filename} references unknown source '{vector.source}'")
+    if vector.crop_x is None or vector.crop_y is None:
+        raise ValueError(f"{vector.filename} uses source_crop but has no crop_x/crop_y")
+    if vector.frames != 1:
+        raise ValueError("source_crop vectors currently use the first frame only")
+
+    source = sources[vector.source]
+    if not source.path.exists():
+        raise ValueError(f"source file is missing for '{source.id}': {source.path}")
+    if vector.crop_x + vector.width > source.width or vector.crop_y + vector.height > source.height:
+        raise ValueError(f"{vector.filename} crop exceeds source dimensions")
+
+    if source.fmt in {"png_rgb8", "png_rgba8"} and vector.fmt == "yuv444p8":
+        return generate_png_yuv444_crop(vector, source)
+    if source.fmt != "yuv420p8" or vector.fmt != "yuv420p8":
+        raise ValueError(
+            "source_crop supports yuv420p8->yuv420p8 and PNG RGB/RGBA->yuv444p8"
+        )
+
+    frame_size = source.width * source.height * 3 // 2
+    source_frame = source.path.read_bytes()[:frame_size]
+    if len(source_frame) != frame_size:
+        raise ValueError(f"{source.id} source is smaller than one {source.width}x{source.height} frame")
+
+    y_size = source.width * source.height
+    uv_size = y_size // 4
+    source_y = source_frame[:y_size]
+    source_u = source_frame[y_size : y_size + uv_size]
+    source_v = source_frame[y_size + uv_size : y_size + (uv_size * 2)]
+
+    out = bytearray()
+    for row in range(vector.height):
+        start = (vector.crop_y + row) * source.width + vector.crop_x
+        out.extend(source_y[start : start + vector.width])
+
+    chroma_width = vector.width // 2
+    chroma_height = vector.height // 2
+    source_chroma_width = source.width // 2
+    crop_chroma_x = vector.crop_x // 2
+    crop_chroma_y = vector.crop_y // 2
+    for plane in (source_u, source_v):
+        for row in range(chroma_height):
+            start = (crop_chroma_y + row) * source_chroma_width + crop_chroma_x
+            out.extend(plane[start : start + chroma_width])
+    return bytes(out)
+
+
+def generate_png_yuv444_crop(vector: TestVector, source: TestVectorSource) -> bytes:
+    if Image is None:
+        raise ValueError("PNG-backed source_crop vectors require Pillow")
+
+    with Image.open(source.path) as image:
+        if image.size != (source.width, source.height):
+            raise ValueError(
+                f"{source.id} declares {source.width}x{source.height}, "
+                f"but PNG is {image.size[0]}x{image.size[1]}"
+            )
+        crop = image.convert("RGB").crop(
+            (
+                vector.crop_x,
+                vector.crop_y,
+                vector.crop_x + vector.width,
+                vector.crop_y + vector.height,
+            )
+        )
+        red_plane, green_plane, blue_plane = crop.split()
+        return green_plane.tobytes() + blue_plane.tobytes() + red_plane.tobytes()
 
 
 def raw_frame_len(vector: TestVector) -> int:
