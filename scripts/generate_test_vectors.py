@@ -12,6 +12,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SET_DIR = REPO_ROOT / "verification" / "test_vector_sets"
 DEFAULT_OUT_DIR = REPO_ROOT / "verification" / "generated" / "test_vectors"
+LOCAL_SET_DIR = "local"
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class TestVector:
     fmt: str
     pattern: str
     fps: int | None
+    source_path: Path | None
 
     @property
     def filename(self) -> str:
@@ -77,7 +79,11 @@ def vector_sets(set_dir: Path = DEFAULT_SET_DIR) -> dict[str, TestVectorSet]:
     sets: dict[str, TestVectorSet] = {}
     if not set_dir.exists():
         return sets
-    for path in sorted(set_dir.glob("*.csv")):
+    paths = sorted(set_dir.glob("*.csv"))
+    local_dir = set_dir / LOCAL_SET_DIR
+    if local_dir.exists():
+        paths.extend(sorted(local_dir.glob("*.csv")))
+    for path in paths:
         loaded = load_vector_set(path)
         sets[loaded.name] = loaded
     return sets
@@ -123,6 +129,7 @@ def parse_vector(row: dict[str, str], path: Path) -> TestVector:
         fmt=required_field(row, "format", context),
         pattern=required_field(row, "pattern", context),
         fps=parse_optional_int(row.get("fps", ""), "fps"),
+        source_path=parse_optional_path(row.get("path", "")),
     )
 
 
@@ -155,8 +162,16 @@ def parse_optional_int(value: str | None, field: str) -> int | None:
     return parsed
 
 
+def parse_optional_path(value: str | None) -> Path | None:
+    if value is None or not value.strip():
+        return None
+    return Path(value.strip())
+
+
 def generate_yuv(vector: TestVector) -> bytes:
     validate_vector(vector)
+    if vector.pattern == "source_file":
+        return generate_source_file_clip(vector)
     if vector.fmt == "yuv420p8":
         return generate_yuv420p8(vector)
     if vector.fmt == "yuv444p8":
@@ -167,10 +182,39 @@ def generate_yuv(vector: TestVector) -> bytes:
 def validate_vector(vector: TestVector) -> None:
     if vector.width <= 0 or vector.height <= 0:
         raise ValueError(f"{vector.name} has invalid geometry {vector.width}x{vector.height}")
-    if vector.fmt == "yuv420p8" and (vector.width % 2 != 0 or vector.height % 2 != 0):
-        raise ValueError(f"{vector.name} yuv420p8 dimensions must be even")
+    if vector.fmt in {"yuv420p8", "yuv420p10le"} and (
+        vector.width % 2 != 0 or vector.height % 2 != 0
+    ):
+        raise ValueError(f"{vector.name} {vector.fmt} dimensions must be even")
     if vector.fmt == "yuv444p8" and (vector.width % 8 != 0 or vector.height % 8 != 0):
         raise ValueError(f"{vector.name} yuv444p8 fixtures use 8-pixel geometry for current codecs")
+
+
+def generate_source_file_clip(vector: TestVector) -> bytes:
+    if vector.source_path is None:
+        raise ValueError(f"{vector.name} uses source_file but has no path")
+    if not vector.source_path.exists():
+        raise ValueError(f"{vector.name} source file does not exist: {vector.source_path}")
+    frame_len = raw_frame_len(vector)
+    byte_len = frame_len * vector.frames
+    with vector.source_path.open("rb") as source:
+        data = source.read(byte_len)
+    if len(data) != byte_len:
+        raise ValueError(
+            f"{vector.name} source is too short: expected {byte_len} byte(s), got {len(data)}"
+        )
+    return data
+
+
+def raw_frame_len(vector: TestVector) -> int:
+    luma = vector.width * vector.height
+    if vector.fmt == "yuv420p8":
+        return luma * 3 // 2
+    if vector.fmt == "yuv420p10le":
+        return luma * 3
+    if vector.fmt == "yuv444p8":
+        return luma * 3
+    raise ValueError(f"unsupported source_file format: {vector.fmt}")
 
 
 def generate_yuv420p8(vector: TestVector) -> bytes:
