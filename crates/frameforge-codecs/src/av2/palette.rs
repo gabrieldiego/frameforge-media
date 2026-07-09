@@ -8,6 +8,9 @@ const AV2_LUMA_INTRA_TILE_SIZE: usize = 64;
 const AV2_LUMA_INTRA_MODE_SWITCH_SAD_MARGIN: usize = 64;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 160;
 const AV2_ENABLE_LUMA_DPCM_444: bool = false;
+const LOSSLESS_DC_PREDICTOR: u8 = 128;
+const LOSSLESS_H_PRED_LEFT_EDGE: u8 = 129;
+const LOSSLESS_V_PRED_ABOVE_EDGE: u8 = 127;
 const AV2_LUMA_JOINT_MODE_V: usize = 22;
 const AV2_LUMA_JOINT_MODE_H: usize = 50;
 const AV2_LUMA_PALETTE_BLOCK_SAMPLES: usize =
@@ -18,6 +21,20 @@ pub(crate) enum Av2LumaIntraMode {
     Dc,
     Vertical,
     Horizontal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Av2ChromaIntraMode {
+    Dc,
+    Vertical,
+    Horizontal,
+    Paeth,
+}
+
+impl Av2ChromaIntraMode {
+    pub(crate) fn is_horizontal(self) -> bool {
+        matches!(self, Self::Horizontal)
+    }
 }
 
 impl Av2LumaIntraMode {
@@ -60,10 +77,9 @@ pub(crate) struct Av2LumaPaletteBlock444 {
 pub(crate) struct Av2LumaPalette444 {
     blocks: Vec<Av2LumaPaletteBlock444>,
     luma_modes: Vec<Av2LumaIntraMode>,
-    luma_palette_map_vertical: Vec<bool>,
     luma_bdpcm_horz: Vec<Option<bool>>,
     chroma_use_bdpcm: Vec<bool>,
-    chroma_bdpcm_horz: Vec<bool>,
+    chroma_intra_modes: Vec<Av2ChromaIntraMode>,
     y_plane: Vec<u8>,
     luma_prediction: Vec<u8>,
     u_plane: Vec<u8>,
@@ -92,21 +108,21 @@ impl Av2LumaPalette444 {
         self.luma_bdpcm_horz[self.block_index_for_origin(x0, y0)]
     }
 
-    pub(crate) fn luma_palette_map_vertical_for_block(&self, x0: usize, y0: usize) -> bool {
-        self.luma_palette_map_vertical[self.block_index_for_origin(x0, y0)]
-    }
-
-    pub(crate) fn chroma_bdpcm_horz_for_block(&self, x0: usize, y0: usize) -> bool {
-        self.chroma_bdpcm_horz[self.block_index_for_origin(x0, y0)]
+    pub(crate) fn chroma_intra_mode_for_block(&self, x0: usize, y0: usize) -> Av2ChromaIntraMode {
+        self.chroma_intra_modes[self.block_index_for_origin(x0, y0)]
     }
 
     pub(crate) fn chroma_use_bdpcm_for_block(&self, x0: usize, y0: usize) -> bool {
         self.chroma_use_bdpcm[self.block_index_for_origin(x0, y0)]
     }
 
-    fn chroma_mode_decision_for_block(&self, x0: usize, y0: usize) -> (bool, bool) {
+    fn chroma_mode_decision_for_block(&self, x0: usize, y0: usize) -> (bool, Av2ChromaIntraMode) {
         let mut bdpcm_horz_score = 0usize;
         let mut bdpcm_vert_score = 0usize;
+        let mut intra_dc_score = 0usize;
+        let mut intra_horz_score = 0usize;
+        let mut intra_vert_score = 0usize;
+        let mut intra_paeth_score = 0usize;
         for plane in [&self.u_plane, &self.v_plane] {
             for txb_y in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
                 for txb_x in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
@@ -116,19 +132,54 @@ impl Av2LumaPalette444 {
                         self.chroma_bdpcm_residuals(plane, txb_x0, txb_y0, true);
                     let bdpcm_vert_residual =
                         self.chroma_bdpcm_residuals(plane, txb_x0, txb_y0, false);
+                    let intra_dc_residual =
+                        self.chroma_intra_residuals(plane, txb_x0, txb_y0, Av2ChromaIntraMode::Dc);
+                    let intra_horz_residual = self.chroma_intra_residuals(
+                        plane,
+                        txb_x0,
+                        txb_y0,
+                        Av2ChromaIntraMode::Horizontal,
+                    );
+                    let intra_vert_residual = self.chroma_intra_residuals(
+                        plane,
+                        txb_x0,
+                        txb_y0,
+                        Av2ChromaIntraMode::Vertical,
+                    );
+                    let intra_paeth_residual = self.chroma_intra_residuals(
+                        plane,
+                        txb_x0,
+                        txb_y0,
+                        Av2ChromaIntraMode::Paeth,
+                    );
                     bdpcm_horz_score += chroma_bdpcm_coeff_score(&bdpcm_horz_residual);
                     bdpcm_vert_score += chroma_bdpcm_coeff_score(&bdpcm_vert_residual);
+                    intra_dc_score += chroma_bdpcm_coeff_score(&intra_dc_residual);
+                    intra_horz_score += chroma_bdpcm_coeff_score(&intra_horz_residual);
+                    intra_vert_score += chroma_bdpcm_coeff_score(&intra_vert_residual);
+                    intra_paeth_score += chroma_bdpcm_coeff_score(&intra_paeth_residual);
                 }
             }
         }
-        let bdpcm_horz = bdpcm_horz_score <= bdpcm_vert_score;
-        // AV2 v1.0.0 read_intra_uv_mode() permits a lossless DPCM chroma
-        // family. For FrameForge's current 4:4:4 screen subset, always use
-        // that family and keep the decision local to the cheaper H/V BDPCM
-        // direction score. Normal intra remains a future mode-decision
-        // expansion point; forcing BDPCM here reduces RTL scorer cost and was
-        // neutral-to-positive on the screenshot multi-CTU baseline.
-        (true, bdpcm_horz)
+        let candidates = [
+            (true, Av2ChromaIntraMode::Horizontal, bdpcm_horz_score),
+            (true, Av2ChromaIntraMode::Vertical, bdpcm_vert_score),
+            (false, Av2ChromaIntraMode::Dc, intra_dc_score),
+            (false, Av2ChromaIntraMode::Horizontal, intra_horz_score),
+            (false, Av2ChromaIntraMode::Vertical, intra_vert_score),
+            (false, Av2ChromaIntraMode::Paeth, intra_paeth_score),
+        ];
+        let &(use_bdpcm, mode, _) = candidates
+            .iter()
+            .min_by_key(|(_, _, score)| *score)
+            .expect("AV2 chroma mode scorer has fixed candidates");
+        // AV2 v1.0.0 read_intra_uv_mode() permits normal DC/H/V/Paeth chroma
+        // prediction and, in lossless blocks, H/V DPCM. Lossless CfL is only
+        // legal for 4x4 chroma blocks; this MVP palette path codes 8x8 leaves.
+        // Large screen-content crops frequently have chroma fills and flat runs
+        // where a block-local family choice is much cheaper than always using
+        // DPCM.
+        (use_bdpcm, mode)
     }
 
     fn luma_bdpcm_horz_direction_for_block(&self, _x0: usize, _y0: usize) -> bool {
@@ -196,7 +247,7 @@ impl Av2LumaPalette444 {
                     } else if y0 != tile_y0 {
                         self.chroma_sample(plane, x0, y0 - 1)
                     } else {
-                        129
+                        LOSSLESS_H_PRED_LEFT_EDGE
                     }
                 } else if local_y != 0 {
                     self.chroma_sample(plane, x, y - 1)
@@ -205,12 +256,110 @@ impl Av2LumaPalette444 {
                 } else if x0 != tile_x0 {
                     self.chroma_sample(plane, x0 - 1, y0)
                 } else {
-                    127
+                    LOSSLESS_V_PRED_ABOVE_EDGE
                 };
                 residual[local_y * 4 + local_x] = sample - i32::from(predictor);
             }
         }
         residual
+    }
+
+    fn chroma_intra_residuals(
+        &self,
+        plane: &[u8],
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+    ) -> [i32; 16] {
+        let tile_x0 = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_y0 = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let dc_predictor =
+            (mode == Av2ChromaIntraMode::Dc).then(|| self.chroma_dc_predictor(plane, x0, y0));
+        let mut residual = [0i32; 16];
+        for local_y in 0..4 {
+            let y = y0 + local_y;
+            for local_x in 0..4 {
+                let x = x0 + local_x;
+                let sample = i32::from(self.chroma_sample(plane, x, y));
+                let predictor = match mode {
+                    Av2ChromaIntraMode::Dc => dc_predictor.expect("DC predictor is precomputed"),
+                    Av2ChromaIntraMode::Horizontal => {
+                        if x0 != tile_x0 {
+                            self.chroma_sample(plane, x0 - 1, y)
+                        } else if y0 != tile_y0 {
+                            self.chroma_sample(plane, x0, y0 - 1)
+                        } else {
+                            LOSSLESS_H_PRED_LEFT_EDGE
+                        }
+                    }
+                    Av2ChromaIntraMode::Vertical => {
+                        if y0 != tile_y0 {
+                            self.chroma_sample(plane, x, y0 - 1)
+                        } else if x0 != tile_x0 {
+                            self.chroma_sample(plane, x0 - 1, y0)
+                        } else {
+                            LOSSLESS_V_PRED_ABOVE_EDGE
+                        }
+                    }
+                    Av2ChromaIntraMode::Paeth => {
+                        let have_left = x0 != tile_x0;
+                        let have_top = y0 != tile_y0;
+                        let left = if have_left {
+                            self.chroma_sample(plane, x0 - 1, y)
+                        } else if have_top {
+                            self.chroma_sample(plane, x0, y0 - 1)
+                        } else {
+                            LOSSLESS_H_PRED_LEFT_EDGE
+                        };
+                        let above = if have_top {
+                            self.chroma_sample(plane, x, y0 - 1)
+                        } else if have_left {
+                            self.chroma_sample(plane, x0 - 1, y0)
+                        } else {
+                            LOSSLESS_V_PRED_ABOVE_EDGE
+                        };
+                        let above_left = if have_left && have_top {
+                            self.chroma_sample(plane, x0 - 1, y0 - 1)
+                        } else if have_top {
+                            self.chroma_sample(plane, x0, y0 - 1)
+                        } else if have_left {
+                            self.chroma_sample(plane, x0 - 1, y0)
+                        } else {
+                            LOSSLESS_DC_PREDICTOR
+                        };
+                        paeth_predictor(left, above, above_left)
+                    }
+                };
+                residual[local_y * 4 + local_x] = sample - i32::from(predictor);
+            }
+        }
+        residual
+    }
+
+    fn chroma_dc_predictor(&self, plane: &[u8], x0: usize, y0: usize) -> u8 {
+        let tile_x0 = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_y0 = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let have_left = x0 != tile_x0;
+        let have_top = y0 != tile_y0;
+        if !have_left && !have_top {
+            return LOSSLESS_DC_PREDICTOR;
+        }
+
+        let mut sum = 0u32;
+        let mut count = 0u32;
+        if have_top {
+            for local_x in 0..4 {
+                sum += u32::from(self.chroma_sample(plane, x0 + local_x, y0 - 1));
+                count += 1;
+            }
+        }
+        if have_left {
+            for local_y in 0..4 {
+                sum += u32::from(self.chroma_sample(plane, x0 - 1, y0 + local_y));
+                count += 1;
+            }
+        }
+        ((sum + count / 2) / count) as u8
     }
 
     fn block_for_origin(&self, x0: usize, y0: usize) -> &Av2LumaPaletteBlock444 {
@@ -228,19 +377,82 @@ impl Av2LumaPalette444 {
     }
 }
 
+fn paeth_predictor(left: u8, above: u8, above_left: u8) -> u8 {
+    let left = i32::from(left);
+    let above = i32::from(above);
+    let above_left = i32::from(above_left);
+    let base = left + above - above_left;
+    let p_left = (base - left).abs();
+    let p_above = (base - above).abs();
+    let p_above_left = (base - above_left).abs();
+    if p_left <= p_above && p_left <= p_above_left {
+        left as u8
+    } else if p_above <= p_above_left {
+        above as u8
+    } else {
+        above_left as u8
+    }
+}
+
 fn chroma_bdpcm_coeff_score(residual: &[i32; 16]) -> usize {
-    // Encoder-only mode decision proxy. Earlier revisions used a full 4x4 FWHT
-    // and EOB walk here, but the matching RTL scorer became a timing bottleneck.
-    // The syntax/reconstruction path still writes exact lossless coefficients;
-    // this score only chooses between legal chroma prediction families.
-    residual.iter().fold(0usize, |score, sample| {
-        let level = sample.unsigned_abs() as usize;
+    // Encoder-only mode decision proxy. The syntax/reconstruction path writes
+    // exact lossless FWHT coefficients, so score the same coefficient domain
+    // when choosing between legal chroma prediction families.
+    let coefficients = av2_fwht4x4_for_score(residual);
+    coefficients.iter().fold(0usize, |score, coefficient| {
+        debug_assert_eq!(coefficient % 8, 0);
+        let level = (coefficient.unsigned_abs() / 8) as usize;
         if level == 0 {
             score
         } else {
             score + AV2_CHROMA_BDPCM_NONZERO_COST + level.min(255) + level.saturating_sub(5) / 4
         }
     })
+}
+
+fn av2_fwht4x4_for_score(input: &[i32; 16]) -> [i32; 16] {
+    let mut output = [0i32; 16];
+    for i in 0..4 {
+        let mut a1 = input[i];
+        let mut b1 = input[4 + i];
+        let mut c1 = input[8 + i];
+        let mut d1 = input[12 + i];
+
+        a1 += b1;
+        d1 -= c1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= c1;
+        d1 += b1;
+
+        output[i] = a1;
+        output[4 + i] = c1;
+        output[8 + i] = d1;
+        output[12 + i] = b1;
+    }
+
+    let pass0 = output;
+    for i in 0..4 {
+        let mut a1 = pass0[i * 4];
+        let mut b1 = pass0[i * 4 + 1];
+        let mut c1 = pass0[i * 4 + 2];
+        let mut d1 = pass0[i * 4 + 3];
+
+        a1 += b1;
+        d1 -= c1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= c1;
+        d1 += b1;
+
+        output[i * 4] = a1 * 8;
+        output[i * 4 + 1] = c1 * 8;
+        output[i * 4 + 2] = d1 * 8;
+        output[i * 4 + 3] = b1 * 8;
+    }
+    output
 }
 
 pub(crate) fn build_luma_palette_444(
@@ -329,10 +541,9 @@ pub(crate) fn build_luma_palette_444(
     let mut palette = Av2LumaPalette444 {
         blocks,
         luma_modes,
-        luma_palette_map_vertical: vec![false; block_count],
         luma_bdpcm_horz: vec![None; block_count],
         chroma_use_bdpcm: vec![true; block_count],
-        chroma_bdpcm_horz: vec![true; block_count],
+        chroma_intra_modes: vec![Av2ChromaIntraMode::Horizontal; block_count],
         y_plane: y_plane.to_vec(),
         luma_prediction,
         u_plane: u_plane.to_vec(),
@@ -347,14 +558,12 @@ pub(crate) fn build_luma_palette_444(
     for block_y in 0..blocks_high {
         for block_x in 0..blocks_wide {
             let block_index = block_y * blocks_wide + block_x;
-            palette.luma_palette_map_vertical[block_index] =
-                choose_luma_palette_map_vertical(&palette.blocks[block_index]);
             let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
             let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
-            let (chroma_use_bdpcm, chroma_bdpcm_horz) =
+            let (chroma_use_bdpcm, chroma_intra_mode) =
                 palette.chroma_mode_decision_for_block(x0, y0);
             palette.chroma_use_bdpcm[block_index] = chroma_use_bdpcm;
-            palette.chroma_bdpcm_horz[block_index] = chroma_bdpcm_horz;
+            palette.chroma_intra_modes[block_index] = chroma_intra_mode;
         }
     }
 
@@ -582,70 +791,4 @@ fn build_luma_palette_block(
     }
 
     Av2LumaPaletteBlock444 { colors, indices }
-}
-
-fn choose_luma_palette_map_vertical(block: &Av2LumaPaletteBlock444) -> bool {
-    // AV2 v1.0.0 Section 5.20.8.4 palette_tokens() permits a transposed
-    // color-map scan for blocks smaller than 64x64. Prefer it only when it
-    // reduces the number of coded palette-index tokens; this keeps the
-    // hardware selector local to one 8x8 index map.
-    let horizontal_tokens = luma_palette_map_token_count(block, false);
-    let vertical_tokens = luma_palette_map_token_count(block, true);
-    vertical_tokens < horizontal_tokens
-}
-
-fn luma_palette_map_token_count(block: &Av2LumaPaletteBlock444, vertical: bool) -> usize {
-    let outer_limit = AV2_LUMA_PALETTE_BLOCK_SIZE;
-    let inner_limit = AV2_LUMA_PALETTE_BLOCK_SIZE;
-    let mut tokens = 0usize;
-
-    for outer in 0..outer_limit {
-        let identity_flag = luma_palette_identity_axis_flag(block, vertical, outer, inner_limit);
-        for inner in 0..inner_limit {
-            if outer == 0 && inner == 0 {
-                tokens += 1;
-            } else if identity_flag != 2 && (identity_flag != 1 || inner == 0) {
-                tokens += 1;
-            }
-        }
-    }
-
-    tokens
-}
-
-fn luma_palette_identity_axis_flag(
-    block: &Av2LumaPaletteBlock444,
-    vertical: bool,
-    outer: usize,
-    inner_limit: usize,
-) -> usize {
-    if outer > 0
-        && (0..inner_limit).all(|inner| {
-            let (row, col) = luma_palette_map_coordinate(vertical, outer, inner);
-            let (prev_row, prev_col) = luma_palette_map_coordinate(vertical, outer - 1, inner);
-            block.indices[row * AV2_LUMA_PALETTE_BLOCK_SIZE + col]
-                == block.indices[prev_row * AV2_LUMA_PALETTE_BLOCK_SIZE + prev_col]
-        })
-    {
-        return 2;
-    }
-
-    if (1..inner_limit).all(|inner| {
-        let (row, col) = luma_palette_map_coordinate(vertical, outer, inner);
-        let (prev_row, prev_col) = luma_palette_map_coordinate(vertical, outer, inner - 1);
-        block.indices[row * AV2_LUMA_PALETTE_BLOCK_SIZE + col]
-            == block.indices[prev_row * AV2_LUMA_PALETTE_BLOCK_SIZE + prev_col]
-    }) {
-        1
-    } else {
-        0
-    }
-}
-
-fn luma_palette_map_coordinate(vertical: bool, outer: usize, inner: usize) -> (usize, usize) {
-    if vertical {
-        (inner, outer)
-    } else {
-        (outer, inner)
-    }
 }

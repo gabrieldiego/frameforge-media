@@ -233,10 +233,6 @@ fn visit_local_ibc_block(
     // the defaults are unshifted.
     let left_in_same_tile = x0 % AV2_IBC_TILE_SIZE != 0;
     let above_in_same_tile = y0 % AV2_IBC_TILE_SIZE != 0;
-    let tile_block_row = block_y % (AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE);
-    let tile_block_rows =
-        (AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE).min(blocks_high - (block_y - tile_block_row));
-    let terminal_tile_row = tile_block_row + 1 == tile_block_rows;
     if left_in_same_tile {
         stats.blocks_with_left_in_tile += 1;
     }
@@ -305,6 +301,12 @@ fn visit_local_ibc_block(
         stats.left_hash_matches_blocked_by_fixed_drl_guard += 1;
     }
 
+    let tile_blocks_per_dim = AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE;
+    let tile_block_row = block_y % tile_blocks_per_dim;
+    let tile_block_rows = (blocks_high - (block_y / tile_blocks_per_dim) * tile_blocks_per_dim)
+        .min(tile_blocks_per_dim);
+    let terminal_tile_row = tile_block_row + 1 == tile_block_rows;
+
     // AV2 v1.0.0 av2_is_dv_in_local_range()/setup_ref_mv_list(): a selected
     // IntraBC DRL index is only correct when the encoder mirrors AVM's
     // decoded-BV and pseudo-coded availability state. The current fixed-8x8
@@ -313,7 +315,7 @@ fn visit_local_ibc_block(
     // non-terminal above copies need a fuller is_mi_coded mirror before they
     // can be selected without REF desynchronization.
     let above_match = default_above_bvp_supported && terminal_tile_row && direct_above_match;
-    let left_match = default_left_bvp_supported && direct_left_match && above_in_same_tile;
+    let left_match = default_left_bvp_supported && above_in_same_tile && direct_left_match;
     let direct_candidate = match (above_match, left_match) {
         (true, true) => {
             let above_idx = above_drl_idx.expect("above match has a DRL index");

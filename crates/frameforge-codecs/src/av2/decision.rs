@@ -1,4 +1,4 @@
-use super::palette::Av2LumaIntraMode;
+use super::palette::{Av2ChromaIntraMode, Av2LumaIntraMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2LeafPredictionMode {
@@ -11,7 +11,7 @@ pub(crate) enum Av2LeafPredictionMode {
         use_dpcm_y: bool,
         luma_bdpcm_horz: bool,
         use_bdpcm_uv: bool,
-        chroma_bdpcm_horz: bool,
+        chroma_intra_mode: Av2ChromaIntraMode,
     },
 }
 
@@ -22,7 +22,7 @@ pub(crate) enum Av2LeafResidualMode {
     LumaPalette {
         luma_bdpcm_horz: Option<bool>,
         chroma_use_bdpcm: bool,
-        chroma_bdpcm_horz: bool,
+        chroma_intra_mode: Av2ChromaIntraMode,
     },
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn decide_leaf_prediction(
     luma_mode: Av2LumaIntraMode,
     luma_bdpcm_horz: Option<bool>,
     chroma_use_bdpcm: bool,
-    chroma_bdpcm_horz: bool,
+    chroma_intra_mode: Av2ChromaIntraMode,
 ) -> Av2LeafPredictionDecision {
     // AV2 v1.0.0 Sections 5.20.5.1 and 5.20.8: IntraBC returns from
     // intra-frame mode parsing before palette/intra residual syntax. Keep that
@@ -62,7 +62,7 @@ pub(crate) fn decide_leaf_prediction(
         Av2LeafResidualMode::LumaPalette {
             luma_bdpcm_horz,
             chroma_use_bdpcm,
-            chroma_bdpcm_horz,
+            chroma_intra_mode,
         }
     } else {
         Av2LeafResidualMode::BlackDc
@@ -76,7 +76,7 @@ pub(crate) fn decide_leaf_prediction(
             use_dpcm_y,
             luma_bdpcm_horz: luma_bdpcm_horz.unwrap_or(false),
             use_bdpcm_uv: luma_palette_enabled && chroma_use_bdpcm,
-            chroma_bdpcm_horz,
+            chroma_intra_mode,
         },
         residual,
     }
@@ -88,8 +88,15 @@ mod tests {
 
     #[test]
     fn intrabc_copy_suppresses_intra_residual() {
-        let decision =
-            decide_leaf_prediction(true, Some(1), true, Av2LumaIntraMode::Dc, None, true, true);
+        let decision = decide_leaf_prediction(
+            true,
+            Some(1),
+            true,
+            Av2LumaIntraMode::Dc,
+            None,
+            true,
+            Av2ChromaIntraMode::Horizontal,
+        );
 
         assert_eq!(
             decision.prediction,
@@ -101,8 +108,15 @@ mod tests {
 
     #[test]
     fn dc_palette_intra_enables_palette_residual() {
-        let decision =
-            decide_leaf_prediction(true, None, true, Av2LumaIntraMode::Dc, None, true, false);
+        let decision = decide_leaf_prediction(
+            true,
+            None,
+            true,
+            Av2LumaIntraMode::Dc,
+            None,
+            true,
+            Av2ChromaIntraMode::Vertical,
+        );
 
         assert_eq!(
             decision.prediction,
@@ -112,7 +126,7 @@ mod tests {
                 use_dpcm_y: false,
                 luma_bdpcm_horz: false,
                 use_bdpcm_uv: true,
-                chroma_bdpcm_horz: false,
+                chroma_intra_mode: Av2ChromaIntraMode::Vertical,
             }
         );
         assert_eq!(
@@ -120,7 +134,7 @@ mod tests {
             Av2LeafResidualMode::LumaPalette {
                 luma_bdpcm_horz: None,
                 chroma_use_bdpcm: true,
-                chroma_bdpcm_horz: false
+                chroma_intra_mode: Av2ChromaIntraMode::Vertical
             }
         );
         assert!(!decision.intrabc_flag);
@@ -135,7 +149,7 @@ mod tests {
             Av2LumaIntraMode::Horizontal,
             None,
             false,
-            true,
+            Av2ChromaIntraMode::Horizontal,
         );
 
         assert_eq!(
@@ -146,7 +160,7 @@ mod tests {
                 use_dpcm_y: false,
                 luma_bdpcm_horz: false,
                 use_bdpcm_uv: false,
-                chroma_bdpcm_horz: true,
+                chroma_intra_mode: Av2ChromaIntraMode::Horizontal,
             }
         );
         assert_eq!(decision.residual, Av2LeafResidualMode::BlackDc);

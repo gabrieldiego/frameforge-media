@@ -1843,15 +1843,18 @@ mod tests {
             params: Av2EncodeParams { frames: 1 },
             geometry: Av2VideoGeometry {
                 width: 8,
-                height: 8,
+                height: 16,
             },
             format: PixelFormat::Yuv444p8,
         };
         let plane_len = request.geometry.width * request.geometry.height;
         let mut input = vec![0u8; plane_len * 3];
-        for y in 0..8usize {
+        for y in 0..16usize {
             for x in 0..8usize {
                 let index = y * 8 + x;
+                // Keep the two 8x8 blocks from becoming an IntraBC copy while
+                // preserving the chroma edge that vertical DPCM can reuse.
+                input[index] = if y < 8 { 0 } else { 1 };
                 input[plane_len + index] = 127 + (x as u8 * 7);
                 input[2 * plane_len + index] = 127 + (x as u8 * 7);
             }
