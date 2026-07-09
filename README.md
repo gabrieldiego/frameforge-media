@@ -92,6 +92,40 @@ make build CARGO_FEATURES="codec-av2 codec-vvc filter-scale"
 
 No optional codec or filter features are implemented yet.
 
+## CLI Shape
+
+The CLI entry point is `ff`. The initial interface is scaffolded around stage
+discovery and a single encode action:
+
+```sh
+ff codecs
+ff filters
+ff encode input.yuv --video 640x360:yuv444p \
+  --encode av2:output.obu --set lossless
+ff encode input_640x360_30_1f_yuv444p8.yuv \
+  --filter identity --encode av2:output.obu
+```
+
+The commands currently validate command-line structure and report stage
+availability, but codec/filter execution is not implemented yet. Build-time
+features such as `codec-av2`, `codec-vvc`, `filter-identity`, `filter-crop`,
+and `filter-scale` are placeholders for future stage crates or modules.
+
+Input options, such as `--video`, `--fps`, and `--frames`, belong after the
+input path. Filter options come next. Output/encoder options, such as
+`--set lossless`, `--preset`, and repeated `--set key[=value]`, belong after
+`--encode codec:output`. Bare `--set` keys imply `true`. Global accepted
+settings are listed by `ff codecs`; codec-specific settings can be added later
+when a feature really needs them.
+
+Raw video metadata uses a compact `WxH:pixfmt` spelling when it cannot be
+inferred from the input filename or needs to be overridden. File names imply
+metadata with `*_<WxH>[_<fps>][_<frames>f]_<pixfmt>.yuv`, for example
+`input_640x360_30_1f_yuv444p8.yuv`. Short 8-bit aliases such as `yuv444p` and
+`yuv420p` are accepted and normalized to `yuv444p8` and `yuv420p8` internally.
+Encode endpoints must name the codec and output path together, such as
+`--encode av2:output.obu`.
+
 ## Repository Layout
 
 ```text

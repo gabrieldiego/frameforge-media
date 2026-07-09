@@ -1,6 +1,6 @@
 CARGO ?= cargo
 CARGO_FEATURES ?=
-CARGO_FLAGS := $(if $(strip $(CARGO_FEATURES)),--features $(CARGO_FEATURES),)
+CARGO_FLAGS := $(if $(strip $(CARGO_FEATURES)),--features "$(CARGO_FEATURES)",)
 ARGS ?=
 
 .PHONY: help check-tools fmt check test build debug run clean release-check
