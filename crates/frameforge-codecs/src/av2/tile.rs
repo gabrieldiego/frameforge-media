@@ -3,9 +3,9 @@ use crate::av2::decision::{decide_leaf_prediction, Av2LeafPredictionMode, Av2Lea
 use crate::av2::entropy::{Av2EntropyPayload, Av2EntropyWriter};
 use crate::av2::ibc::{Av2IntrabcExplicitDv, Av2LocalIbc444};
 use crate::av2::palette::{
-    av2_luma_mode_syntax_for_block, Av2ChromaIntraMode, Av2LumaIntraMode, Av2LumaModeSyntax,
-    Av2LumaPalette444, AV2_LUMA_PALETTE_BLOCK_SIZE, AV2_LUMA_PALETTE_MAX_COLORS,
-    AV2_LUMA_PALETTE_MIN_COLORS,
+    av2_highbd_smooth_intra_predictor, av2_luma_mode_syntax_for_block, Av2ChromaIntraMode,
+    Av2LumaIntraMode, Av2LumaModeSyntax, Av2LumaPalette444, AV2_LUMA_PALETTE_BLOCK_SIZE,
+    AV2_LUMA_PALETTE_MAX_COLORS, AV2_LUMA_PALETTE_MIN_COLORS,
 };
 
 const MVP_SUPERBLOCK_SIZE: usize = 64;
@@ -1123,6 +1123,35 @@ impl Av2PartitionContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct Av2CodedMiContext {
+    coded: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+}
+
+impl Av2CodedMiContext {
+    fn new() -> Self {
+        Self {
+            coded: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+        }
+    }
+
+    fn is_coded(&self, row_mi: usize, col_mi: usize) -> bool {
+        self.coded
+            .get(row_mi)
+            .and_then(|row| row.get(col_mi))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn update_leaf(&mut self, row_mi: usize, col_mi: usize, block_size: Av2MvpBlockSize) {
+        for row in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
+            for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
+                self.coded[row][col] = true;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2PaletteColorCacheContext {
     above: Vec<Option<Vec<u8>>>,
     left: Vec<Option<Vec<u8>>>,
@@ -1636,6 +1665,7 @@ impl Av2Black444TilePlan {
         let mut partition_context = Av2PartitionContext::new();
         let mut txb_contexts = Av2TxbEntropyContexts::new();
         let mut intrabc_context = Av2IntrabcContext::new();
+        let mut coded_mi_context = Av2CodedMiContext::new();
         let mut palette_cache_context =
             Av2PaletteColorCacheContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
@@ -1704,6 +1734,7 @@ impl Av2Black444TilePlan {
                         decision.block_size,
                         Av2LumaIntraMode::Dc,
                     );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
                 Av2TileDecisionKind::IntraLumaMode {
                     mode,
@@ -1793,6 +1824,7 @@ impl Av2Black444TilePlan {
                         false,
                         false,
                     );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
                 Av2TileDecisionKind::LumaPaletteResidualCoefficients {
                     luma_bdpcm_horz,
@@ -1806,6 +1838,7 @@ impl Av2Black444TilePlan {
                         self.visible_cols_mi,
                         palette.expect("luma palette residual needs palette state"),
                         &mut txb_contexts,
+                        &coded_mi_context,
                         self.origin_x,
                         self.origin_y,
                         luma_bdpcm_horz,
@@ -1819,6 +1852,7 @@ impl Av2Black444TilePlan {
                         false,
                         false,
                     );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
             }
         }
@@ -2718,6 +2752,9 @@ fn chroma_uv_mode_symbol(
         Av2ChromaIntraMode::Dc => "tile.intra.uv_mode_idx_dc",
         Av2ChromaIntraMode::Vertical => "tile.intra.uv_mode_idx_v",
         Av2ChromaIntraMode::Horizontal => "tile.intra.uv_mode_idx_h",
+        Av2ChromaIntraMode::Smooth => "tile.intra.uv_mode_idx_smooth",
+        Av2ChromaIntraMode::SmoothVertical => "tile.intra.uv_mode_idx_smooth_v",
+        Av2ChromaIntraMode::SmoothHorizontal => "tile.intra.uv_mode_idx_smooth_h",
         Av2ChromaIntraMode::Paeth => "tile.intra.uv_mode_idx_paeth",
     };
     (name, chroma_uv_mode_index(luma_mode, chroma_mode))
@@ -2763,6 +2800,9 @@ fn chroma_uv_mode_id(mode: Av2ChromaIntraMode) -> usize {
         Av2ChromaIntraMode::Dc => 0,
         Av2ChromaIntraMode::Vertical => 1,
         Av2ChromaIntraMode::Horizontal => 2,
+        Av2ChromaIntraMode::Smooth => 9,
+        Av2ChromaIntraMode::SmoothVertical => 10,
+        Av2ChromaIntraMode::SmoothHorizontal => 11,
         Av2ChromaIntraMode::Paeth => 12,
     }
 }
@@ -3632,6 +3672,7 @@ fn write_luma_palette_residual_coefficients(
     visible_cols_mi: usize,
     palette: &Av2LumaPalette444,
     contexts: &mut Av2TxbEntropyContexts,
+    coded_mi_context: &Av2CodedMiContext,
     tile_origin_x: usize,
     tile_origin_y: usize,
     luma_bdpcm_horz: Option<bool>,
@@ -3654,6 +3695,10 @@ fn write_luma_palette_residual_coefficients(
         .block_size
         .tx4x4_height()
         .min(visible_rows_mi.saturating_sub(decision.row));
+    let leaf_x0 = tile_origin_x + decision.col * MI_SIZE;
+    let leaf_y0 = tile_origin_y + decision.row * MI_SIZE;
+    let leaf_width = decision.block_size.width;
+    let leaf_height = decision.block_size.height;
     for row in 0..txb_height {
         let abs_row = decision.row + row;
         for col in 0..txb_width {
@@ -3710,6 +3755,11 @@ fn write_luma_palette_residual_coefficients(
                     txb_y0,
                     tile_origin_x,
                     tile_origin_y,
+                    leaf_x0,
+                    leaf_y0,
+                    leaf_width,
+                    leaf_height,
+                    coded_mi_context,
                     chroma_intra_mode,
                 )
             };
@@ -3750,6 +3800,11 @@ fn write_luma_palette_residual_coefficients(
                     txb_y0,
                     tile_origin_x,
                     tile_origin_y,
+                    leaf_x0,
+                    leaf_y0,
+                    leaf_width,
+                    leaf_height,
+                    coded_mi_context,
                     chroma_intra_mode,
                 )
             };
@@ -3992,10 +4047,36 @@ fn chroma_intra_tx4x4_coefficients(
     y0: usize,
     tile_origin_x: usize,
     tile_origin_y: usize,
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_width: usize,
+    leaf_height: usize,
+    coded_mi_context: &Av2CodedMiContext,
     mode: Av2ChromaIntraMode,
 ) -> [i32; TX4X4_SAMPLES] {
     let dc_predictor =
         (mode == Av2ChromaIntraMode::Dc).then(|| chroma_dc_predictor(palette, plane, x0, y0));
+    let smooth_edges = matches!(
+        mode,
+        Av2ChromaIntraMode::Smooth
+            | Av2ChromaIntraMode::SmoothVertical
+            | Av2ChromaIntraMode::SmoothHorizontal
+    )
+    .then(|| {
+        chroma_smooth_edges(
+            palette,
+            plane,
+            x0,
+            y0,
+            tile_origin_x,
+            tile_origin_y,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+            coded_mi_context,
+        )
+    });
     let mut residual = [0i32; TX4X4_SAMPLES];
     for local_y in 0..TX4X4_SIZE {
         let y = y0 + local_y;
@@ -4021,6 +4102,13 @@ fn chroma_intra_tx4x4_coefficients(
                     } else {
                         127
                     }
+                }
+                Av2ChromaIntraMode::Smooth
+                | Av2ChromaIntraMode::SmoothVertical
+                | Av2ChromaIntraMode::SmoothHorizontal => {
+                    let (above, left) =
+                        smooth_edges.expect("smooth predictor edges are precomputed");
+                    av2_highbd_smooth_intra_predictor(mode, above, left, local_x, local_y)
                 }
                 Av2ChromaIntraMode::Paeth => {
                     let left = chroma_h_predictor(
@@ -4078,6 +4166,77 @@ fn chroma_above_left_predictor(
     } else {
         LOSSLESS_DC_PREDICTOR
     }
+}
+
+fn chroma_smooth_edges(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    txb_x0: usize,
+    txb_y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_width: usize,
+    leaf_height: usize,
+    coded_mi_context: &Av2CodedMiContext,
+) -> ([u8; 5], [u8; 5]) {
+    debug_assert!(txb_x0 >= leaf_x0 && txb_y0 >= leaf_y0);
+    debug_assert!(txb_x0 + TX4X4_SIZE <= leaf_x0 + leaf_width);
+    debug_assert!(txb_y0 + TX4X4_SIZE <= leaf_y0 + leaf_height);
+    let have_top = txb_y0 > tile_origin_y;
+    let have_left = txb_x0 > tile_origin_x;
+    let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; TX4X4_SIZE + 1];
+    let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; TX4X4_SIZE + 1];
+
+    if have_top {
+        for local_x in 0..TX4X4_SIZE {
+            above[local_x] = chroma_sample(palette, plane, txb_x0 + local_x, txb_y0 - 1);
+        }
+    } else if have_left {
+        above[..TX4X4_SIZE].fill(chroma_sample(palette, plane, txb_x0 - 1, txb_y0));
+    }
+
+    if have_left {
+        for local_y in 0..TX4X4_SIZE {
+            left[local_y] = chroma_sample(palette, plane, txb_x0 - 1, txb_y0 + local_y);
+        }
+    } else if have_top {
+        left[..TX4X4_SIZE].fill(chroma_sample(palette, plane, txb_x0, txb_y0 - 1));
+    }
+
+    let tile_right = (tile_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
+    let external_top_right_coded = have_top
+        && txb_y0 == leaf_y0
+        && txb_x0 + TX4X4_SIZE < tile_right
+        && coded_mi_context.is_coded(
+            (txb_y0 - 1 - tile_origin_y) / MI_SIZE,
+            (txb_x0 + TX4X4_SIZE - tile_origin_x) / MI_SIZE,
+        );
+    if have_top && (txb_x0 + TX4X4_SIZE < leaf_x0 + leaf_width || external_top_right_coded) {
+        above[TX4X4_SIZE] = chroma_sample(palette, plane, txb_x0 + TX4X4_SIZE, txb_y0 - 1);
+    } else {
+        above[TX4X4_SIZE] = above[TX4X4_SIZE - 1];
+    }
+
+    let tile_bottom = (tile_origin_y + MVP_SUPERBLOCK_SIZE).min(palette.height());
+    let external_bottom_left_coded = have_left
+        && txb_x0 == leaf_x0
+        && txb_y0 + TX4X4_SIZE < tile_bottom
+        && coded_mi_context.is_coded(
+            (txb_y0 + TX4X4_SIZE - tile_origin_y) / MI_SIZE,
+            (txb_x0 - 1 - tile_origin_x) / MI_SIZE,
+        );
+    if have_left
+        && txb_x0 == leaf_x0
+        && (txb_y0 + TX4X4_SIZE < leaf_y0 + leaf_height || external_bottom_left_coded)
+    {
+        left[TX4X4_SIZE] = chroma_sample(palette, plane, txb_x0 - 1, txb_y0 + TX4X4_SIZE);
+    } else {
+        left[TX4X4_SIZE] = left[TX4X4_SIZE - 1];
+    }
+
+    (above, left)
 }
 
 fn paeth_predictor(left: u8, above: u8, above_left: u8) -> u8 {
