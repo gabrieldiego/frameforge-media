@@ -84,7 +84,7 @@ pub const INPUT_OPTIONS: &[HelpRow] = &[
     },
     HelpRow {
         syntax: "-n, --frames <count>",
-        summary: "Number of frames to process",
+        summary: "Number of frames to process; omitted file inputs run to EOF",
     },
 ];
 

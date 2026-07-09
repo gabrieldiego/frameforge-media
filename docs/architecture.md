@@ -52,7 +52,13 @@ Raw video metadata should use the compact `WxH:pixfmt` form, for example
 filename or needs to be overridden. File names imply metadata with
 `*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
 `clip_1920x1080_30_1f_yuv444p8.yuv`. If a `.yuv` filename has dimensions but
-no pixel-format token, the CLI assumes `yuv420p8`.
+no pixel-format token, the CLI assumes `yuv420p8`. If a file input has no
+`--frames` value and no filename frame-count metadata, the CLI infers the frame
+count from the file size and encodes whole frames until EOF. If a user requests
+more frames than the file contains, the CLI clamps the encode to the complete
+frames available instead of surfacing an EOF read error from the codec model.
+Source filters must still provide `--frames` because they generate frames
+rather than ending at a file EOF.
 
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.

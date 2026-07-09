@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -333,7 +333,9 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
         EncodeInput::Path(path) => {
             let file = File::open(path)
                 .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
-            Ok(Box::new(BufReader::new(file)))
+            Ok(Box::new(
+                BufReader::new(file).take(selected_input_byte_len(job)?),
+            ))
         }
         EncodeInput::Pattern(source) => {
             Ok(Box::new(Cursor::new(generated_pattern_input(job, source)?)))
@@ -341,10 +343,124 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
     }
 }
 
+fn selected_input_byte_len(job: &EncodeJob) -> Result<u64, String> {
+    let frame_len = job.format.frame_len(job.width, job.height).ok_or_else(|| {
+        format!(
+            "frame length overflow for {}x{}:{}",
+            job.width, job.height, job.format
+        )
+    })?;
+    let byte_len = frame_len
+        .checked_mul(job.frames)
+        .ok_or_else(|| "selected input byte length overflow".to_string())?;
+    u64::try_from(byte_len).map_err(|_| "selected input byte length overflows u64".to_string())
+}
+
 fn input_label(input: &EncodeInput) -> String {
     match input {
         EncodeInput::Path(path) => format!("path={}", path.display()),
         EncodeInput::Pattern(source) => format!("source=pattern:{}", source.pattern.name()),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FramePsnr {
+    y: f64,
+    u: f64,
+    v: f64,
+    all: f64,
+}
+
+fn print_frame_metrics(
+    codec: &str,
+    job: &EncodeJob,
+    frame_idx: usize,
+    frame_count: usize,
+    bitstream_bytes: usize,
+    source: &[u8],
+    reconstruction: &[u8],
+) {
+    let bits = bitstream_bytes * 8;
+    match frame_psnr(job, source, reconstruction) {
+        Some(psnr) => eprintln!(
+            "frame: codec={} index={}/{} bits={} bytes={} psnr_y={} psnr_u={} psnr_v={} psnr_all={}",
+            codec,
+            frame_idx + 1,
+            frame_count,
+            bits,
+            bitstream_bytes,
+            format_psnr(psnr.y),
+            format_psnr(psnr.u),
+            format_psnr(psnr.v),
+            format_psnr(psnr.all),
+        ),
+        None => eprintln!(
+            "frame: codec={} index={}/{} bits={} bytes={} psnr=n/a",
+            codec,
+            frame_idx + 1,
+            frame_count,
+            bits,
+            bitstream_bytes,
+        ),
+    }
+}
+
+fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<FramePsnr> {
+    let y_len = job.width.checked_mul(job.height)?;
+    let chroma_len = match job.format {
+        PixelFormat::Yuv420p8 => y_len / 4,
+        PixelFormat::Yuv444p8 => y_len,
+        _ => return None,
+    };
+    let frame_len = y_len.checked_add(chroma_len.checked_mul(2)?)?;
+    if source.len() != frame_len || reconstruction.len() != frame_len {
+        return None;
+    }
+
+    let y_src = &source[..y_len];
+    let y_rec = &reconstruction[..y_len];
+    let u_start = y_len;
+    let v_start = y_len + chroma_len;
+    let u_src = &source[u_start..v_start];
+    let u_rec = &reconstruction[u_start..v_start];
+    let v_src = &source[v_start..frame_len];
+    let v_rec = &reconstruction[v_start..frame_len];
+
+    let y_sse = sse_u8(y_src, y_rec);
+    let u_sse = sse_u8(u_src, u_rec);
+    let v_sse = sse_u8(v_src, v_rec);
+    Some(FramePsnr {
+        y: psnr_from_sse(y_sse, y_len),
+        u: psnr_from_sse(u_sse, chroma_len),
+        v: psnr_from_sse(v_sse, chroma_len),
+        all: psnr_from_sse(y_sse + u_sse + v_sse, frame_len),
+    })
+}
+
+fn sse_u8(source: &[u8], reconstruction: &[u8]) -> u64 {
+    source
+        .iter()
+        .zip(reconstruction)
+        .map(|(&src, &rec)| {
+            let diff = src as i32 - rec as i32;
+            (diff * diff) as u64
+        })
+        .sum()
+}
+
+fn psnr_from_sse(sse: u64, samples: usize) -> f64 {
+    if sse == 0 {
+        f64::INFINITY
+    } else {
+        10.0 * ((255.0 * 255.0 * samples as f64) / sse as f64).log10()
+    }
+}
+
+fn format_psnr(value: f64) -> String {
+    if value.is_infinite() {
+        "inf".to_string()
+    } else {
+        format!("{value:.3}")
     }
 }
 
@@ -414,14 +530,96 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
             "encode requires a pixel format in --video or the input filename".to_string()
         })?
         .parse::<PixelFormat>()?;
+    let width = video.width as usize;
+    let height = video.height as usize;
+    let frames = resolve_frame_count(args, &input, format, width, height)?;
     Ok(EncodeJob {
         input,
         output,
-        frames: args.frames.unwrap_or(1) as usize,
-        width: video.width as usize,
-        height: video.height as usize,
+        frames,
+        width,
+        height,
         format,
     })
+}
+
+fn resolve_frame_count(
+    args: &EncodeArgs,
+    input: &EncodeInput,
+    format: PixelFormat,
+    width: usize,
+    height: usize,
+) -> Result<usize, String> {
+    let frame_len = format
+        .frame_len(width, height)
+        .ok_or_else(|| format!("frame length overflow for {width}x{height}:{format}"))?;
+    if let Some(frames) = args.frames {
+        return match input {
+            EncodeInput::Path(path) => {
+                let available = infer_file_complete_frame_count(path, frame_len)?;
+                Ok((frames as usize).min(available))
+            }
+            EncodeInput::Pattern(_) => Ok(frames as usize),
+        };
+    }
+
+    match input {
+        EncodeInput::Path(path) => infer_file_frame_count_from_eof(path, frame_len),
+        EncodeInput::Pattern(_) => {
+            Err("source filters require --frames because there is no input EOF".to_string())
+        }
+    }
+}
+
+fn infer_file_complete_frame_count(path: &Path, frame_len: usize) -> Result<usize, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("failed to stat input '{}': {err}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "cannot infer frame count for non-file input '{}'; pass --frames",
+            path.display()
+        ));
+    }
+    let byte_len = metadata.len();
+    if byte_len == 0 {
+        return Err(format!(
+            "input '{}' is empty; no complete frames are available",
+            path.display()
+        ));
+    }
+    let frame_len = frame_len as u64;
+    let frames = byte_len / frame_len;
+    if frames == 0 {
+        return Err(format!(
+            "input '{}' has {} byte(s), less than one {} byte frame",
+            path.display(),
+            byte_len,
+            frame_len
+        ));
+    }
+    usize::try_from(frames).map_err(|_| {
+        format!(
+            "input '{}' contains too many frames for this platform",
+            path.display()
+        )
+    })
+}
+
+fn infer_file_frame_count_from_eof(path: &Path, frame_len: usize) -> Result<usize, String> {
+    let complete_frames = infer_file_complete_frame_count(path, frame_len)?;
+    let byte_len = fs::metadata(path)
+        .map_err(|err| format!("failed to stat input '{}': {err}", path.display()))?
+        .len();
+    let frame_len = frame_len as u64;
+    if byte_len % frame_len != 0 {
+        return Err(format!(
+            "input '{}' has {} byte(s), which is not a whole number of {} byte frame(s); pass --frames to encode the complete-frame prefix",
+            path.display(),
+            byte_len,
+            frame_len
+        ));
+    }
+    Ok(complete_frames)
 }
 
 #[cfg(feature = "codec-av2")]
@@ -436,7 +634,24 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
     };
     let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
-    frameforge_codecs::av2::av2_encode_fixed_black_444(&mut input, &mut output, None, request)?;
+    let mut frame_metrics = |metrics: frameforge_codecs::av2::Av2EncodeFrameMetrics<'_>| {
+        print_frame_metrics(
+            "av2",
+            &job,
+            metrics.frame_idx,
+            metrics.frame_count,
+            metrics.bitstream_bytes,
+            metrics.source,
+            metrics.reconstruction,
+        );
+    };
+    frameforge_codecs::av2::av2_encode_fixed_black_444_with_frame_metrics(
+        &mut input,
+        &mut output,
+        None,
+        request,
+        Some(&mut frame_metrics),
+    )?;
     flush_writer(&job.output, &mut output)
 }
 
@@ -463,7 +678,18 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
     geometry.validate_against(limits)?;
     let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
-    frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits(
+    let mut frame_metrics = |metrics: frameforge_codecs::vvc::VvcEncodeFrameMetrics<'_>| {
+        print_frame_metrics(
+            "vvc",
+            &job,
+            metrics.frame_idx,
+            metrics.frame_count,
+            metrics.bitstream_bytes,
+            metrics.source,
+            metrics.reconstruction,
+        );
+    };
+    frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_frame_metrics(
         &mut input,
         &mut output,
         None,
@@ -471,6 +697,7 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
         geometry,
         limits,
         job.format,
+        Some(&mut frame_metrics),
     )?;
     flush_writer(&job.output, &mut output)
 }
@@ -559,5 +786,141 @@ fn kind_name(kind: StageKind) -> &'static str {
     match kind {
         StageKind::Codec => "codec",
         StageKind::Filter => "filter",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_yuv_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before UNIX epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("frameforge_media_{name}_{unique}.yuv"))
+    }
+
+    #[test]
+    fn encode_job_infers_file_frames_from_eof_when_frames_omitted() {
+        let path = temp_yuv_path("two_frames_8x8");
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&vec![0; 8 * 8 * 3 / 2 * 2])
+            .expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("infer frame count");
+        assert_eq!(job.frames, 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_rejects_partial_frame_when_frames_omitted() {
+        let path = temp_yuv_path("partial_frame_8x8");
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&vec![0; 8 * 8 * 3 / 2 + 1])
+            .expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("partial frame should fail");
+        assert!(err.contains("not a whole number"), "{err}");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_clamps_requested_frames_to_available_file_frames() {
+        let path = temp_yuv_path("two_frames_requested_many_8x8");
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&vec![0; 8 * 8 * 3 / 2 * 2])
+            .expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            frames: Some(99),
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("clamp frame count");
+        assert_eq!(job.frames, 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn open_job_reader_hides_unselected_file_suffix() {
+        let path = temp_yuv_path("reader_prefix_8x8");
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&vec![0xAA; 8 * 8 * 3 / 2 * 3])
+            .expect("write temp yuv");
+        drop(file);
+
+        let job = EncodeJob {
+            input: EncodeInput::Path(path.clone()),
+            output: PathBuf::from("out.obu"),
+            frames: 1,
+            width: 8,
+            height: 8,
+            format: PixelFormat::Yuv420p8,
+        };
+        let mut reader = open_job_reader(&job).expect("open reader");
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).expect("read limited prefix");
+        assert_eq!(bytes.len(), 8 * 8 * 3 / 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_requires_frames_for_pattern_source() {
+        let args = EncodeArgs {
+            input: None,
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            filters: vec!["pattern=black".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("pattern source needs explicit frame count");
+        assert!(err.contains("source filters require --frames"), "{err}");
     }
 }

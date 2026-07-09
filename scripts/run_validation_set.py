@@ -163,6 +163,9 @@ def run_command(
         text=True,
     )
     log.write_text(f"$ {shlex.join(command)}\n\n{process.stdout}")
+    for line in process.stdout.splitlines():
+        if line.startswith("frame:"):
+            print(f"  {line}", flush=True)
 
     if process.returncode != 0:
         return ValidationResult(

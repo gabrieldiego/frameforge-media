@@ -301,6 +301,14 @@ pub struct Av2EncodeRequest {
     pub format: PixelFormat,
 }
 
+pub struct Av2EncodeFrameMetrics<'a> {
+    pub frame_idx: usize,
+    pub frame_count: usize,
+    pub bitstream_bytes: usize,
+    pub source: &'a [u8],
+    pub reconstruction: &'a [u8],
+}
+
 impl Av2EncodeRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.geometry.width == 0 || self.geometry.height == 0 {
@@ -376,8 +384,18 @@ impl Av2Mvp444FrameMode {
 pub fn av2_encode_fixed_black_444(
     input: &mut dyn Read,
     output: &mut dyn Write,
+    recon: Option<&mut dyn Write>,
+    request: Av2EncodeRequest,
+) -> Result<(), String> {
+    av2_encode_fixed_black_444_with_frame_metrics(input, output, recon, request, None)
+}
+
+pub fn av2_encode_fixed_black_444_with_frame_metrics(
+    input: &mut dyn Read,
+    output: &mut dyn Write,
     mut recon: Option<&mut dyn Write>,
     request: Av2EncodeRequest,
+    mut frame_metrics: Option<&mut dyn for<'a> FnMut(Av2EncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
     request.validate()?;
     let geometry = validate_mvp_request(request)?;
@@ -412,20 +430,38 @@ pub fn av2_encode_fixed_black_444(
                     .write_all(&reconstruction)
                     .map_err(|err| format!("failed to write AV2 reconstruction: {err}"))?;
             }
+            if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
+                frame_metrics(Av2EncodeFrameMetrics {
+                    frame_idx: frame_index,
+                    frame_count: request.params.frames,
+                    bitstream_bytes: bitstream.len(),
+                    source: &frame,
+                    reconstruction: &reconstruction,
+                });
+            }
             continue;
         }
 
         let frame_mode = Av2Mvp444FrameMode::from_frame(&frame, geometry)?;
 
         let bitstream = av2_mvp_444_bitstream_for_mode(geometry, &frame_mode);
+        let reconstruction = frame_mode.reconstruction(geometry);
         output
             .write_all(&bitstream)
             .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
         if let Some(recon) = recon.as_deref_mut() {
-            let reconstruction = frame_mode.reconstruction(geometry);
             recon
                 .write_all(&reconstruction)
                 .map_err(|err| format!("failed to write AV2 reconstruction: {err}"))?;
+        }
+        if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
+            frame_metrics(Av2EncodeFrameMetrics {
+                frame_idx: frame_index,
+                frame_count: request.params.frames,
+                bitstream_bytes: bitstream.len(),
+                source: &frame,
+                reconstruction: &reconstruction,
+            });
         }
     }
     Ok(())

@@ -100,6 +100,14 @@ pub struct VvcEncodeProgress {
     pub frame_count: usize,
 }
 
+pub struct VvcEncodeFrameMetrics<'a> {
+    pub frame_idx: usize,
+    pub frame_count: usize,
+    pub bitstream_bytes: usize,
+    pub source: &'a [u8],
+    pub reconstruction: &'a [u8],
+}
+
 /// Luma coded-picture dimensions are rounded to this granularity before SPS/PPS
 /// signaling and crop-offset derivation.
 ///
@@ -608,7 +616,7 @@ pub fn vvc_yuv_encode_stream_with_limits<R: Read, W: Write>(
     limits: VvcVideoLimits,
     format: PixelFormat,
 ) -> Result<(), String> {
-    vvc_yuv_encode_stream_with_limits_and_progress(
+    vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics(
         input,
         bitstream,
         reconstruction,
@@ -617,10 +625,57 @@ pub fn vvc_yuv_encode_stream_with_limits<R: Read, W: Write>(
         limits,
         format,
         None,
+        None,
     )
 }
 
 pub fn vvc_yuv_encode_stream_with_limits_and_progress<R: Read, W: Write>(
+    input: &mut R,
+    bitstream: &mut W,
+    reconstruction: Option<&mut dyn Write>,
+    params: VvcEncodeParams,
+    geometry: VvcVideoGeometry,
+    limits: VvcVideoLimits,
+    format: PixelFormat,
+    progress: Option<&mut dyn FnMut(VvcEncodeProgress)>,
+) -> Result<(), String> {
+    vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics(
+        input,
+        bitstream,
+        reconstruction,
+        params,
+        geometry,
+        limits,
+        format,
+        progress,
+        None,
+    )
+}
+
+pub fn vvc_yuv_encode_stream_with_limits_and_frame_metrics<R: Read, W: Write>(
+    input: &mut R,
+    bitstream: &mut W,
+    reconstruction: Option<&mut dyn Write>,
+    params: VvcEncodeParams,
+    geometry: VvcVideoGeometry,
+    limits: VvcVideoLimits,
+    format: PixelFormat,
+    frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
+) -> Result<(), String> {
+    vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics(
+        input,
+        bitstream,
+        reconstruction,
+        params,
+        geometry,
+        limits,
+        format,
+        None,
+        frame_metrics,
+    )
+}
+
+fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: Write>(
     input: &mut R,
     bitstream: &mut W,
     mut reconstruction: Option<&mut dyn Write>,
@@ -629,6 +684,7 @@ pub fn vvc_yuv_encode_stream_with_limits_and_progress<R: Read, W: Write>(
     limits: VvcVideoLimits,
     format: PixelFormat,
     mut progress: Option<&mut dyn FnMut(VvcEncodeProgress)>,
+    mut frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
     geometry.validate_against(limits)?;
     validate_vvc_frame_count(params)?;
@@ -670,74 +726,85 @@ pub fn vvc_yuv_encode_stream_with_limits_and_progress<R: Read, W: Write>(
         })?;
         let source_frame =
             sample_vvc_yuv_frame(&frame_buf, VvcEncodeParams { frames: 1 }, geometry, format)?;
-        if vvc_picture_ctu_count(geometry) > 1 {
-            write_annex_b_to(
-                bitstream,
-                &[vvc_picture_header_unit(frame_idx, slice_config)],
-            )?;
-        }
-        if stream_format.chroma_sampling == ChromaSampling::Cs444 {
-            let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
-            for region in vvc_ctu_regions(geometry) {
-                let ctu_frame = extract_vvc_ctu_frame(&source_frame, region);
-                let ctu_recon = palette::vvc_palette_444_reconstruction_yuv(&ctu_frame);
-                frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+        let (frame_recon_yuv, frame_bitstream_bytes) = {
+            let mut frame_bitstream = CountingWriter::new(bitstream);
+            if vvc_picture_ctu_count(geometry) > 1 {
                 write_annex_b_to(
-                    bitstream,
-                    &[palette::vvc_palette_444_ctu_slice_unit(
-                        frame_idx,
-                        geometry,
-                        region.slice_address,
-                        &ctu_frame,
-                        slice_config,
-                    )?],
+                    &mut frame_bitstream,
+                    &[vvc_picture_header_unit(frame_idx, slice_config)],
                 )?;
             }
-            if let Some(writer) = reconstruction.as_deref_mut() {
-                writer.write_all(&frame_recon.into_yuv()).map_err(|err| {
-                    format!("failed to write VVC reconstruction frame {frame_idx}: {err}")
-                })?;
-            }
-            continue;
-        }
 
-        let compat_frame = source_frame.decoder_compat_frame();
-        let mut frame_recon = VvcReconstructionFrame::new_neutral(
-            geometry,
-            VvcPictureFormat {
-                chroma_sampling: ChromaSampling::Cs420,
-                bit_depth: SampleBitDepth::Eight,
-            },
-        );
-        for region in vvc_ctu_regions(geometry) {
-            let ctu_frame = extract_vvc_ctu_frame(&compat_frame, region);
-            let quantized = quantize_vvc_frame(ctu_frame.clone());
-            let partition_params = vvc_ctu_partition_params(ctu_frame.geometry, quantized)
-                .ok_or_else(|| {
-                    format!(
-                        "VVC reconstruction has no generated CTU path for coded CTU geometry {}x{}",
-                        ctu_frame.geometry.coded_width(),
-                        ctu_frame.geometry.coded_height()
-                    )
-                })?;
-            let ctu_recon = reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params);
-            frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
-            write_annex_b_to(
-                bitstream,
-                &[vvc_ctu_slice_unit(
-                    frame_idx,
+            let frame_recon_yuv = if stream_format.chroma_sampling == ChromaSampling::Cs444 {
+                let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
+                for region in vvc_ctu_regions(geometry) {
+                    let ctu_frame = extract_vvc_ctu_frame(&source_frame, region);
+                    let ctu_recon = palette::vvc_palette_444_reconstruction_yuv(&ctu_frame);
+                    frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+                    write_annex_b_to(
+                        &mut frame_bitstream,
+                        &[palette::vvc_palette_444_ctu_slice_unit(
+                            frame_idx,
+                            geometry,
+                            region.slice_address,
+                            &ctu_frame,
+                            slice_config,
+                        )?],
+                    )?;
+                }
+                frame_recon.into_yuv()
+            } else {
+                let compat_frame = source_frame.decoder_compat_frame();
+                let mut frame_recon = VvcReconstructionFrame::new_neutral(
                     geometry,
-                    region.slice_address,
-                    ctu_frame.geometry,
-                    quantized,
-                    slice_config,
-                )?],
-            )?;
-        }
+                    VvcPictureFormat {
+                        chroma_sampling: ChromaSampling::Cs420,
+                        bit_depth: SampleBitDepth::Eight,
+                    },
+                );
+                for region in vvc_ctu_regions(geometry) {
+                    let ctu_frame = extract_vvc_ctu_frame(&compat_frame, region);
+                    let quantized = quantize_vvc_frame(ctu_frame.clone());
+                    let partition_params = vvc_ctu_partition_params(ctu_frame.geometry, quantized)
+                        .ok_or_else(|| {
+                            format!(
+                                "VVC reconstruction has no generated CTU path for coded CTU geometry {}x{}",
+                                ctu_frame.geometry.coded_width(),
+                                ctu_frame.geometry.coded_height()
+                            )
+                        })?;
+                    let ctu_recon =
+                        reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params);
+                    frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+                    write_annex_b_to(
+                        &mut frame_bitstream,
+                        &[vvc_ctu_slice_unit(
+                            frame_idx,
+                            geometry,
+                            region.slice_address,
+                            ctu_frame.geometry,
+                            quantized,
+                            slice_config,
+                        )?],
+                    )?;
+                }
+                frame_recon.into_yuv()
+            };
+            (frame_recon_yuv, frame_bitstream.bytes_written())
+        };
         if let Some(writer) = reconstruction.as_deref_mut() {
-            writer.write_all(&frame_recon.into_yuv()).map_err(|err| {
+            writer.write_all(&frame_recon_yuv).map_err(|err| {
                 format!("failed to write VVC reconstruction frame {frame_idx}: {err}")
             })?;
+        }
+        if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
+            frame_metrics(VvcEncodeFrameMetrics {
+                frame_idx,
+                frame_count: params.frames,
+                bitstream_bytes: frame_bitstream_bytes,
+                source: &frame_buf,
+                reconstruction: &frame_recon_yuv,
+            });
         }
     }
 
@@ -749,6 +816,36 @@ pub fn vvc_yuv_encode_stream_with_limits_and_progress<R: Read, W: Write>(
             params.frames
         )),
         Err(err) => Err(format!("failed to check VVC input length: {err}")),
+    }
+}
+
+struct CountingWriter<'a, W: Write> {
+    inner: &'a mut W,
+    bytes_written: usize,
+}
+
+impl<'a, W: Write> CountingWriter<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> usize {
+        self.bytes_written
+    }
+}
+
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes_written += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 

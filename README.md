@@ -128,7 +128,12 @@ inputs through the imported software model for that codec. Filters are still
 parsed for the future pipeline shape but are not executed yet.
 
 Input options, such as `--video`, `--fps`, and `--frames`, belong after the
-input path. Filter options come next. Output/encoder options, such as
+input path. If `--frames` and filename frame-count metadata are both omitted
+for a file input, `ff encode` processes whole frames until the raw input file
+reaches EOF. If `--frames` is larger than the number of complete frames in the
+file, `ff encode` stops at EOF instead of failing. Source filters require
+explicit `--frames` because they do not have a file EOF. Filter options come
+next. Output/encoder options, such as
 `--set lossless`, `--preset`, and repeated `--set key[=value]`, belong after
 `--encode codec:output`. Bare `--set` keys imply `true`. Global accepted
 settings are listed by `ff codecs`; codec-specific settings can be added later
