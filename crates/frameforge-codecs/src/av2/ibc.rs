@@ -310,12 +310,12 @@ fn visit_local_ibc_block(
     // AV2 v1.0.0 av2_is_dv_in_local_range()/setup_ref_mv_list(): a selected
     // IntraBC DRL index is only correct when the encoder mirrors AVM's
     // decoded-BV and pseudo-coded availability state. The current fixed-8x8
-    // subset keeps only the left-copy cases that survive REF local-range
-    // checks, plus the terminal-row Above8x8 default case. Top-row Left8x8 and
-    // non-terminal above copies need a fuller is_mi_coded mirror before they
-    // can be selected without REF desynchronization.
+    // subset keeps the left-copy cases that survive REF local-range checks,
+    // plus the terminal-row Above8x8 default case. Non-terminal above copies
+    // need a fuller is_mi_coded mirror before they can be selected without REF
+    // desynchronization.
     let above_match = default_above_bvp_supported && terminal_tile_row && direct_above_match;
-    let left_match = default_left_bvp_supported && above_in_same_tile && direct_left_match;
+    let left_match = default_left_bvp_supported && left_in_same_tile && direct_left_match;
     let direct_candidate = match (above_match, left_match) {
         (true, true) => {
             let above_idx = above_drl_idx.expect("above match has a DRL index");

@@ -1997,36 +1997,33 @@ impl Av2TxbEntropyContexts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2IntrabcContext {
-    ibc_above: [bool; PARTITION_CONTEXT_DIM],
-    ibc_left: [bool; PARTITION_CONTEXT_DIM],
-    skip_above: [bool; PARTITION_CONTEXT_DIM],
-    skip_left: [bool; PARTITION_CONTEXT_DIM],
+    coded: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+    ibc: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+    skip: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
 }
 
 impl Av2IntrabcContext {
     fn new() -> Self {
         Self {
-            ibc_above: [false; PARTITION_CONTEXT_DIM],
-            ibc_left: [false; PARTITION_CONTEXT_DIM],
-            skip_above: [false; PARTITION_CONTEXT_DIM],
-            skip_left: [false; PARTITION_CONTEXT_DIM],
+            coded: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+            ibc: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+            skip: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
         }
     }
 
-    fn intrabc_ctx(&self, row_mi: usize, col_mi: usize) -> usize {
+    fn intrabc_ctx(&self, row_mi: usize, col_mi: usize, block_size: Av2MvpBlockSize) -> usize {
         // AV2 v1.0.0 read_intra_frame_mode_info()/get_intrabc_ctx(): the
-        // context is derived from already-decoded above and left mode info.
-        // TODO(av2 entropy): when SDP/chroma-only trees or non-8x8 leaves are
-        // enabled, replace this shared 8x8 map with the same MB_MODE_INFO
-        // availability rules used by AVM.
-        usize::from(self.ibc_above[col_mi]) + usize::from(self.ibc_left[row_mi])
+        // context is derived from the first two available spatial neighbors
+        // in AVM's bottom-left, above-right, left, above scan. At a 64x64 SB
+        // top boundary AVM suppresses above/above-right for this context.
+        self.neighbor_sum(row_mi, col_mi, block_size, true, |state| state.ibc)
     }
 
-    fn skip_txfm_ctx(&self, row_mi: usize, col_mi: usize) -> usize {
+    fn skip_txfm_ctx(&self, row_mi: usize, col_mi: usize, block_size: Av2MvpBlockSize) -> usize {
         // AV2 v1.0.0 read_skip_txfm()/get_txb_ctx() uses neighboring
-        // skip_txfm state for IntraBC blocks. Keep this paired with the IBC
-        // context map so a copied block updates both contexts together.
-        usize::from(self.skip_above[col_mi]) + usize::from(self.skip_left[row_mi])
+        // skip_txfm state from the same two-neighbor scan, but the line-buffer
+        // variant keeps above/above-right available at SB top boundaries.
+        self.neighbor_sum(row_mi, col_mi, block_size, false, |state| state.skip)
     }
 
     fn update_leaf(
@@ -2037,15 +2034,98 @@ impl Av2IntrabcContext {
         use_intrabc: bool,
         skip_txfm: bool,
     ) {
-        for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
-            self.ibc_above[col] = use_intrabc;
-            self.skip_above[col] = skip_txfm;
-        }
         for row in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
-            self.ibc_left[row] = use_intrabc;
-            self.skip_left[row] = skip_txfm;
+            for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
+                self.coded[row][col] = true;
+                self.ibc[row][col] = use_intrabc;
+                self.skip[row][col] = skip_txfm;
+            }
         }
     }
+
+    fn neighbor_sum(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+        suppress_above_at_sb_top: bool,
+        value: impl Fn(Av2IntrabcNeighborState) -> bool,
+    ) -> usize {
+        let not_at_sb_top_boundary = row_mi % PARTITION_CONTEXT_DIM != 0;
+        let include_above = !suppress_above_at_sb_top || not_at_sb_top_boundary;
+        let mut count = 0usize;
+        let mut sum = 0usize;
+
+        let mut push = |state: Option<Av2IntrabcNeighborState>| {
+            if count >= 2 {
+                return;
+            }
+            if let Some(state) = state {
+                sum += usize::from(value(state));
+                count += 1;
+            }
+        };
+
+        push(self.bottom_left_state(row_mi, col_mi, block_size));
+        if include_above {
+            push(self.above_right_state(row_mi, col_mi, block_size));
+        }
+        push(self.left_state(row_mi, col_mi));
+        if include_above {
+            push(self.above_state(row_mi, col_mi));
+        }
+        sum
+    }
+
+    fn state_at(&self, row_mi: usize, col_mi: usize) -> Option<Av2IntrabcNeighborState> {
+        if row_mi >= PARTITION_CONTEXT_DIM || col_mi >= PARTITION_CONTEXT_DIM {
+            return None;
+        }
+        self.coded[row_mi][col_mi].then_some(Av2IntrabcNeighborState {
+            ibc: self.ibc[row_mi][col_mi],
+            skip: self.skip[row_mi][col_mi],
+        })
+    }
+
+    fn bottom_left_state(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<Av2IntrabcNeighborState> {
+        col_mi
+            .checked_sub(1)
+            .and_then(|col| self.state_at(row_mi + block_size.mi_height().saturating_sub(1), col))
+    }
+
+    fn above_right_state(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<Av2IntrabcNeighborState> {
+        row_mi
+            .checked_sub(1)
+            .and_then(|row| self.state_at(row, col_mi + block_size.mi_width().saturating_sub(1)))
+    }
+
+    fn left_state(&self, row_mi: usize, col_mi: usize) -> Option<Av2IntrabcNeighborState> {
+        col_mi
+            .checked_sub(1)
+            .and_then(|col| self.state_at(row_mi, col))
+    }
+
+    fn above_state(&self, row_mi: usize, col_mi: usize) -> Option<Av2IntrabcNeighborState> {
+        row_mi
+            .checked_sub(1)
+            .and_then(|row| self.state_at(row, col_mi))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2IntrabcNeighborState {
+    ibc: bool,
+    skip: bool,
 }
 
 fn choose_partition(
@@ -2396,7 +2476,7 @@ fn write_intrabc_flag(
     // AV2 v1.0.0 intra-frame mode syntax, mirrored from AVM
     // write_mb_modes_kf()/read_intra_frame_mode_info(): when allow_intrabc is
     // set, each non-chroma leaf signals use_intrabc before normal intra modes.
-    let ctx = context.intrabc_ctx(decision.row, decision.col);
+    let ctx = context.intrabc_ctx(decision.row, decision.col, decision.block_size);
     let mut cdf = DEFAULT_INTRABC_CDFS[ctx];
     writer.write_symbol(
         "tile.intrabc.use_intrabc",
@@ -2423,7 +2503,7 @@ fn write_intrabc_copy(
         usize::from(drl_idx) < max_ref_bv_count,
         "AV2 local IntraBC DRL index is outside the BVP stack"
     );
-    let skip_ctx = context.skip_txfm_ctx(decision.row, decision.col);
+    let skip_ctx = context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
     writer.write_symbol("tile.intrabc.skip_txfm", 1, &mut skip_cdf, 2, false);
 
