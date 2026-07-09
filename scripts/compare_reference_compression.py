@@ -18,6 +18,7 @@ DEFAULT_VECTOR_DIR = REPO_ROOT / "verification" / "generated" / "test_vectors"
 DEFAULT_OUT_DIR = REPO_ROOT / "verification" / "generated" / "compression_compare"
 DEFAULT_LOG_DIR = REPO_ROOT / "verification" / "generated" / "compression_compare_logs"
 REFERENCE_TOOLS = REPO_ROOT / "scripts" / "reference_tools.py"
+VTM_CFG_DIR = REPO_ROOT / "verification" / "references" / "vvc" / "vtm" / "cfg"
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,9 @@ def run_case(
         frameforge_output.unlink()
     if reference_output.exists():
         reference_output.unlink()
+    reference_recon = reference_recon_path(reference_output)
+    if reference_recon.exists():
+        reference_recon.unlink()
 
     frameforge_cmd = [
         str(args.ff),
@@ -202,6 +206,10 @@ def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path]:
     return frameforge_output, reference_output, log
 
 
+def reference_recon_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}_recon.yuv")
+
+
 def reference_encode_command(
     vector: generate_test_vectors.TestVector,
     vector_path: Path,
@@ -209,11 +217,23 @@ def reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
-    if args.codec != "av2":
-        raise SystemExit(
-            "reference compression comparison currently supports codec av2; "
-            f"got {args.codec}"
-        )
+    if args.codec == "av2":
+        return av2_reference_encode_command(vector, vector_path, output, encoder, args)
+    if args.codec == "vvc":
+        return vvc_reference_encode_command(vector, vector_path, output, encoder, args)
+    raise SystemExit(
+        "reference compression comparison currently supports codecs av2 and vvc; "
+        f"got {args.codec}"
+    )
+
+
+def av2_reference_encode_command(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+    encoder: str,
+    args: argparse.Namespace,
+) -> list[str]:
     command = [
         encoder,
         "--codec=av2",
@@ -240,6 +260,59 @@ def reference_encode_command(
     if args.reference_args:
         command.extend(shlex.split(args.reference_args))
     command.extend(["-o", str(output), str(vector_path)])
+    return command
+
+
+def vvc_reference_encode_command(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+    encoder: str,
+    args: argparse.Namespace,
+) -> list[str]:
+    if vector.fmt == "yuv420p8":
+        chroma_format = "420"
+    elif vector.fmt == "yuv444p8":
+        chroma_format = "444"
+    else:
+        raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
+
+    command = [
+        encoder,
+        "-c",
+        str(VTM_CFG_DIR / "encoder_intra_vtm.cfg"),
+    ]
+    if vector.lossless:
+        command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless.cfg")])
+        if vector.fmt == "yuv444p8":
+            command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless444.cfg")])
+
+    command.extend(
+        [
+            "-i",
+            str(vector_path),
+            "-b",
+            str(output),
+            "-o",
+            str(reference_recon_path(output)),
+            "-wdt",
+            str(vector.width),
+            "-hgt",
+            str(vector.height),
+            "-fr",
+            str(vector.fps or 30),
+            "-f",
+            str(vector.frames),
+            "--InputBitDepth=8",
+            "--InternalBitDepth=8",
+            f"--InputChromaFormat={chroma_format}",
+            f"--ChromaFormatIDC={chroma_format}",
+            "--TemporalSubsampleRatio=1",
+            "--Verbosity=0",
+        ]
+    )
+    if args.reference_args:
+        command.extend(shlex.split(args.reference_args))
     return command
 
 
