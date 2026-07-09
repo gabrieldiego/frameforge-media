@@ -80,14 +80,15 @@ make release-check
 
 ## Build-Time Composition
 
-Codec and filter availability should be selected at build time. The intended
-shape is to use Cargo features or separate crates for optional media stages so a
-binary can include only the codecs and filters it needs.
+Codec and filter availability is selected at build time. By default,
+`make build` enables the imported AV2 and VVC software models so the copied
+`./ff` binary can encode with either codec.
 
-Example with both imported codec models enabled:
+Override `CARGO_FEATURES` to build a smaller or more specialized binary:
 
 ```sh
-make build CARGO_FEATURES="codec-av2 codec-vvc filter-scale"
+make build CARGO_FEATURES="codec-av2 filter-scale"
+make build CARGO_FEATURES=
 ```
 
 The `codec-av2` and `codec-vvc` features enable the imported experimental

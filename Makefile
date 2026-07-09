@@ -1,5 +1,5 @@
 CARGO ?= cargo
-CARGO_FEATURES ?=
+CARGO_FEATURES ?= codec-av2 codec-vvc
 CARGO_FLAGS := $(if $(strip $(CARGO_FEATURES)),--features "$(CARGO_FEATURES)",)
 ARGS ?=
 
@@ -19,7 +19,8 @@ help:
 		'  make clean            Remove Cargo build outputs' \
 		'' \
 		'Optional build-time selection:' \
-		'  make build CARGO_FEATURES="codec-av2 filter-scale"'
+		'  make build CARGO_FEATURES="codec-av2 filter-scale"' \
+		'  make build CARGO_FEATURES=        Build without optional stages'
 
 check-tools:
 	@command -v $(CARGO) >/dev/null || { echo 'error: cargo not found'; exit 1; }

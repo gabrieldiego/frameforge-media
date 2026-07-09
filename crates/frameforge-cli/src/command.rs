@@ -66,7 +66,17 @@ fn run_encode(args: EncodeArgs) -> ExitCode {
         return exit;
     }
 
-    match encode_with_model(codec.name, &args) {
+    let job = match encode_job(&args) {
+        Ok(job) => job,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(1);
+        }
+    };
+
+    print_encode_config(codec.name, &args, &job);
+
+    match encode_with_model(codec.name, job) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");
@@ -137,8 +147,34 @@ struct EncodeJob {
     format: PixelFormat,
 }
 
-fn encode_with_model(codec_name: &str, args: &EncodeArgs) -> Result<(), String> {
-    let job = encode_job(args)?;
+fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
+    let settings = if args.settings.is_empty() {
+        "none".to_string()
+    } else {
+        args.settings.join(",")
+    };
+    eprintln!(
+        "input: path={} video={}x{}:{} frames={} fps={}",
+        job.input.display(),
+        job.width,
+        job.height,
+        job.format,
+        job.frames,
+        args.fps.as_deref().unwrap_or("unspecified")
+    );
+    for filter in &args.filters {
+        eprintln!("filter: {filter}");
+    }
+    eprintln!(
+        "encoder: codec={} output={} settings={} preset={}",
+        codec_name,
+        job.output.display(),
+        settings,
+        args.preset.as_deref().unwrap_or("default")
+    );
+}
+
+fn encode_with_model(codec_name: &str, job: EncodeJob) -> Result<(), String> {
     match codec_name {
         "av2" => encode_av2(job),
         "vvc" => encode_vvc(job),
