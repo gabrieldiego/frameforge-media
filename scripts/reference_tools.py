@@ -308,7 +308,7 @@ def decode_bitstream(
     if output.exists():
         output.unlink()
     if manifest.decode_style == "avm":
-        cmd = [decoder, "-o", str(output), str(bitstream)]
+        cmd = [decoder, "--rawvideo", "-o", str(output), str(bitstream)]
     elif manifest.decode_style == "vtm":
         cmd = [decoder, "-b", str(bitstream), "-o", str(output)]
         if Path(decoder).name.startswith("DecoderAnalyserApp"):
