@@ -112,6 +112,14 @@ pub const CODECS: &[StageInfo] = &[
 
 pub const FILTERS: &[StageInfo] = &[
     StageInfo {
+        name: "pattern",
+        kind: StageKind::Filter,
+        feature: "filter-pattern",
+        compiled: cfg!(feature = "filter-pattern"),
+        summary: "generated raw-video pattern source",
+        settings: NO_SETTINGS,
+    },
+    StageInfo {
         name: "identity",
         kind: StageKind::Filter,
         feature: "filter-identity",

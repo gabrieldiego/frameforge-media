@@ -1,0 +1,5 @@
+# description=Tiny generated vectors for quick AV2/VVC CLI encode checks.
+name,width,height,frames,format,pattern,fps
+black_420,16,16,1,yuv420p8,black,30
+checker_420,16,24,1,yuv420p8,checker,30
+blocks_444,32,32,1,yuv444p8,color_blocks,30

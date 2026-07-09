@@ -78,22 +78,33 @@ Run the default local quality gate:
 make release-check
 ```
 
+Generate and run the current software encode fixtures:
+
+```sh
+make test-vector-sets
+make validate-set CODEC=av2 VALIDATION_SET=smoke
+make validate-set CODEC=vvc VALIDATION_SET=smoke
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SOURCE_FILTERS=1
+```
+
 ## Build-Time Composition
 
 Codec and filter availability is selected at build time. By default,
-`make build` enables the imported AV2 and VVC software models so the copied
-`./ff` binary can encode with either codec.
+`make build` uses Cargo's `--all-features` mode so the copied `./ff` binary
+includes every codec and filter stage currently compiled by this workspace.
 
 Override `CARGO_FEATURES` to build a smaller or more specialized binary:
 
 ```sh
+make build CARGO_FEATURES=all
 make build CARGO_FEATURES="codec-av2 filter-scale"
 make build CARGO_FEATURES=
 ```
 
 The `codec-av2` and `codec-vvc` features enable the imported experimental
-software models. Filter features are discovery placeholders for now; parsed
-filters are not executed yet.
+software models. The `filter-pattern` feature enables input-free generated
+pattern sources for fixtures. Other filter features are discovery placeholders
+for now; parsed transform filters are not executed yet.
 
 ## CLI Shape
 
@@ -105,6 +116,8 @@ ff codecs
 ff filters
 ff encode input.yuv --video 640x360:yuv444p \
   --encode av2:output.obu --set lossless
+ff encode --filter pattern=checker --video 64x64:yuv444p \
+  --encode av2:pattern.obu
 ff encode input_640x360_30_1f_yuv444p8.yuv \
   --filter identity --encode av2:output.obu
 ```
@@ -120,6 +133,11 @@ input path. Filter options come next. Output/encoder options, such as
 `--encode codec:output`. Bare `--set` keys imply `true`. Global accepted
 settings are listed by `ff codecs`; codec-specific settings can be added later
 when a feature really needs them.
+
+The positional input is optional when the first filter is a source. The initial
+source filter is `pattern=<name>`, with `black`, `checker`, `gradient`, and
+`color_blocks` patterns. Source filters require explicit `--video` metadata
+because there is no filename to infer dimensions or pixel format from.
 
 Raw video metadata uses a compact `WxH:pixfmt` spelling when it cannot be
 inferred from the input filename or needs to be overridden. File names imply
@@ -158,6 +176,11 @@ Validation should remain strict and reproducible:
 - reference decoders should validate generated bitstreams when available;
 - checksums and bitstream sizes should be recorded for regressions;
 - generated test vectors should be deterministic.
+
+The first batch fixtures live under `verification/test_vector_sets/`. They are
+generated on demand into `verification/generated/test_vectors/` and encoded by
+`scripts/run_validation_set.py`, which records per-vector logs, output sizes,
+and SHA-256 checksums under `verification/generated/`.
 
 ## License
 

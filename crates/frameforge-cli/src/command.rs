@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -62,7 +62,7 @@ fn run_encode(args: EncodeArgs) -> ExitCode {
         return ExitCode::from(3);
     }
 
-    if let Some(exit) = validate_filters(&args.filters) {
+    if let Some(exit) = validate_filters(&args) {
         return exit;
     }
 
@@ -111,7 +111,8 @@ fn validate_codec_settings(codec: StageInfo, settings: &[String]) -> Option<Exit
     None
 }
 
-fn validate_filters(filters: &[String]) -> Option<ExitCode> {
+fn validate_filters(args: &EncodeArgs) -> Option<ExitCode> {
+    let filters = &args.filters;
     for filter_name in args::filter_names(filters) {
         let Some(filter) = catalog::filter(filter_name) else {
             eprintln!("error: unknown filter '{filter_name}'");
@@ -126,11 +127,225 @@ fn validate_filters(filters: &[String]) -> Option<ExitCode> {
             return Some(ExitCode::from(3));
         }
     }
-    if !filters.is_empty() {
-        eprintln!("error: filters are parsed but execution is not implemented yet");
+    if filters.is_empty() {
+        return None;
+    }
+    if args.input.is_none() && is_pattern_source_pipeline(filters) {
+        return None;
+    }
+    if args.input.is_none() {
+        eprintln!("error: encode without an input requires a source filter such as --filter pattern=black");
         return Some(ExitCode::from(4));
     }
-    None
+    eprintln!(
+        "error: transform filters are parsed but execution is not implemented yet; only --filter pattern=<name> can source frames without input"
+    );
+    Some(ExitCode::from(4))
+}
+
+fn is_pattern_source_pipeline(filters: &[String]) -> bool {
+    if filters.len() != 1 {
+        return false;
+    }
+    args::filter_names(filters).next() == Some("pattern")
+}
+
+#[derive(Debug, Clone)]
+enum EncodeInput {
+    Path(PathBuf),
+    Pattern(PatternSourceSpec),
+}
+
+#[derive(Debug, Clone)]
+struct PatternSourceSpec {
+    pattern: PatternKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternKind {
+    Black,
+    Checker,
+    Gradient,
+    ColorBlocks,
+}
+
+impl PatternSourceSpec {
+    fn from_filter(spec: &str) -> Result<Self, String> {
+        if args::filter_names(&[spec.to_string()]).next() != Some("pattern") {
+            return Err("source filter must be pattern=<name>".to_string());
+        }
+        let Some((_, value)) = spec.split_once('=').or_else(|| spec.split_once(':')) else {
+            return Err("pattern source expects --filter pattern=<name>".to_string());
+        };
+        let pattern = PatternKind::parse(value)?;
+        Ok(Self { pattern })
+    }
+}
+
+impl PatternKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "black" => Ok(Self::Black),
+            "checker" => Ok(Self::Checker),
+            "gradient" => Ok(Self::Gradient),
+            "color_blocks" | "blocks" => Ok(Self::ColorBlocks),
+            other => Err(format!(
+                "unknown pattern source '{other}'; accepted patterns: black, checker, gradient, color_blocks"
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Black => "black",
+            Self::Checker => "checker",
+            Self::Gradient => "gradient",
+            Self::ColorBlocks => "color_blocks",
+        }
+    }
+}
+
+fn input_source_filter(args: &EncodeArgs) -> Result<PatternSourceSpec, String> {
+    if args.filters.is_empty() {
+        return Err("encode requires an input path or source filter".to_string());
+    }
+    if !is_pattern_source_pipeline(&args.filters) {
+        return Err(
+            "encode without input currently supports only one source filter: --filter pattern=<name>"
+                .to_string(),
+        );
+    }
+    PatternSourceSpec::from_filter(&args.filters[0])
+}
+
+fn generated_pattern_input(job: &EncodeJob, source: &PatternSourceSpec) -> Result<Vec<u8>, String> {
+    job.format
+        .validate_geometry(job.width, job.height)
+        .map_err(|err| err.to_string())?;
+    match job.format {
+        PixelFormat::Yuv420p8 => Ok(generate_yuv420p8(job, source.pattern)),
+        PixelFormat::Yuv444p8 => Ok(generate_yuv444p8(job, source.pattern)),
+        other => Err(format!(
+            "pattern source currently supports yuv420p8 and yuv444p8; got {other}"
+        )),
+    }
+}
+
+fn generate_yuv420p8(job: &EncodeJob, pattern: PatternKind) -> Vec<u8> {
+    let mut out = Vec::new();
+    for frame in 0..job.frames {
+        let (y_plane, u444, v444) = render_pattern_frame(job.width, job.height, frame, pattern);
+        let mut u_plane = Vec::with_capacity(job.width * job.height / 4);
+        let mut v_plane = Vec::with_capacity(job.width * job.height / 4);
+        for y in (0..job.height).step_by(2) {
+            for x in (0..job.width).step_by(2) {
+                let indices = (
+                    y * job.width + x,
+                    y * job.width + x + 1,
+                    (y + 1) * job.width + x,
+                    (y + 1) * job.width + x + 1,
+                );
+                u_plane.push(
+                    ((u444[indices.0] as u16
+                        + u444[indices.1] as u16
+                        + u444[indices.2] as u16
+                        + u444[indices.3] as u16)
+                        / 4) as u8,
+                );
+                v_plane.push(
+                    ((v444[indices.0] as u16
+                        + v444[indices.1] as u16
+                        + v444[indices.2] as u16
+                        + v444[indices.3] as u16)
+                        / 4) as u8,
+                );
+            }
+        }
+        out.extend(y_plane);
+        out.extend(u_plane);
+        out.extend(v_plane);
+    }
+    out
+}
+
+fn generate_yuv444p8(job: &EncodeJob, pattern: PatternKind) -> Vec<u8> {
+    let mut out = Vec::new();
+    for frame in 0..job.frames {
+        let (y_plane, u_plane, v_plane) =
+            render_pattern_frame(job.width, job.height, frame, pattern);
+        out.extend(y_plane);
+        out.extend(u_plane);
+        out.extend(v_plane);
+    }
+    out
+}
+
+fn render_pattern_frame(
+    width: usize,
+    height: usize,
+    frame: usize,
+    pattern: PatternKind,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut y_plane = vec![0; width * height];
+    let mut u_plane = vec![0; width * height];
+    let mut v_plane = vec![0; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let (yy, uu, vv) = pattern_sample(pattern, x, y, frame);
+            let idx = y * width + x;
+            y_plane[idx] = yy;
+            u_plane[idx] = uu;
+            v_plane[idx] = vv;
+        }
+    }
+    (y_plane, u_plane, v_plane)
+}
+
+fn pattern_sample(pattern: PatternKind, x: usize, y: usize, frame: usize) -> (u8, u8, u8) {
+    match pattern {
+        PatternKind::Black => (0, 0, 0),
+        PatternKind::Checker => {
+            if ((x / 8) + (y / 8) + frame) & 1 == 0 {
+                (208, 176, 80)
+            } else {
+                (48, 96, 160)
+            }
+        }
+        PatternKind::Gradient => (
+            ((x * 7 + y * 5 + frame * 17) & 0xFF) as u8,
+            ((64 + x * 3 + frame * 11) & 0xFF) as u8,
+            ((96 + y * 4 + frame * 13) & 0xFF) as u8,
+        ),
+        PatternKind::ColorBlocks => {
+            const PALETTE: [(u8, u8, u8); 4] = [
+                (32, 128, 128),
+                (80, 96, 176),
+                (144, 176, 96),
+                (224, 112, 144),
+            ];
+            PALETTE[((x / 8) + (y / 8) * 2 + frame) % PALETTE.len()]
+        }
+    }
+}
+
+fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
+    match &job.input {
+        EncodeInput::Path(path) => {
+            let file = File::open(path)
+                .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
+            Ok(Box::new(BufReader::new(file)))
+        }
+        EncodeInput::Pattern(source) => {
+            Ok(Box::new(Cursor::new(generated_pattern_input(job, source)?)))
+        }
+    }
+}
+
+fn input_label(input: &EncodeInput) -> String {
+    match input {
+        EncodeInput::Path(path) => format!("path={}", path.display()),
+        EncodeInput::Pattern(source) => format!("source=pattern:{}", source.pattern.name()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +354,7 @@ fn validate_filters(filters: &[String]) -> Option<ExitCode> {
     allow(dead_code)
 )]
 struct EncodeJob {
-    input: PathBuf,
+    input: EncodeInput,
     output: PathBuf,
     frames: usize,
     width: usize,
@@ -154,8 +369,8 @@ fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
         args.settings.join(",")
     };
     eprintln!(
-        "input: path={} video={}x{}:{} frames={} fps={}",
-        job.input.display(),
+        "input: {} video={}x{}:{} frames={} fps={}",
+        input_label(&job.input),
         job.width,
         job.height,
         job.format,
@@ -183,7 +398,10 @@ fn encode_with_model(codec_name: &str, job: EncodeJob) -> Result<(), String> {
 }
 
 fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
-    let input = PathBuf::from(args.input.as_deref().expect("parser requires input"));
+    let input = match args.input.as_deref() {
+        Some(path) => EncodeInput::Path(PathBuf::from(path)),
+        None => EncodeInput::Pattern(input_source_filter(args)?),
+    };
     let output = PathBuf::from(args.output.as_deref().expect("parser requires output"));
     let video = args
         .video
@@ -216,7 +434,7 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
         },
         format: job.format,
     };
-    let mut input = open_reader(&job.input)?;
+    let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
     frameforge_codecs::av2::av2_encode_fixed_black_444(&mut input, &mut output, None, request)?;
     flush_writer(&job.output, &mut output)
@@ -243,7 +461,7 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
     };
     let limits = frameforge_codecs::vvc::VvcVideoLimits::unbounded();
     geometry.validate_against(limits)?;
-    let mut input = open_reader(&job.input)?;
+    let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
     frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits(
         &mut input,
@@ -260,16 +478,6 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
 #[cfg(not(feature = "codec-vvc"))]
 fn encode_vvc(_job: EncodeJob) -> Result<(), String> {
     Err("VVC support is not compiled into this binary".to_string())
-}
-
-#[cfg_attr(
-    not(any(feature = "codec-av2", feature = "codec-vvc")),
-    allow(dead_code)
-)]
-fn open_reader(path: &Path) -> Result<BufReader<File>, String> {
-    let file = File::open(path)
-        .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
-    Ok(BufReader::new(file))
 }
 
 #[cfg_attr(

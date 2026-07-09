@@ -24,10 +24,10 @@ Those modules are allowed to keep codec-specific internal structures while they
 are adapted from the hardware workspace model into a software-facing API.
 
 Optional codecs and filters should be selected at build time using Cargo
-features or separate crates. The Makefile default enables the imported AV2 and
-VVC models so `./ff` is usable after `make build`; override `CARGO_FEATURES`
-for narrower binaries. Runtime pipeline construction can still choose which
-compiled stages to connect.
+features or separate crates. The Makefile default uses Cargo `--all-features`
+so `./ff` is usable after `make build`; override `CARGO_FEATURES` for narrower
+binaries. Runtime pipeline construction can still choose which compiled stages
+to connect.
 
 ## CLI Contract
 

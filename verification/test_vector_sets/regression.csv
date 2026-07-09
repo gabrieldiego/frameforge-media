@@ -1,0 +1,8 @@
+# description=Small generated regression set covering 4:2:0, 4:4:4, and multi-frame input.
+name,width,height,frames,format,pattern,fps
+black_420,16,16,1,yuv420p8,black,30
+checker_420,16,24,1,yuv420p8,checker,30
+gradient_420,32,24,1,yuv420p8,gradient,30
+blocks_444,32,32,1,yuv444p8,color_blocks,30
+gradient_444,32,32,1,yuv444p8,gradient,30
+blocks_444_2f,64,64,2,yuv444p8,color_blocks,30

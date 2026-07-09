@@ -47,7 +47,7 @@ pub const USAGE: &[&str] = &[
     "ff --version",
     "ff codecs",
     "ff filters",
-    "ff encode <input> [input-options] [--filter <spec>] --encode <codec:path> [output-options]",
+    "ff encode [<input>] [input-options] [--filter <spec>] --encode <codec:path> [output-options]",
 ];
 
 pub const OUTPUT_OPTIONS: &[HelpRow] = &[
@@ -68,7 +68,7 @@ pub const OUTPUT_OPTIONS: &[HelpRow] = &[
 pub const INPUT_OPTIONS: &[HelpRow] = &[
     HelpRow {
         syntax: "<input>",
-        summary: "Raw input path",
+        summary: "Raw input path; optional when the first filter is a source",
     },
     HelpRow {
         syntax: "filename metadata",
@@ -90,7 +90,7 @@ pub const INPUT_OPTIONS: &[HelpRow] = &[
 
 pub const FILTER_OPTIONS: &[HelpRow] = &[HelpRow {
     syntax: "-f, --filter <spec>",
-    summary: "Filter stage, repeatable, e.g. scale=w=640:h=360",
+    summary: "Filter stage, repeatable, e.g. pattern=black or scale=w=640:h=360",
 }];
 
 pub const DISCOVERY_COMMANDS: &[HelpRow] = &[
@@ -222,8 +222,8 @@ fn parse_encode(mut cursor: Cursor) -> Result<Command, String> {
     }
 
     resolve_encode_input_metadata(&mut args)?;
-    if args.input.is_none() {
-        return Err("encode requires an input path".to_string());
+    if args.input.is_none() && args.filters.is_empty() {
+        return Err("encode requires an input path or source filter".to_string());
     }
     if args.codec.is_none() || args.output.is_none() {
         return Err("encode requires --encode codec:path".to_string());
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn encode_requires_core_io_arguments() {
         let err = parse_words(&["ff", "encode", "--encode", "av2:out.obu"]).unwrap_err();
-        assert_eq!(err, "encode requires an input path");
+        assert_eq!(err, "encode requires an input path or source filter");
     }
 
     #[test]
@@ -800,6 +800,40 @@ mod tests {
         };
         assert_eq!(args.input.as_deref(), Some("in.yuv"));
         assert_eq!(args.video, None);
+        assert_eq!(args.codec.as_deref(), Some("av2"));
+        assert_eq!(args.output.as_deref(), Some("out.obu"));
+    }
+
+    #[test]
+    fn accepts_encode_starting_with_source_filter() {
+        let command = parse_words(&[
+            "ff",
+            "encode",
+            "--filter",
+            "pattern=black",
+            "--video",
+            "16x16:yuv420p",
+            "--frames",
+            "1",
+            "--encode",
+            "av2:out.obu",
+        ])
+        .unwrap();
+
+        let Command::Encode(args) = command else {
+            panic!("expected encode command");
+        };
+        assert_eq!(args.input, None);
+        assert_eq!(args.filters, vec!["pattern=black"]);
+        assert_eq!(
+            args.video,
+            Some(VideoSpec {
+                width: 16,
+                height: 16,
+                pixel_format: Some("yuv420p8".to_string())
+            })
+        );
+        assert_eq!(args.frames, Some(1));
         assert_eq!(args.codec.as_deref(), Some("av2"));
         assert_eq!(args.output.as_deref(), Some("out.obu"));
     }
@@ -862,7 +896,7 @@ mod tests {
     fn help_is_owned_by_parser_options() {
         let text = help("test");
         for expected in [
-            "ff encode <input>",
+            "ff encode [<input>]",
             "filename metadata",
             "*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv",
             "--encode <codec:path>",
@@ -870,6 +904,7 @@ mod tests {
             "--fps <rate>",
             "-n, --frames <count>",
             "-f, --filter <spec>",
+            "pattern=black",
             "--set <key[=value]>",
             "--preset <name>",
         ] {

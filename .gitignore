@@ -1,7 +1,9 @@
 /target/
 /generated/
+/verification/generated/
 /tmp/
 /ff
+__pycache__/
 *.swp
 *.swo
 *~

@@ -18,6 +18,7 @@ frameforge-codecs = { path = "../frameforge-codecs", optional = true }
 default = []
 codec-av2 = ["dep:frameforge-codecs", "frameforge-codecs/av2"]
 codec-vvc = ["dep:frameforge-codecs", "frameforge-codecs/vvc"]
+filter-pattern = []
 filter-identity = []
 filter-crop = []
 filter-scale = []
