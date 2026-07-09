@@ -1,0 +1,17 @@
+[package]
+name = "frameforge-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tools for FrameForge."
+
+[[bin]]
+name = "ff"
+path = "src/main.rs"
+
+[dependencies]
+frameforge-core = { path = "../frameforge-core" }
+
+[lints]
+workspace = true

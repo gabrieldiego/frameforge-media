@@ -1,0 +1,7 @@
+/target/
+/generated/
+/tmp/
+/ff
+*.swp
+*.swo
+*~

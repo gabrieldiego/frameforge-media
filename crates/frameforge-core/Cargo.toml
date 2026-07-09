@@ -1,0 +1,14 @@
+[package]
+name = "frameforge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core media primitives for FrameForge."
+
+[lib]
+name = "frameforge_core"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

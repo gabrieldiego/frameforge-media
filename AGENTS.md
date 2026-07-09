@@ -1,4 +1,4 @@
-# FrameForge Media Agent Guide
+# FrameForge Agent Guide
 
 This file is for AI coding agents working in this repository. It captures the
 initial project intent and boundaries agreed while splitting this work out of
@@ -8,9 +8,10 @@ The scope of this file is the whole repository.
 
 ## Project Identity
 
-FrameForge Media is the software-only media pipeline sibling of FrameForge.
-FrameForge remains the hardware/RTL research and verification workspace.
-FrameForge Media is intended to grow as a safe Rust media toolkit around the
+FrameForge is the software-only media pipeline sibling of the original
+FrameForge hardware project. The hardware repository remains the RTL research
+and verification workspace.
+This repository is intended to grow as a safe Rust media toolkit around the
 pipeline model:
 
 ```text
@@ -31,7 +32,7 @@ optimize for software usability, safe Rust APIs, performance, and codec quality.
   Rust models, and strict SW/RTL/reference validation.
 - `frameforge-media`: software-only safe Rust media pipeline and codec toolkit.
 
-FrameForge Media may reuse ideas and carefully imported code from FrameForge,
+This repository may reuse ideas and carefully imported code from FrameForge,
 but it should not inherit hardware-specific constraints unless they are useful
 for validation or interoperability.
 
@@ -151,6 +152,8 @@ exist yet.
 ## Agent Workflow
 
 - Read this file before making changes.
+- Read the relevant instructions and notes under `docs/*.md` before changing
+  code or project structure.
 - Check `git status --short` before edits.
 - Keep commits small and scoped.
 - Do not copy large chunks from FrameForge without preserving attribution and
@@ -160,4 +163,3 @@ exist yet.
   exists.
 - Keep generated artifacts out of version control unless they are intentionally
   committed fixtures.
-
