@@ -301,20 +301,13 @@ fn visit_local_ibc_block(
         stats.left_hash_matches_blocked_by_fixed_drl_guard += 1;
     }
 
-    let tile_blocks_per_dim = AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE;
-    let tile_block_row = block_y % tile_blocks_per_dim;
-    let tile_block_rows = (blocks_high - (block_y / tile_blocks_per_dim) * tile_blocks_per_dim)
-        .min(tile_blocks_per_dim);
-    let terminal_tile_row = tile_block_row + 1 == tile_block_rows;
-
     // AV2 v1.0.0 av2_is_dv_in_local_range()/setup_ref_mv_list(): a selected
     // IntraBC DRL index is only correct when the encoder mirrors AVM's
     // decoded-BV and pseudo-coded availability state. The current fixed-8x8
-    // subset keeps the left-copy cases that survive REF local-range checks,
-    // plus the terminal-row Above8x8 default case. Non-terminal above copies
-    // need a fuller is_mi_coded mirror before they can be selected without REF
-    // desynchronization.
-    let above_match = default_above_bvp_supported && terminal_tile_row && direct_above_match;
+    // subset keeps direct above/left copies whose local BVP stack matches the
+    // adjacent repeated block. Non-adjacent explicit DVs remain disabled until
+    // their differential syntax and local range state are modeled as tightly.
+    let above_match = default_above_bvp_supported && above_in_same_tile && direct_above_match;
     let left_match = default_left_bvp_supported && left_in_same_tile && direct_left_match;
     let direct_candidate = match (above_match, left_match) {
         (true, true) => {
@@ -558,8 +551,8 @@ mod tests {
 
         let ibc = build_local_ibc_444(&frame, geometry).expect("IBC hash map should build");
         assert_eq!(ibc.candidate_drl_idx(0, 0), None);
-        assert_eq!(ibc.candidate_drl_idx(0, 8), None);
-        assert_eq!(ibc.candidate_drl_idx(0, 16), Some(2));
+        assert_eq!(ibc.candidate_drl_idx(0, 8), Some(2));
+        assert_eq!(ibc.candidate_drl_idx(0, 16), Some(0));
         assert_eq!(ibc.stats.raw_above_hash_matches, 2);
     }
 
