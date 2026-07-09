@@ -897,6 +897,134 @@ pub(crate) fn av2_mvp_8x8_leaf_order_for_region(
     order
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Av2MvpLeafRegion {
+    pub(crate) x: usize,
+    pub(crate) y: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+pub(crate) fn av2_luma_palette_leaf_order_for_region(
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    visible_width: usize,
+    visible_height: usize,
+    palette: &Av2LumaPalette444,
+) -> Vec<Av2MvpLeafRegion> {
+    assert!(visible_width <= MVP_SUPERBLOCK_SIZE);
+    assert!(visible_height <= MVP_SUPERBLOCK_SIZE);
+    assert_eq!(visible_width % MVP_LEAF_BLOCK_SIZE, 0);
+    assert_eq!(visible_height % MVP_LEAF_BLOCK_SIZE, 0);
+
+    let mut order = Vec::new();
+    append_luma_palette_leaf_order(
+        0,
+        0,
+        Av2MvpBlockSize::BLOCK_64X64,
+        visible_height / MI_SIZE,
+        visible_width / MI_SIZE,
+        tile_origin_x,
+        tile_origin_y,
+        palette,
+        &mut order,
+    );
+    order
+}
+
+fn append_luma_palette_leaf_order(
+    row_mi: usize,
+    col_mi: usize,
+    block_size: Av2MvpBlockSize,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    palette: &Av2LumaPalette444,
+    order: &mut Vec<Av2MvpLeafRegion>,
+) {
+    if row_mi >= visible_rows_mi || col_mi >= visible_cols_mi {
+        return;
+    }
+
+    let partition = choose_luma_palette_partition(
+        row_mi,
+        col_mi,
+        block_size,
+        visible_rows_mi,
+        visible_cols_mi,
+        tile_origin_x,
+        tile_origin_y,
+        Some(palette),
+    );
+    match partition {
+        Av2MvpPartition::None => {
+            let x = col_mi * MI_SIZE;
+            let y = row_mi * MI_SIZE;
+            order.push(Av2MvpLeafRegion {
+                x,
+                y,
+                width: block_size.width.min(visible_cols_mi * MI_SIZE - x),
+                height: block_size.height.min(visible_rows_mi * MI_SIZE - y),
+            });
+        }
+        Av2MvpPartition::Horz => {
+            let subsize = block_size
+                .subsize(partition)
+                .expect("AV2 MVP horizontal partition must have a subsize");
+            append_luma_palette_leaf_order(
+                row_mi,
+                col_mi,
+                subsize,
+                visible_rows_mi,
+                visible_cols_mi,
+                tile_origin_x,
+                tile_origin_y,
+                palette,
+                order,
+            );
+            append_luma_palette_leaf_order(
+                row_mi + block_size.mi_height() / 2,
+                col_mi,
+                subsize,
+                visible_rows_mi,
+                visible_cols_mi,
+                tile_origin_x,
+                tile_origin_y,
+                palette,
+                order,
+            );
+        }
+        Av2MvpPartition::Vert => {
+            let subsize = block_size
+                .subsize(partition)
+                .expect("AV2 MVP vertical partition must have a subsize");
+            append_luma_palette_leaf_order(
+                row_mi,
+                col_mi,
+                subsize,
+                visible_rows_mi,
+                visible_cols_mi,
+                tile_origin_x,
+                tile_origin_y,
+                palette,
+                order,
+            );
+            append_luma_palette_leaf_order(
+                row_mi,
+                col_mi + block_size.mi_width() / 2,
+                subsize,
+                visible_rows_mi,
+                visible_cols_mi,
+                tile_origin_x,
+                tile_origin_y,
+                palette,
+                order,
+            );
+        }
+    }
+}
+
 fn append_8x8_leaf_order(
     row_mi: usize,
     col_mi: usize,
@@ -1458,7 +1586,6 @@ impl Av2Black444TilePlan {
                 self.origin_x,
                 self.origin_y,
                 palette,
-                ibc,
             )
         } else {
             choose_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
@@ -2147,7 +2274,6 @@ fn choose_luma_palette_partition(
     tile_origin_x: usize,
     tile_origin_y: usize,
     palette: Option<&Av2LumaPalette444>,
-    ibc: Option<&Av2LocalIbc444>,
 ) -> Av2MvpPartition {
     if block_size.is_partition_point() {
         let allowed =
@@ -2163,7 +2289,6 @@ fn choose_luma_palette_partition(
             && palette.is_some_and(|palette| {
                 luma_palette_region_mergeable(
                     palette,
-                    ibc,
                     tile_origin_x + col_mi * MI_SIZE,
                     tile_origin_y + row_mi * MI_SIZE,
                     block_size,
@@ -2178,7 +2303,6 @@ fn choose_luma_palette_partition(
 
 fn luma_palette_region_mergeable(
     palette: &Av2LumaPalette444,
-    ibc: Option<&Av2LocalIbc444>,
     x0: usize,
     y0: usize,
     block_size: Av2MvpBlockSize,
@@ -2194,12 +2318,6 @@ fn luma_palette_region_mergeable(
         for local_x in (0..block_size.width).step_by(MVP_LEAF_BLOCK_SIZE) {
             let child_x = x0 + local_x;
             let child_y = y0 + local_y;
-            if ibc
-                .and_then(|ibc| ibc.candidate_copy(child_x, child_y))
-                .is_some()
-            {
-                return false;
-            }
             if palette.luma_mode_for_block(child_x, child_y) != Av2LumaIntraMode::Dc
                 || palette
                     .luma_bdpcm_horz_for_block(child_x, child_y)

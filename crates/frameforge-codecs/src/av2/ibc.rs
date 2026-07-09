@@ -1,4 +1,7 @@
-use super::tile::av2_mvp_8x8_leaf_order_for_region;
+use super::palette::Av2LumaPalette444;
+use super::tile::{
+    av2_luma_palette_leaf_order_for_region, av2_mvp_8x8_leaf_order_for_region, Av2MvpLeafRegion,
+};
 use super::Av2VideoGeometry;
 use crate::picture::{Picture, PixelFormat};
 
@@ -129,9 +132,26 @@ impl Av2LocalIbc444 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_local_ibc_444(
     frame: &[u8],
     geometry: Av2VideoGeometry,
+) -> Result<Av2LocalIbc444, String> {
+    build_local_ibc_444_with_palette(frame, geometry, None)
+}
+
+pub(crate) fn build_local_ibc_444_for_palette(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    palette: &Av2LumaPalette444,
+) -> Result<Av2LocalIbc444, String> {
+    build_local_ibc_444_with_palette(frame, geometry, Some(palette))
+}
+
+fn build_local_ibc_444_with_palette(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    palette: Option<&Av2LumaPalette444>,
 ) -> Result<Av2LocalIbc444, String> {
     let expected_len =
         Picture::expected_len(geometry.width, geometry.height, PixelFormat::Yuv444p8);
@@ -178,23 +198,58 @@ pub(crate) fn build_local_ibc_444(
                 (blocks_wide - tile_x0).min(AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE);
             let tile_blocks_high =
                 (blocks_high - tile_y0).min(AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE);
-            let leaf_order = av2_mvp_8x8_leaf_order_for_region(
-                tile_blocks_wide * AV2_IBC_HASH_BLOCK_SIZE,
-                tile_blocks_high * AV2_IBC_HASH_BLOCK_SIZE,
-            );
-            for (local_x0, local_y0) in leaf_order {
-                let block_x = tile_x0 + local_x0 / AV2_IBC_HASH_BLOCK_SIZE;
-                let block_y = tile_y0 + local_y0 / AV2_IBC_HASH_BLOCK_SIZE;
-                visit_local_ibc_block(
-                    &mut blocks,
-                    &mut coded_blocks,
-                    blocks_wide,
-                    blocks_high,
-                    block_x,
-                    block_y,
-                    &mut any_copy,
-                    &mut stats,
-                );
+            let leaf_order = if let Some(palette) = palette {
+                av2_luma_palette_leaf_order_for_region(
+                    tile_x0 * AV2_IBC_HASH_BLOCK_SIZE,
+                    tile_y0 * AV2_IBC_HASH_BLOCK_SIZE,
+                    tile_blocks_wide * AV2_IBC_HASH_BLOCK_SIZE,
+                    tile_blocks_high * AV2_IBC_HASH_BLOCK_SIZE,
+                    palette,
+                )
+            } else {
+                av2_mvp_8x8_leaf_order_for_region(
+                    tile_blocks_wide * AV2_IBC_HASH_BLOCK_SIZE,
+                    tile_blocks_high * AV2_IBC_HASH_BLOCK_SIZE,
+                )
+                .into_iter()
+                .map(|(x, y)| Av2MvpLeafRegion {
+                    x,
+                    y,
+                    width: AV2_IBC_HASH_BLOCK_SIZE,
+                    height: AV2_IBC_HASH_BLOCK_SIZE,
+                })
+                .collect()
+            };
+            for leaf in leaf_order {
+                assert_eq!(leaf.x % AV2_IBC_HASH_BLOCK_SIZE, 0);
+                assert_eq!(leaf.y % AV2_IBC_HASH_BLOCK_SIZE, 0);
+                assert_eq!(leaf.width % AV2_IBC_HASH_BLOCK_SIZE, 0);
+                assert_eq!(leaf.height % AV2_IBC_HASH_BLOCK_SIZE, 0);
+                let block_x = tile_x0 + leaf.x / AV2_IBC_HASH_BLOCK_SIZE;
+                let block_y = tile_y0 + leaf.y / AV2_IBC_HASH_BLOCK_SIZE;
+                if leaf.width == AV2_IBC_HASH_BLOCK_SIZE && leaf.height == AV2_IBC_HASH_BLOCK_SIZE {
+                    visit_local_ibc_block(
+                        &mut blocks,
+                        &mut coded_blocks,
+                        blocks_wide,
+                        blocks_high,
+                        block_x,
+                        block_y,
+                        &mut any_copy,
+                        &mut stats,
+                    );
+                } else {
+                    mark_local_ibc_intra_leaf(
+                        &mut blocks,
+                        &mut coded_blocks,
+                        blocks_wide,
+                        block_x,
+                        block_y,
+                        leaf.width / AV2_IBC_HASH_BLOCK_SIZE,
+                        leaf.height / AV2_IBC_HASH_BLOCK_SIZE,
+                        &mut stats,
+                    );
+                }
             }
         }
     }
@@ -352,6 +407,37 @@ fn visit_local_ibc_block(
     blocks[block_index].candidate_copy = candidate_copy;
     blocks[block_index].copy_vector = copy_vector;
     coded_blocks[block_index] = true;
+}
+
+fn mark_local_ibc_intra_leaf(
+    blocks: &mut [Av2LocalIbcBlock444],
+    coded_blocks: &mut [bool],
+    blocks_wide: usize,
+    block_x0: usize,
+    block_y0: usize,
+    leaf_blocks_wide: usize,
+    leaf_blocks_high: usize,
+    stats: &mut Av2LocalIbcStats,
+) {
+    for local_y in 0..leaf_blocks_high {
+        for local_x in 0..leaf_blocks_wide {
+            let block_x = block_x0 + local_x;
+            let block_y = block_y0 + local_y;
+            let block_index = block_y * blocks_wide + block_x;
+            let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
+            let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
+            stats.total_blocks += 1;
+            if x0 % AV2_IBC_TILE_SIZE != 0 {
+                stats.blocks_with_left_in_tile += 1;
+            }
+            if y0 % AV2_IBC_TILE_SIZE != 0 {
+                stats.blocks_with_above_in_tile += 1;
+            }
+            blocks[block_index].candidate_copy = None;
+            blocks[block_index].copy_vector = None;
+            coded_blocks[block_index] = true;
+        }
+    }
 }
 
 fn hash_yuv444_8x8(frame: &[u8], geometry: Av2VideoGeometry, x0: usize, y0: usize) -> u32 {

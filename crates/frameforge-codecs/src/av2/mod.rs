@@ -342,10 +342,9 @@ impl Av2Mvp444FrameMode {
         if frame == black {
             return Ok(Self::Black);
         }
-        Ok(Self::LumaPalette {
-            palette: palette::build_luma_palette_444(frame, geometry)?,
-            ibc: ibc::build_local_ibc_444(frame, geometry)?,
-        })
+        let palette = palette::build_luma_palette_444(frame, geometry)?;
+        let ibc = ibc::build_local_ibc_444_for_palette(frame, geometry, &palette)?;
+        Ok(Self::LumaPalette { palette, ibc })
     }
 
     fn allow_screen_content_tools(&self) -> bool {
