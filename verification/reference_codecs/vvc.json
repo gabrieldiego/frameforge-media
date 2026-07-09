@@ -1,0 +1,31 @@
+{
+  "codec": "vvc",
+  "label": "VTM",
+  "repo": "https://vcgit.hhi.fraunhofer.de/jvet/VVCSoftware_VTM.git",
+  "repo_env": ["FRAMEFORGE_VTM_REPO"],
+  "ref_env": ["FRAMEFORGE_VTM_REF"],
+  "root_env": ["FRAMEFORGE_VTM_ROOT"],
+  "encoder_env": ["FRAMEFORGE_VTM_ENCODER"],
+  "decoder_env": ["FRAMEFORGE_VTM_DECODER"],
+  "build_dir_env": ["FRAMEFORGE_VTM_BUILD_DIR"],
+  "build_type_env": ["FRAMEFORGE_VTM_BUILD_TYPE"],
+  "cmake_args_env": ["FRAMEFORGE_VTM_CMAKE_ARGS"],
+  "default_root": "verification/references/vvc/vtm",
+  "decoder_names": [
+    "DecoderAnalyserAppStatic",
+    "DecoderAnalyserAppStatic.exe",
+    "DecoderAnalyserApp",
+    "DecoderAnalyserApp.exe",
+    "DecoderAppStatic",
+    "DecoderAppStatic.exe",
+    "DecoderApp",
+    "DecoderApp.exe"
+  ],
+  "encoder_names": [
+    "EncoderAppStatic",
+    "EncoderAppStatic.exe",
+    "EncoderApp",
+    "EncoderApp.exe"
+  ],
+  "decode_style": "vtm"
+}

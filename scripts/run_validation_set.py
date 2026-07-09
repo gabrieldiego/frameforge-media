@@ -17,18 +17,24 @@ import generate_test_vectors
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VECTOR_DIR = REPO_ROOT / "verification" / "generated" / "test_vectors"
 DEFAULT_ENCODED_DIR = REPO_ROOT / "verification" / "generated" / "encoded"
+DEFAULT_RECON_DIR = REPO_ROOT / "verification" / "generated" / "recon"
 DEFAULT_LOG_DIR = REPO_ROOT / "verification" / "generated" / "validation_logs"
+REFERENCE_TOOLS = REPO_ROOT / "scripts" / "reference_tools.py"
 
 
 @dataclass(frozen=True)
 class ValidationResult:
     vector_name: str
     output: Path
+    recon: Path
+    reference_recon: Path | None
     log: Path
     status: str
     reason: str
     bytes_written: int | None
     sha256: str
+    recon_sha256: str
+    reference_sha256: str
 
 
 def main() -> int:
@@ -39,8 +45,15 @@ def main() -> int:
     parser.add_argument("--set-dir", type=Path, default=generate_test_vectors.DEFAULT_SET_DIR)
     parser.add_argument("--vector-dir", type=Path, default=DEFAULT_VECTOR_DIR)
     parser.add_argument("--encoded-dir", type=Path, default=DEFAULT_ENCODED_DIR)
+    parser.add_argument("--recon-dir", type=Path, default=DEFAULT_RECON_DIR)
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
     parser.add_argument("--limit", type=int, default=0, help="run only the first N vectors")
+    parser.add_argument(
+        "--reference-mode",
+        choices=("auto", "required", "off"),
+        default="auto",
+        help="decode and compare with reference tools when available",
+    )
     parser.add_argument("--setting", action="append", default=[], help="extra --set key[=value]")
     parser.add_argument(
         "--source-filters",
@@ -75,13 +88,14 @@ def main() -> int:
 
     print()
     print(f"FrameForge media validation set: {args.set} ({args.codec})")
-    print("| # | vector | result | bytes | sha256 | reason | log |")
-    print("|---:|---|---|---:|---|---|---|")
+    print("| # | vector | result | bytes | sha256 | recon_sha256 | reference_sha256 | reason | log |")
+    print("|---:|---|---|---:|---|---|---|---|---|")
     for index, result in enumerate(results, start=1):
         print(
             f"| {index} | {result.vector_name} | {result.status} | "
             f"{result.bytes_written if result.bytes_written is not None else 'n/a'} | "
-            f"{result.sha256} | {markdown_escape(result.reason)} | {relpath(result.log)} |"
+            f"{result.sha256} | {result.recon_sha256} | {result.reference_sha256} | "
+            f"{markdown_escape(result.reason)} | {relpath(result.log)} |"
         )
 
     failed = [result for result in results if result.status != "PASS"]
@@ -101,20 +115,22 @@ def load_vector_set(set_name: str, set_dir: Path) -> generate_test_vectors.TestV
 
 
 def run_file_case(vector: Path, args: argparse.Namespace) -> ValidationResult:
-    output, log = case_paths(vector.stem, args)
+    output, recon, reference_recon, log = case_paths(vector.stem, args)
     command = [
         str(args.ff),
         "encode",
         str(vector),
         "--encode",
         f"{args.codec}:{output}",
+        "--recon",
+        str(recon),
     ]
-    return run_command(vector.name, output, log, command, args.setting)
+    return run_command(vector.name, output, recon, reference_recon, log, command, args)
 
 
 def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Namespace) -> ValidationResult:
     stem = Path(vector.filename).stem
-    output, log = case_paths(stem, args)
+    output, recon, reference_recon, log = case_paths(stem, args)
     command = [
         str(args.ff),
         "encode",
@@ -127,32 +143,42 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
     ]
     if vector.fps is not None:
         command.extend(["--fps", str(vector.fps)])
-    command.extend(["--encode", f"{args.codec}:{output}"])
-    return run_command(vector.filename, output, log, command, args.setting)
+    command.extend(["--encode", f"{args.codec}:{output}", "--recon", str(recon)])
+    return run_command(vector.filename, output, recon, reference_recon, log, command, args)
 
 
-def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path]:
+def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     output_dir = args.encoded_dir / args.codec / args.set
+    recon_dir = args.recon_dir / args.codec / args.set
     log_dir = args.log_dir / args.codec
     output_dir.mkdir(parents=True, exist_ok=True)
+    recon_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     output = output_dir / f"{stem}.{codec_extension(args.codec)}"
+    recon = recon_dir / f"{stem}_internal.yuv"
+    reference_recon = recon_dir / f"{stem}_reference.yuv"
     log = log_dir / f"{args.set}_{stem}.log"
-    return output, log
+    return output, recon, reference_recon, log
 
 
 def run_command(
     vector_name: str,
     output: Path,
+    recon: Path,
+    reference_recon: Path,
     log: Path,
     command: list[str],
-    settings: list[str],
+    args: argparse.Namespace,
 ) -> ValidationResult:
     if output.exists():
         output.unlink()
+    if recon.exists():
+        recon.unlink()
+    if reference_recon.exists():
+        reference_recon.unlink()
 
-    for setting in settings:
+    for setting in args.setting:
         command.extend(["--set", setting])
 
     process = subprocess.run(
@@ -171,46 +197,146 @@ def run_command(
         return ValidationResult(
             vector_name=vector_name,
             output=output,
+            recon=recon,
+            reference_recon=None,
             log=log,
             status="FAIL",
             reason=extract_failure_reason(process.stdout),
             bytes_written=output.stat().st_size if output.exists() else None,
             sha256=sha256_file(output) if output.exists() else "n/a",
+            recon_sha256=sha256_file(recon) if recon.exists() else "n/a",
+            reference_sha256="n/a",
         )
     if not output.exists():
         return ValidationResult(
             vector_name=vector_name,
             output=output,
+            recon=recon,
+            reference_recon=None,
             log=log,
             status="FAIL",
             reason="encoder returned success but did not create output",
             bytes_written=None,
             sha256="n/a",
+            recon_sha256=sha256_file(recon) if recon.exists() else "n/a",
+            reference_sha256="n/a",
         )
     size = output.stat().st_size
     if size == 0:
         return ValidationResult(
             vector_name=vector_name,
             output=output,
+            recon=recon,
+            reference_recon=None,
             log=log,
             status="FAIL",
             reason="encoder returned success but output is empty",
             bytes_written=size,
             sha256=sha256_file(output),
+            recon_sha256=sha256_file(recon) if recon.exists() else "n/a",
+            reference_sha256="n/a",
         )
+    if not recon.exists():
+        return ValidationResult(
+            vector_name=vector_name,
+            output=output,
+            recon=recon,
+            reference_recon=None,
+            log=log,
+            status="FAIL",
+            reason="encoder returned success but did not create internal reconstruction",
+            bytes_written=size,
+            sha256=sha256_file(output),
+            recon_sha256="n/a",
+            reference_sha256="n/a",
+        )
+    recon_sha = sha256_file(recon)
+    reference_status = validate_reference_decode(args, output, recon, reference_recon, log)
+    if reference_status is not None and reference_status[0] == "FAIL":
+        return ValidationResult(
+            vector_name=vector_name,
+            output=output,
+            recon=recon,
+            reference_recon=reference_recon if reference_recon.exists() else None,
+            log=log,
+            status="FAIL",
+            reason=reference_status[1],
+            bytes_written=size,
+            sha256=sha256_file(output),
+            recon_sha256=recon_sha,
+            reference_sha256=sha256_file(reference_recon) if reference_recon.exists() else "n/a",
+        )
+    reference_sha = sha256_file(reference_recon) if reference_recon.exists() else "n/a"
+    reason = "encoded output and internal reconstruction were produced"
+    if reference_status is not None:
+        reason = reference_status[1]
     return ValidationResult(
         vector_name=vector_name,
         output=output,
+        recon=recon,
+        reference_recon=reference_recon if reference_recon.exists() else None,
         log=log,
         status="PASS",
-        reason="encoded output was produced",
+        reason=reason,
         bytes_written=size,
         sha256=sha256_file(output),
+        recon_sha256=recon_sha,
+        reference_sha256=reference_sha,
     )
 
 
 def codec_extension(codec: str) -> str:
     return {"av2": "obu", "vvc": "vvc"}.get(codec, codec)
+
+
+def validate_reference_decode(
+    args: argparse.Namespace, bitstream: Path, internal_recon: Path, reference_recon: Path, log: Path
+) -> tuple[str, str] | None:
+    if args.reference_mode == "off":
+        return None
+
+    command = [
+        sys.executable,
+        str(REFERENCE_TOOLS),
+        "decode",
+        "--codec",
+        args.codec,
+        "--bitstream",
+        str(bitstream),
+        "--output",
+        str(reference_recon),
+        "--no-build",
+    ]
+    process = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    with log.open("a") as file:
+        file.write("\n\n")
+        file.write(f"$ {shlex.join(command)}\n\n{process.stdout}")
+
+    if process.returncode != 0:
+        reason = extract_failure_reason(process.stdout)
+        if process.returncode == 2 and args.reference_mode == "auto":
+            return ("SKIP", f"reference decode skipped: {reason}")
+        return ("FAIL", f"reference decode failed: {reason}")
+
+    if not reference_recon.exists():
+        return ("FAIL", "reference decoder returned success but did not create reconstruction")
+    if reference_recon.stat().st_size == 0:
+        return ("FAIL", "reference decoder returned success but reconstruction is empty")
+
+    internal_sha = sha256_file(internal_recon)
+    reference_sha = sha256_file(reference_recon)
+    if internal_sha != reference_sha:
+        return (
+            "FAIL",
+            "reference reconstruction checksum differs from internal reconstruction",
+        )
+    return ("PASS", "reference reconstruction matches internal reconstruction")
 
 
 def sha256_file(path: Path) -> str:

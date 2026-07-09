@@ -14,6 +14,7 @@ pub enum Command {
 pub struct EncodeArgs {
     pub input: Option<String>,
     pub output: Option<String>,
+    pub recon: Option<String>,
     pub codec: Option<String>,
     pub video: Option<VideoSpec>,
     pub frames: Option<u32>,
@@ -54,6 +55,10 @@ pub const OUTPUT_OPTIONS: &[HelpRow] = &[
     HelpRow {
         syntax: "--encode <codec:path>",
         summary: "Encoder codec/output endpoint, e.g. av2:output.obu",
+    },
+    HelpRow {
+        syntax: "--recon <path>",
+        summary: "Write the encoder's internal reconstructed raw frame stream",
     },
     HelpRow {
         syntax: "--set <key[=value]>",
@@ -193,6 +198,12 @@ fn parse_encode(mut cursor: Cursor) -> Result<Command, String> {
                 let endpoint = parse_codec_path_spec(arg.as_str(), &cursor.value(arg.as_str())?)?;
                 args.codec = Some(endpoint.codec);
                 args.output = Some(endpoint.path);
+            }
+            "--recon" | "--reconstruction" => {
+                if args.recon.is_some() {
+                    return Err("encode accepts only one reconstruction output".to_string());
+                }
+                args.recon = Some(cursor.value(arg.as_str())?);
             }
             "--video" => {
                 args.video = Some(parse_video_spec(
@@ -621,6 +632,8 @@ mod tests {
             "scale=w=64:h=64",
             "--encode",
             "av2:out.obu",
+            "--recon",
+            "out_recon.yuv",
             "--set",
             "lossless",
         ])
@@ -631,6 +644,7 @@ mod tests {
         };
         assert_eq!(args.input.as_deref(), Some("in.yuv"));
         assert_eq!(args.output.as_deref(), Some("out.obu"));
+        assert_eq!(args.recon.as_deref(), Some("out_recon.yuv"));
         assert_eq!(args.codec.as_deref(), Some("av2"));
         assert_eq!(
             args.video,
@@ -900,6 +914,7 @@ mod tests {
             "filename metadata",
             "*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv",
             "--encode <codec:path>",
+            "--recon <path>",
             "--video <WxH:fmt>",
             "--fps <rate>",
             "-n, --frames <count>",

@@ -13,11 +13,13 @@ VALIDATION_OUT_DIR ?= verification/generated/test_vectors
 VALIDATION_ENCODED_DIR ?= verification/generated/encoded
 VALIDATION_LOG_DIR ?= verification/generated/validation_logs
 VALIDATION_SOURCE_FILTERS ?= 0
+VALIDATION_REFERENCE_MODE ?= auto
+REFERENCE_CODEC ?= all
 VALIDATION_STOP_FLAG := $(if $(filter 1 true yes,$(VALIDATION_STOP_ON_FAIL)),--stop-on-fail,)
 VALIDATION_LIMIT_FLAG := $(if $(strip $(VALIDATION_LIMIT)),--limit "$(VALIDATION_LIMIT)",)
 VALIDATION_SOURCE_FLAG := $(if $(filter 1 true yes,$(VALIDATION_SOURCE_FILTERS)),--source-filters,)
 
-.PHONY: help check-tools fmt check test build debug run test-vector-sets test-vectors validate-set regression clean release-check
+.PHONY: help check-tools fmt check test build debug run reference-list reference-setup test-vector-sets test-vectors validate-set regression clean release-check
 
 help:
 	@printf '%s\n' \
@@ -29,10 +31,13 @@ help:
 		'  make build            Build release CLI and copy it to ./ff' \
 		'  make debug            Build the debug workspace artifacts' \
 		'  make run ARGS="..."   Run the ff CLI' \
+		'  make reference-list   List declared external reference tools' \
+		'  make reference-setup  Clone/build declared references, REFERENCE_CODEC=all' \
 		'  make test-vector-sets List generated-vector manifests' \
 		'  make test-vectors     Generate TEST_VECTOR_SET=smoke vectors' \
 		'  make validate-set     Encode VALIDATION_SET=smoke with CODEC=av2' \
 		'                         Add VALIDATION_SOURCE_FILTERS=1 to skip input files' \
+		'                         Use VALIDATION_REFERENCE_MODE=auto|required|off' \
 		'  make regression       Run smoke validation for AV2 and VVC' \
 		'  make release-check    Run the default local quality gate' \
 		'  make clean            Remove Cargo build outputs' \
@@ -66,6 +71,12 @@ debug:
 run:
 	$(CARGO) run -p frameforge-cli $(CARGO_FLAGS) -- $(ARGS)
 
+reference-list:
+	$(PYTHON) scripts/reference_tools.py list --codec "$(REFERENCE_CODEC)"
+
+reference-setup:
+	$(PYTHON) scripts/reference_tools.py setup --codec "$(REFERENCE_CODEC)"
+
 test-vector-sets:
 	$(PYTHON) scripts/generate_test_vectors.py --set-dir "$(VALIDATION_SET_DIR)" --list-sets
 
@@ -73,11 +84,11 @@ test-vectors:
 	$(PYTHON) scripts/generate_test_vectors.py "$(TEST_VECTOR_SET)" --set-dir "$(VALIDATION_SET_DIR)" --out-dir "$(VALIDATION_OUT_DIR)"
 
 validate-set: build
-	$(PYTHON) scripts/run_validation_set.py --codec "$(CODEC)" "$(VALIDATION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" $(VALIDATION_SOURCE_FLAG) $(VALIDATION_STOP_FLAG) $(VALIDATION_LIMIT_FLAG)
+	$(PYTHON) scripts/run_validation_set.py --codec "$(CODEC)" "$(VALIDATION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" $(VALIDATION_SOURCE_FLAG) $(VALIDATION_STOP_FLAG) $(VALIDATION_LIMIT_FLAG)
 
 regression: build
-	$(PYTHON) scripts/run_validation_set.py --codec av2 smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --stop-on-fail
-	$(PYTHON) scripts/run_validation_set.py --codec vvc smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --stop-on-fail
+	$(PYTHON) scripts/run_validation_set.py --codec av2 smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
+	$(PYTHON) scripts/run_validation_set.py --codec vvc smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
 
 release-check: check-tools fmt check test build
 

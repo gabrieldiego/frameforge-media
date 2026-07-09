@@ -472,6 +472,7 @@ fn format_psnr(value: f64) -> String {
 struct EncodeJob {
     input: EncodeInput,
     output: PathBuf,
+    recon: Option<PathBuf>,
     frames: usize,
     width: usize,
     height: usize,
@@ -497,9 +498,13 @@ fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
         eprintln!("filter: {filter}");
     }
     eprintln!(
-        "encoder: codec={} output={} settings={} preset={}",
+        "encoder: codec={} output={} recon={} settings={} preset={}",
         codec_name,
         job.output.display(),
+        job.recon
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
         settings,
         args.preset.as_deref().unwrap_or("default")
     );
@@ -519,6 +524,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         None => EncodeInput::Pattern(input_source_filter(args)?),
     };
     let output = PathBuf::from(args.output.as_deref().expect("parser requires output"));
+    let recon = args.recon.as_deref().map(PathBuf::from);
     let video = args
         .video
         .as_ref()
@@ -536,6 +542,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     Ok(EncodeJob {
         input,
         output,
+        recon,
         frames,
         width,
         height,
@@ -634,6 +641,7 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
     };
     let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
+    let mut recon = create_optional_writer(job.recon.as_deref())?;
     let mut frame_metrics = |metrics: frameforge_codecs::av2::Av2EncodeFrameMetrics<'_>| {
         print_frame_metrics(
             "av2",
@@ -648,10 +656,13 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
     frameforge_codecs::av2::av2_encode_fixed_black_444_with_frame_metrics(
         &mut input,
         &mut output,
-        None,
+        recon.as_mut().map(|writer| writer as &mut dyn Write),
         request,
         Some(&mut frame_metrics),
     )?;
+    if let (Some(path), Some(writer)) = (job.recon.as_deref(), recon.as_mut()) {
+        flush_writer(path, writer)?;
+    }
     flush_writer(&job.output, &mut output)
 }
 
@@ -678,6 +689,7 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
     geometry.validate_against(limits)?;
     let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
+    let mut recon = create_optional_writer(job.recon.as_deref())?;
     let mut frame_metrics = |metrics: frameforge_codecs::vvc::VvcEncodeFrameMetrics<'_>| {
         print_frame_metrics(
             "vvc",
@@ -692,13 +704,16 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
     frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_frame_metrics(
         &mut input,
         &mut output,
-        None,
+        recon.as_mut().map(|writer| writer as &mut dyn Write),
         params,
         geometry,
         limits,
         job.format,
         Some(&mut frame_metrics),
     )?;
+    if let (Some(path), Some(writer)) = (job.recon.as_deref(), recon.as_mut()) {
+        flush_writer(path, writer)?;
+    }
     flush_writer(&job.output, &mut output)
 }
 
@@ -715,6 +730,10 @@ fn create_writer(path: &Path) -> Result<BufWriter<File>, String> {
     let file = File::create(path)
         .map_err(|err| format!("failed to create output '{}': {err}", path.display()))?;
     Ok(BufWriter::new(file))
+}
+
+fn create_optional_writer(path: Option<&Path>) -> Result<Option<BufWriter<File>>, String> {
+    path.map(create_writer).transpose()
 }
 
 #[cfg_attr(
@@ -892,6 +911,7 @@ mod tests {
         let job = EncodeJob {
             input: EncodeInput::Path(path.clone()),
             output: PathBuf::from("out.obu"),
+            recon: None,
             frames: 1,
             width: 8,
             height: 8,

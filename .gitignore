@@ -1,6 +1,7 @@
 /target/
 /generated/
 /verification/generated/
+/verification/references/
 /verification/test_vector_sets/local/
 /tmp/
 /ff

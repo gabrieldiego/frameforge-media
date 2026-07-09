@@ -4,6 +4,8 @@ This directory contains portable CSV manifests for deterministic raw-video
 fixtures. They are generated on demand by `scripts/generate_test_vectors.py`;
 generated `.yuv`, encoded streams, and logs live under
 `verification/generated/` and are not committed.
+External reference source/build trees live under `verification/references/`
+when `make reference-setup` is used; those are local artifacts too.
 
 Manifest format:
 

@@ -87,6 +87,22 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SOURCE_FILTERS=1
 ```
 
+Reference decoders are optional but recommended for strict bitstream checks.
+Declared reference toolchains can be listed and built with:
+
+```sh
+make reference-list
+make reference-setup
+make reference-setup REFERENCE_CODEC=av2
+```
+
+Validation uses `VALIDATION_REFERENCE_MODE=auto` by default: if a declared
+reference decoder is already built or configured, the runner decodes the
+FrameForge bitstream and compares that reconstruction against the encoder's
+internal reconstruction. Use `VALIDATION_REFERENCE_MODE=required` to fail when
+the reference decoder is missing, or `VALIDATION_REFERENCE_MODE=off` to skip
+external decoding.
+
 ## Build-Time Composition
 
 Codec and filter availability is selected at build time. By default,
@@ -120,6 +136,8 @@ ff encode --filter pattern=checker --video 64x64:yuv444p \
   --encode av2:pattern.obu
 ff encode input_640x360_30_1f_yuv444p8.yuv \
   --filter identity --encode av2:output.obu
+ff encode input_640x360_30_1f_yuv444p8.yuv \
+  --encode av2:output.obu --recon output_recon.yuv
 ```
 
 The commands validate command-line structure and report stage availability.
@@ -134,10 +152,10 @@ reaches EOF. If `--frames` is larger than the number of complete frames in the
 file, `ff encode` stops at EOF instead of failing. Source filters require
 explicit `--frames` because they do not have a file EOF. Filter options come
 next. Output/encoder options, such as
-`--set lossless`, `--preset`, and repeated `--set key[=value]`, belong after
-`--encode codec:output`. Bare `--set` keys imply `true`. Global accepted
-settings are listed by `ff codecs`; codec-specific settings can be added later
-when a feature really needs them.
+`--recon output.yuv`, `--set lossless`, `--preset`, and repeated
+`--set key[=value]`, belong after `--encode codec:output`. Bare `--set` keys
+imply `true`. Global accepted settings are listed by `ff codecs`;
+codec-specific settings can be added later when a feature really needs them.
 
 The positional input is optional when the first filter is a source. The initial
 source filter is `pattern=<name>`, with `black`, `checker`, `gradient`, and

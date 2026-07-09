@@ -1,0 +1,17 @@
+{
+  "codec": "av2",
+  "label": "AVM",
+  "repo": "https://github.com/AOMediaCodec/avm.git",
+  "repo_env": ["FRAMEFORGE_AV2_REPO", "FRAMEFORGE_AVM_REPO"],
+  "ref_env": ["FRAMEFORGE_AV2_REF", "FRAMEFORGE_AVM_REF"],
+  "root_env": ["FRAMEFORGE_AV2_ROOT", "FRAMEFORGE_AVM_ROOT"],
+  "encoder_env": ["FRAMEFORGE_AV2_ENCODER", "FRAMEFORGE_AVM_ENCODER"],
+  "decoder_env": ["FRAMEFORGE_AV2_DECODER", "FRAMEFORGE_AVM_DECODER"],
+  "build_dir_env": ["FRAMEFORGE_AV2_BUILD_DIR", "FRAMEFORGE_AVM_BUILD_DIR"],
+  "build_type_env": ["FRAMEFORGE_AV2_BUILD_TYPE", "FRAMEFORGE_AVM_BUILD_TYPE"],
+  "cmake_args_env": ["FRAMEFORGE_AV2_CMAKE_ARGS", "FRAMEFORGE_AVM_CMAKE_ARGS"],
+  "default_root": "verification/references/av2/avm",
+  "decoder_names": ["avmdec", "avmdec.exe", "aomdec", "aomdec.exe"],
+  "encoder_names": ["avmenc", "avmenc.exe", "aomenc", "aomenc.exe"],
+  "decode_style": "avm"
+}
