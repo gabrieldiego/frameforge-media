@@ -943,6 +943,14 @@ fn build_luma_palette_block(
     samples: &[u8; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
 ) -> Av2LumaPaletteBlock444 {
     let mut collected = Vec::with_capacity(AV2_LUMA_PALETTE_MAX_COLORS);
+    let mut counts = [0usize; 256];
+    let mut first_positions = [usize::MAX; 256];
+    for (sample_index, &sample) in samples.iter().enumerate() {
+        let sample_index_by_value = usize::from(sample);
+        counts[sample_index_by_value] += 1;
+        first_positions[sample_index_by_value] =
+            first_positions[sample_index_by_value].min(sample_index);
+    }
     for &sample in samples {
         if !collected.contains(&sample) && collected.len() < AV2_LUMA_PALETTE_MAX_COLORS {
             collected.push(sample);
@@ -960,7 +968,26 @@ fn build_luma_palette_block(
         AV2_LUMA_PALETTE_MAX_COLORS
     };
 
-    let mut colors = collected;
+    let mut colors = if collected.len() == AV2_LUMA_PALETTE_MAX_COLORS
+        && counts.iter().filter(|&&count| count != 0).count() > AV2_LUMA_PALETTE_MAX_COLORS
+    {
+        let mut values: Vec<u8> = (0u16..=255)
+            .filter(|&value| counts[value as usize] != 0)
+            .map(|value| value as u8)
+            .collect();
+        values.sort_by_key(|&value| {
+            let value_index = usize::from(value);
+            (
+                std::cmp::Reverse(counts[value_index]),
+                first_positions[value_index],
+                value,
+            )
+        });
+        values.truncate(AV2_LUMA_PALETTE_MAX_COLORS);
+        values
+    } else {
+        collected
+    };
     let mut candidate = 0u16;
     while colors.len() < target_colors {
         let sample = candidate as u8;
