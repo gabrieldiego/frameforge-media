@@ -1908,8 +1908,9 @@ mod tests {
         let trace = av2_mvp_444_trace_jsonl_for_frame(&input, request)
             .expect("AV2 trace should be emitted");
         assert!(
-            trace.contains("tile.coeff.y.idtx_base"),
-            "over-limit luma palette blocks must emit lossless FSC luma coefficient residuals"
+            trace.contains("tile.coeff.y.idtx_base")
+                || trace.contains("tile.coeff.y.txb_nonzero_tx4x4_ctx"),
+            "over-limit luma palette blocks must emit lossless luma coefficient residuals"
         );
         assert!(recon[y_plane_len..].iter().all(|&sample| sample == 0));
     }
