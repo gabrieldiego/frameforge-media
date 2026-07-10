@@ -35,6 +35,8 @@ pub(crate) enum Av2ChromaIntraMode {
     Directional45,
     Directional67,
     Directional135,
+    Directional113,
+    Directional157,
     Directional203,
     Smooth,
     SmoothVertical,
@@ -143,6 +145,8 @@ impl Av2LumaPalette444 {
         let mut intra_d45_score = 0usize;
         let mut intra_d67_score = 0usize;
         let mut intra_d135_score = 0usize;
+        let mut intra_d113_score = 0usize;
+        let mut intra_d157_score = 0usize;
         let mut intra_d203_score = 0usize;
         let mut intra_smooth_score = 0usize;
         let mut intra_smooth_v_score = 0usize;
@@ -224,6 +228,30 @@ impl Av2LumaPalette444 {
                             Av2ChromaIntraMode::Directional67,
                         )
                     });
+                    let intra_d113_residual = directional_allowed.then(|| {
+                        self.chroma_intra_residuals(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            x0,
+                            y0,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            Av2ChromaIntraMode::Directional113,
+                        )
+                    });
+                    let intra_d157_residual = directional_allowed.then(|| {
+                        self.chroma_intra_residuals(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            x0,
+                            y0,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            Av2ChromaIntraMode::Directional157,
+                        )
+                    });
                     let intra_d203_residual = directional_allowed.then(|| {
                         self.chroma_intra_residuals(
                             plane,
@@ -290,6 +318,12 @@ impl Av2LumaPalette444 {
                     if let Some(residual) = intra_d135_residual {
                         intra_d135_score += chroma_bdpcm_coeff_score(&residual);
                     }
+                    if let Some(residual) = intra_d113_residual {
+                        intra_d113_score += chroma_bdpcm_coeff_score(&residual);
+                    }
+                    if let Some(residual) = intra_d157_residual {
+                        intra_d157_score += chroma_bdpcm_coeff_score(&residual);
+                    }
                     if let Some(residual) = intra_d203_residual {
                         intra_d203_score += chroma_bdpcm_coeff_score(&residual);
                     }
@@ -338,6 +372,24 @@ impl Av2LumaPalette444 {
                 Av2ChromaIntraMode::Directional203,
                 if directional_allowed {
                     intra_d203_score
+                } else {
+                    usize::MAX
+                },
+            ),
+            (
+                false,
+                Av2ChromaIntraMode::Directional113,
+                if directional_allowed {
+                    intra_d113_score
+                } else {
+                    usize::MAX
+                },
+            ),
+            (
+                false,
+                Av2ChromaIntraMode::Directional157,
+                if directional_allowed {
+                    intra_d157_score
                 } else {
                     usize::MAX
                 },
@@ -541,6 +593,14 @@ impl Av2LumaPalette444 {
                             edges.left[local_y - local_x - 1]
                         }
                     }
+                    Av2ChromaIntraMode::Directional113 => {
+                        let edges = self.chroma_d135_edges(plane, txb_x0, txb_y0, tile_x0, tile_y0);
+                        zone2_directional_predictor(edges, 24, 170, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional157 => {
+                        let edges = self.chroma_d135_edges(plane, txb_x0, txb_y0, tile_x0, tile_y0);
+                        zone2_directional_predictor(edges, 170, 24, local_x, local_y)
+                    }
                     Av2ChromaIntraMode::Directional203 => {
                         let left = self.chroma_d203_left_edge(
                             plane,
@@ -646,8 +706,8 @@ impl Av2LumaPalette444 {
     ) -> ChromaD135Edges {
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
-        let mut above = [LOSSLESS_DC_PREDICTOR; 4];
-        let mut left = [LOSSLESS_DC_PREDICTOR; 4];
+        let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 4];
+        let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 4];
         if have_top {
             for local_x in 0..4 {
                 above[local_x] = self.chroma_sample(plane, txb_x0 + local_x, txb_y0 - 1);
@@ -842,6 +902,56 @@ fn directional_interpolate(edge: [u8; 8], along: usize, across: usize) -> u8 {
     let base = (projected >> 6) + along;
     let shift = (projected & 0x3f) >> 1;
     let value = usize::from(edge[base]) * (32 - shift) + usize::from(edge[base + 1]) * shift;
+    ((value + 16) >> 5) as u8
+}
+
+fn zone2_directional_predictor(
+    edges: ChromaD135Edges,
+    dx: i32,
+    dy: i32,
+    local_x: usize,
+    local_y: usize,
+) -> u8 {
+    let projected_x = ((local_x as i32) << 6) - ((local_y as i32 + 1) * dx);
+    let base_x = projected_x >> 6;
+    if base_x >= -1 {
+        let shift = ((projected_x & 0x3f) >> 1) as usize;
+        return directional_weighted_sample(
+            zone2_above_sample(edges, base_x),
+            zone2_above_sample(edges, base_x + 1),
+            shift,
+        );
+    }
+
+    let projected_y = ((local_y as i32) << 6) - ((local_x as i32 + 1) * dy);
+    let base_y = projected_y >> 6;
+    debug_assert!(base_y >= -1);
+    let shift = ((projected_y & 0x3f) >> 1) as usize;
+    directional_weighted_sample(
+        zone2_left_sample(edges, base_y),
+        zone2_left_sample(edges, base_y + 1),
+        shift,
+    )
+}
+
+fn zone2_above_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
+    if offset < 0 {
+        edges.above_left
+    } else {
+        edges.above[offset as usize]
+    }
+}
+
+fn zone2_left_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
+    if offset < 0 {
+        edges.above_left
+    } else {
+        edges.left[offset as usize]
+    }
+}
+
+fn directional_weighted_sample(first: u8, second: u8, shift: usize) -> u8 {
+    let value = usize::from(first) * (32 - shift) + usize::from(second) * shift;
     ((value + 16) >> 5) as u8
 }
 

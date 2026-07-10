@@ -2957,6 +2957,8 @@ fn chroma_uv_mode_symbol(
         Av2ChromaIntraMode::Directional45 => "tile.intra.uv_mode_idx_d45",
         Av2ChromaIntraMode::Directional67 => "tile.intra.uv_mode_idx_d67",
         Av2ChromaIntraMode::Directional135 => "tile.intra.uv_mode_idx_d135",
+        Av2ChromaIntraMode::Directional113 => "tile.intra.uv_mode_idx_d113",
+        Av2ChromaIntraMode::Directional157 => "tile.intra.uv_mode_idx_d157",
         Av2ChromaIntraMode::Directional203 => "tile.intra.uv_mode_idx_d203",
         Av2ChromaIntraMode::Smooth => "tile.intra.uv_mode_idx_smooth",
         Av2ChromaIntraMode::SmoothVertical => "tile.intra.uv_mode_idx_smooth_v",
@@ -3009,6 +3011,8 @@ fn chroma_uv_mode_id(mode: Av2ChromaIntraMode) -> usize {
         Av2ChromaIntraMode::Directional45 => 3,
         Av2ChromaIntraMode::Directional67 => 8,
         Av2ChromaIntraMode::Directional135 => 4,
+        Av2ChromaIntraMode::Directional113 => 5,
+        Av2ChromaIntraMode::Directional157 => 6,
         Av2ChromaIntraMode::Directional203 => 7,
         Av2ChromaIntraMode::Smooth => 9,
         Av2ChromaIntraMode::SmoothVertical => 10,
@@ -4357,6 +4361,16 @@ fn chroma_intra_tx4x4_coefficients(
                         edges.left[local_y - local_x - 1]
                     }
                 }
+                Av2ChromaIntraMode::Directional113 => {
+                    let edges =
+                        chroma_d135_edges(palette, plane, x0, y0, tile_origin_x, tile_origin_y);
+                    zone2_directional_predictor(edges, 24, 170, local_x, local_y)
+                }
+                Av2ChromaIntraMode::Directional157 => {
+                    let edges =
+                        chroma_d135_edges(palette, plane, x0, y0, tile_origin_x, tile_origin_y);
+                    zone2_directional_predictor(edges, 170, 24, local_x, local_y)
+                }
                 Av2ChromaIntraMode::Directional203 => {
                     let left = chroma_d203_left_edge(
                         palette,
@@ -4470,8 +4484,8 @@ fn chroma_d135_edges(
 ) -> ChromaD135Edges {
     let have_top = txb_y0 > tile_origin_y;
     let have_left = txb_x0 > tile_origin_x;
-    let mut above = [LOSSLESS_DC_PREDICTOR; 4];
-    let mut left = [LOSSLESS_DC_PREDICTOR; 4];
+    let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 4];
+    let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 4];
     if have_top {
         for local_x in 0..4 {
             above[local_x] = chroma_sample(palette, plane, txb_x0 + local_x, txb_y0 - 1);
@@ -4550,6 +4564,56 @@ fn directional_interpolate(edge: [u8; 8], along: usize, across: usize) -> u8 {
     let base = (projected >> 6) + along;
     let shift = (projected & 0x3f) >> 1;
     let value = usize::from(edge[base]) * (32 - shift) + usize::from(edge[base + 1]) * shift;
+    ((value + 16) >> 5) as u8
+}
+
+fn zone2_directional_predictor(
+    edges: ChromaD135Edges,
+    dx: i32,
+    dy: i32,
+    local_x: usize,
+    local_y: usize,
+) -> u8 {
+    let projected_x = ((local_x as i32) << 6) - ((local_y as i32 + 1) * dx);
+    let base_x = projected_x >> 6;
+    if base_x >= -1 {
+        let shift = ((projected_x & 0x3f) >> 1) as usize;
+        return directional_weighted_sample(
+            zone2_above_sample(edges, base_x),
+            zone2_above_sample(edges, base_x + 1),
+            shift,
+        );
+    }
+
+    let projected_y = ((local_y as i32) << 6) - ((local_x as i32 + 1) * dy);
+    let base_y = projected_y >> 6;
+    debug_assert!(base_y >= -1);
+    let shift = ((projected_y & 0x3f) >> 1) as usize;
+    directional_weighted_sample(
+        zone2_left_sample(edges, base_y),
+        zone2_left_sample(edges, base_y + 1),
+        shift,
+    )
+}
+
+fn zone2_above_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
+    if offset < 0 {
+        edges.above_left
+    } else {
+        edges.above[offset as usize]
+    }
+}
+
+fn zone2_left_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
+    if offset < 0 {
+        edges.above_left
+    } else {
+        edges.left[offset as usize]
+    }
+}
+
+fn directional_weighted_sample(first: u8, second: u8, shift: usize) -> u8 {
+    let value = usize::from(first) * (32 - shift) + usize::from(second) * shift;
     ((value + 16) >> 5) as u8
 }
 
