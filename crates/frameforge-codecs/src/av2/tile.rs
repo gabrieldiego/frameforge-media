@@ -23,6 +23,9 @@ const LOSSLESS_V_PRED_ABOVE_EDGE: u8 = 127;
 const BLACK_LOSSLESS_DC_LEVEL: u16 = 512;
 const NONZERO_NEGATIVE_DC_ENTROPY_CONTEXT: u8 = 15;
 const NONZERO_POSITIVE_DC_ENTROPY_CONTEXT: u8 = 23;
+// Merged palette leaves hide child 8x8 blocks from the current local-IBC
+// selector. Keep them split until merge decisions account for copy savings.
+const AV2_ENABLE_LUMA_PALETTE_REGION_MERGE: bool = false;
 
 const fn avm_cdf2(a0: u16, p0: i16, p1: i16, p2: i16) -> [u16; 6] {
     [
@@ -2285,7 +2288,8 @@ fn choose_luma_palette_partition(
                 return forced;
             }
         }
-        if allowed.none
+        if AV2_ENABLE_LUMA_PALETTE_REGION_MERGE
+            && allowed.none
             && palette.is_some_and(|palette| {
                 luma_palette_region_mergeable(
                     palette,
