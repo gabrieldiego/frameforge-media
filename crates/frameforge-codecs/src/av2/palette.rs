@@ -301,33 +301,33 @@ impl Av2LumaPalette444 {
                         AV2_LUMA_PALETTE_BLOCK_SIZE,
                         Av2ChromaIntraMode::Paeth,
                     );
-                    bdpcm_horz_score += chroma_bdpcm_coeff_score(&bdpcm_horz_residual);
-                    bdpcm_vert_score += chroma_bdpcm_coeff_score(&bdpcm_vert_residual);
-                    intra_dc_score += chroma_bdpcm_coeff_score(&intra_dc_residual);
-                    intra_horz_score += chroma_bdpcm_coeff_score(&intra_horz_residual);
-                    intra_vert_score += chroma_bdpcm_coeff_score(&intra_vert_residual);
+                    bdpcm_horz_score += chroma_idtx_coeff_score(&bdpcm_horz_residual);
+                    bdpcm_vert_score += chroma_idtx_coeff_score(&bdpcm_vert_residual);
+                    intra_dc_score += chroma_idtx_coeff_score(&intra_dc_residual);
+                    intra_horz_score += chroma_idtx_coeff_score(&intra_horz_residual);
+                    intra_vert_score += chroma_idtx_coeff_score(&intra_vert_residual);
                     if let Some(residual) = intra_d45_residual {
-                        intra_d45_score += chroma_bdpcm_coeff_score(&residual);
+                        intra_d45_score += chroma_idtx_coeff_score(&residual);
                     }
                     if let Some(residual) = intra_d67_residual {
-                        intra_d67_score += chroma_bdpcm_coeff_score(&residual);
+                        intra_d67_score += chroma_idtx_coeff_score(&residual);
                     }
                     if let Some(residual) = intra_d135_residual {
-                        intra_d135_score += chroma_bdpcm_coeff_score(&residual);
+                        intra_d135_score += chroma_idtx_coeff_score(&residual);
                     }
                     if let Some(residual) = intra_d113_residual {
-                        intra_d113_score += chroma_bdpcm_coeff_score(&residual);
+                        intra_d113_score += chroma_idtx_coeff_score(&residual);
                     }
                     if let Some(residual) = intra_d157_residual {
-                        intra_d157_score += chroma_bdpcm_coeff_score(&residual);
+                        intra_d157_score += chroma_idtx_coeff_score(&residual);
                     }
                     if let Some(residual) = intra_d203_residual {
-                        intra_d203_score += chroma_bdpcm_coeff_score(&residual);
+                        intra_d203_score += chroma_idtx_coeff_score(&residual);
                     }
-                    intra_smooth_score += chroma_bdpcm_coeff_score(&intra_smooth_residual);
-                    intra_smooth_v_score += chroma_bdpcm_coeff_score(&intra_smooth_v_residual);
-                    intra_smooth_h_score += chroma_bdpcm_coeff_score(&intra_smooth_h_residual);
-                    intra_paeth_score += chroma_bdpcm_coeff_score(&intra_paeth_residual);
+                    intra_smooth_score += chroma_idtx_coeff_score(&intra_smooth_residual);
+                    intra_smooth_v_score += chroma_idtx_coeff_score(&intra_smooth_v_residual);
+                    intra_smooth_h_score += chroma_idtx_coeff_score(&intra_smooth_h_residual);
+                    intra_paeth_score += chroma_idtx_coeff_score(&intra_paeth_residual);
                 }
             }
         }
@@ -1104,23 +1104,18 @@ pub(crate) fn av2_highbd_smooth_intra_predictor(
     prediction.clamp(0, 255) as u8
 }
 
-fn chroma_bdpcm_coeff_score(residual: &[i32; 16]) -> usize {
-    // Encoder-only mode decision proxy. The syntax/reconstruction path writes
-    // exact lossless FWHT coefficients, so score the same coefficient domain
-    // when choosing between legal chroma prediction families. A separate
-    // high-range token estimate over-penalizes useful screen-content chroma
-    // predictors and increases the final AV2 bitstream.
-    let coefficients = av2_fwht4x4_for_score(residual);
+fn chroma_idtx_coeff_score(residual: &[i32; 16]) -> usize {
+    // Most screen-content palette leaves use FSC, which writes chroma through
+    // IDTX coefficients. Score the sample-domain residuals used by that path
+    // instead of the FWHT domain so mode selection matches the coded syntax.
     let mut score = 0usize;
-    for coefficient in coefficients {
-        debug_assert_eq!(coefficient % 8, 0);
-        let level = (coefficient.unsigned_abs() / 8) as usize;
+    for &sample_delta in residual {
+        let level = sample_delta.unsigned_abs() as usize;
         if level == 0 {
             continue;
-        } else {
-            score += AV2_CHROMA_BDPCM_NONZERO_COST
-                + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100;
         }
+        score +=
+            AV2_CHROMA_BDPCM_NONZERO_COST + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100;
     }
     score
 }
