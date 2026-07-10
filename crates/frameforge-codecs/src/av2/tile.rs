@@ -2955,7 +2955,9 @@ fn chroma_uv_mode_symbol(
         Av2ChromaIntraMode::Vertical => "tile.intra.uv_mode_idx_v",
         Av2ChromaIntraMode::Horizontal => "tile.intra.uv_mode_idx_h",
         Av2ChromaIntraMode::Directional45 => "tile.intra.uv_mode_idx_d45",
+        Av2ChromaIntraMode::Directional67 => "tile.intra.uv_mode_idx_d67",
         Av2ChromaIntraMode::Directional135 => "tile.intra.uv_mode_idx_d135",
+        Av2ChromaIntraMode::Directional203 => "tile.intra.uv_mode_idx_d203",
         Av2ChromaIntraMode::Smooth => "tile.intra.uv_mode_idx_smooth",
         Av2ChromaIntraMode::SmoothVertical => "tile.intra.uv_mode_idx_smooth_v",
         Av2ChromaIntraMode::SmoothHorizontal => "tile.intra.uv_mode_idx_smooth_h",
@@ -3005,7 +3007,9 @@ fn chroma_uv_mode_id(mode: Av2ChromaIntraMode) -> usize {
         Av2ChromaIntraMode::Vertical => 1,
         Av2ChromaIntraMode::Horizontal => 2,
         Av2ChromaIntraMode::Directional45 => 3,
+        Av2ChromaIntraMode::Directional67 => 8,
         Av2ChromaIntraMode::Directional135 => 4,
+        Av2ChromaIntraMode::Directional203 => 7,
         Av2ChromaIntraMode::Smooth => 9,
         Av2ChromaIntraMode::SmoothVertical => 10,
         Av2ChromaIntraMode::SmoothHorizontal => 11,
@@ -4324,6 +4328,21 @@ fn chroma_intra_tx4x4_coefficients(
                     );
                     above[local_y + local_x + 1]
                 }
+                Av2ChromaIntraMode::Directional67 => {
+                    let above = chroma_d45_above_edge(
+                        palette,
+                        plane,
+                        x0,
+                        y0,
+                        tile_origin_x,
+                        tile_origin_y,
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_width,
+                        coded_mi_context,
+                    );
+                    directional_interpolate(above, local_x, local_y)
+                }
                 Av2ChromaIntraMode::Directional135 => {
                     let edges =
                         chroma_d135_edges(palette, plane, x0, y0, tile_origin_x, tile_origin_y);
@@ -4337,6 +4356,21 @@ fn chroma_intra_tx4x4_coefficients(
                     } else {
                         edges.left[local_y - local_x - 1]
                     }
+                }
+                Av2ChromaIntraMode::Directional203 => {
+                    let left = chroma_d203_left_edge(
+                        palette,
+                        plane,
+                        x0,
+                        y0,
+                        tile_origin_x,
+                        tile_origin_y,
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_height,
+                        coded_mi_context,
+                    );
+                    directional_interpolate(left, local_y, local_x)
                 }
                 Av2ChromaIntraMode::Smooth
                 | Av2ChromaIntraMode::SmoothVertical
@@ -4397,7 +4431,7 @@ fn chroma_d45_above_edge(
     let tile_right = (tile_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
     let have_top = txb_y0 > tile_origin_y;
     let have_left = txb_x0 > tile_origin_x;
-    let mut above = [LOSSLESS_DC_PREDICTOR; 8];
+    let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 8];
     if have_top {
         for index in 0..above.len() {
             let x = txb_x0 + index;
@@ -4466,6 +4500,57 @@ fn chroma_d135_edges(
         above,
         left,
     }
+}
+
+fn chroma_d203_left_edge(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    txb_x0: usize,
+    txb_y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_height: usize,
+    coded_mi_context: &Av2CodedMiContext,
+) -> [u8; 8] {
+    let tile_bottom = (tile_origin_y + MVP_SUPERBLOCK_SIZE).min(palette.height());
+    let have_top = txb_y0 > tile_origin_y;
+    let have_left = txb_x0 > tile_origin_x;
+    let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 8];
+    if have_left {
+        for index in 0..left.len() {
+            let y = txb_y0 + index;
+            let external_bottom_left_coded = txb_x0 == leaf_x0
+                && y < tile_bottom
+                && coded_mi_context.is_coded(
+                    (y - tile_origin_y) / MI_SIZE,
+                    (txb_x0 - 1 - tile_origin_x) / MI_SIZE,
+                );
+            // Match AVM has_bottom_left(): only TXBs on the leaf's left edge
+            // may use D203 bottom-left overhang samples.
+            if y < txb_y0 + TX4X4_SIZE
+                || (txb_x0 == leaf_x0 && (y < leaf_y0 + leaf_height || external_bottom_left_coded))
+            {
+                left[index] = chroma_sample(palette, plane, txb_x0 - 1, y);
+            } else if index > 0 {
+                left[index] = left[index - 1];
+            }
+        }
+    } else if have_top {
+        left.fill(chroma_sample(palette, plane, txb_x0, txb_y0 - 1));
+    }
+    left
+}
+
+fn directional_interpolate(edge: [u8; 8], along: usize, across: usize) -> u8 {
+    // AVM dr_intra_derivative[67], used by both D67 and D203.
+    const DERIVATIVE_67_203: usize = 24;
+    let projected = DERIVATIVE_67_203 * (across + 1);
+    let base = (projected >> 6) + along;
+    let shift = (projected & 0x3f) >> 1;
+    let value = usize::from(edge[base]) * (32 - shift) + usize::from(edge[base + 1]) * shift;
+    ((value + 16) >> 5) as u8
 }
 
 fn chroma_above_left_predictor(

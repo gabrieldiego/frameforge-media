@@ -33,7 +33,9 @@ pub(crate) enum Av2ChromaIntraMode {
     Vertical,
     Horizontal,
     Directional45,
+    Directional67,
     Directional135,
+    Directional203,
     Smooth,
     SmoothVertical,
     SmoothHorizontal,
@@ -139,7 +141,9 @@ impl Av2LumaPalette444 {
         let mut intra_horz_score = 0usize;
         let mut intra_vert_score = 0usize;
         let mut intra_d45_score = 0usize;
+        let mut intra_d67_score = 0usize;
         let mut intra_d135_score = 0usize;
+        let mut intra_d203_score = 0usize;
         let mut intra_smooth_score = 0usize;
         let mut intra_smooth_v_score = 0usize;
         let mut intra_smooth_h_score = 0usize;
@@ -208,6 +212,30 @@ impl Av2LumaPalette444 {
                             Av2ChromaIntraMode::Directional135,
                         )
                     });
+                    let intra_d67_residual = directional_allowed.then(|| {
+                        self.chroma_intra_residuals(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            x0,
+                            y0,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            Av2ChromaIntraMode::Directional67,
+                        )
+                    });
+                    let intra_d203_residual = directional_allowed.then(|| {
+                        self.chroma_intra_residuals(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            x0,
+                            y0,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            AV2_LUMA_PALETTE_BLOCK_SIZE,
+                            Av2ChromaIntraMode::Directional203,
+                        )
+                    });
                     let intra_smooth_residual = self.chroma_intra_residuals(
                         plane,
                         txb_x0,
@@ -256,8 +284,14 @@ impl Av2LumaPalette444 {
                     if let Some(residual) = intra_d45_residual {
                         intra_d45_score += chroma_bdpcm_coeff_score(&residual);
                     }
+                    if let Some(residual) = intra_d67_residual {
+                        intra_d67_score += chroma_bdpcm_coeff_score(&residual);
+                    }
                     if let Some(residual) = intra_d135_residual {
                         intra_d135_score += chroma_bdpcm_coeff_score(&residual);
+                    }
+                    if let Some(residual) = intra_d203_residual {
+                        intra_d203_score += chroma_bdpcm_coeff_score(&residual);
                     }
                     intra_smooth_score += chroma_bdpcm_coeff_score(&intra_smooth_residual);
                     intra_smooth_v_score += chroma_bdpcm_coeff_score(&intra_smooth_v_residual);
@@ -286,6 +320,24 @@ impl Av2LumaPalette444 {
                 Av2ChromaIntraMode::Directional135,
                 if directional_allowed {
                     intra_d135_score
+                } else {
+                    usize::MAX
+                },
+            ),
+            (
+                false,
+                Av2ChromaIntraMode::Directional67,
+                if directional_allowed {
+                    intra_d67_score
+                } else {
+                    usize::MAX
+                },
+            ),
+            (
+                false,
+                Av2ChromaIntraMode::Directional203,
+                if directional_allowed {
+                    intra_d203_score
                 } else {
                     usize::MAX
                 },
@@ -470,6 +522,12 @@ impl Av2LumaPalette444 {
                         );
                         above[local_y + local_x + 1]
                     }
+                    Av2ChromaIntraMode::Directional67 => {
+                        let above = self.chroma_d45_above_edge(
+                            plane, txb_x0, txb_y0, leaf_x0, leaf_y0, leaf_width,
+                        );
+                        directional_interpolate(above, local_x, local_y)
+                    }
                     Av2ChromaIntraMode::Directional135 => {
                         let edges = self.chroma_d135_edges(plane, txb_x0, txb_y0, tile_x0, tile_y0);
                         if local_x >= local_y {
@@ -482,6 +540,17 @@ impl Av2LumaPalette444 {
                         } else {
                             edges.left[local_y - local_x - 1]
                         }
+                    }
+                    Av2ChromaIntraMode::Directional203 => {
+                        let left = self.chroma_d203_left_edge(
+                            plane,
+                            txb_x0,
+                            txb_y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_height,
+                        );
+                        directional_interpolate(left, local_y, local_x)
                     }
                     Av2ChromaIntraMode::Smooth
                     | Av2ChromaIntraMode::SmoothVertical
@@ -551,7 +620,7 @@ impl Av2LumaPalette444 {
         let tile_right = (tile_x0 + AV2_LUMA_INTRA_TILE_SIZE).min(self.width);
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
-        let mut above = [LOSSLESS_DC_PREDICTOR; 8];
+        let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 8];
         if have_top {
             for index in 0..above.len() {
                 let x = txb_x0 + index;
@@ -607,6 +676,40 @@ impl Av2LumaPalette444 {
             above,
             left,
         }
+    }
+
+    fn chroma_d203_left_edge(
+        &self,
+        plane: &[u8],
+        txb_x0: usize,
+        txb_y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_height: usize,
+    ) -> [u8; 8] {
+        let tile_x0 = (txb_x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_y0 = (txb_y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_bottom = (tile_y0 + AV2_LUMA_INTRA_TILE_SIZE).min(self.height);
+        let have_top = txb_y0 > tile_y0;
+        let have_left = txb_x0 > tile_x0;
+        let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 8];
+        if have_left {
+            for index in 0..left.len() {
+                let y = txb_y0 + index;
+                // Match AVM has_bottom_left(): only TXBs on the leaf's left
+                // edge may use D203 bottom-left overhang samples.
+                if y < txb_y0 + AV2_LUMA_PALETTE_BLOCK_SIZE / 2
+                    || (txb_x0 == leaf_x0 && (y < leaf_y0 + leaf_height || y < tile_bottom))
+                {
+                    left[index] = self.chroma_sample(plane, txb_x0 - 1, y);
+                } else if index > 0 {
+                    left[index] = left[index - 1];
+                }
+            }
+        } else if have_top {
+            left.fill(self.chroma_sample(plane, txb_x0, txb_y0 - 1));
+        }
+        left
     }
 
     fn chroma_smooth_edges(
@@ -730,6 +833,16 @@ struct ChromaD135Edges {
     above_left: u8,
     above: [u8; 4],
     left: [u8; 4],
+}
+
+fn directional_interpolate(edge: [u8; 8], along: usize, across: usize) -> u8 {
+    // AVM dr_intra_derivative[67], used by both D67 and D203.
+    const DERIVATIVE_67_203: usize = 24;
+    let projected = DERIVATIVE_67_203 * (across + 1);
+    let base = (projected >> 6) + along;
+    let shift = (projected & 0x3f) >> 1;
+    let value = usize::from(edge[base]) * (32 - shift) + usize::from(edge[base + 1]) * shift;
+    ((value + 16) >> 5) as u8
 }
 
 pub(crate) fn av2_highbd_smooth_intra_predictor(
