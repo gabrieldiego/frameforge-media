@@ -1947,7 +1947,7 @@ mod tests {
     }
 
     #[test]
-    fn av2_mvp_444_can_select_horizontal_luma_intra_prediction() {
+    fn av2_mvp_444_can_select_horizontal_luma_dpcm_prediction() {
         let request = Av2EncodeRequest {
             params: Av2EncodeParams { frames: 1 },
             geometry: Av2VideoGeometry {
@@ -1975,8 +1975,18 @@ mod tests {
         let trace = av2_mvp_444_trace_jsonl_for_frame(&input, request)
             .expect("AV2 trace should be emitted");
         assert!(
-            trace.contains("tile.intra.y_mode_idx_h"),
-            "horizontal luma intra prediction should be selected for the right block"
+            trace
+                .lines()
+                .any(|line| line.contains("\"name\":\"tile.intra.use_dpcm_y\"")
+                    && line.contains("\"symbol\":1")),
+            "lossless luma DPCM should be selected for the right block"
+        );
+        assert!(
+            trace
+                .lines()
+                .any(|line| line.contains("\"name\":\"tile.intra.dpcm_y_horz\"")
+                    && line.contains("\"symbol\":1")),
+            "horizontal luma DPCM should be selected for the right block"
         );
     }
 

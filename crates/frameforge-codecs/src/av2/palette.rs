@@ -1298,12 +1298,10 @@ pub(crate) fn build_luma_palette_444(
         for block_y in 0..blocks_high {
             for block_x in 0..blocks_wide {
                 let block_index = block_y * blocks_wide + block_x;
-                if palette.blocks[block_index].colors.len() <= 2 {
-                    let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
-                    let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
-                    palette.luma_bdpcm_horz[block_index] =
-                        palette.luma_bdpcm_horz_decision_for_block(x0, y0);
-                }
+                let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
+                let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
+                palette.luma_bdpcm_horz[block_index] =
+                    palette.luma_bdpcm_horz_decision_for_block(x0, y0);
             }
         }
     }
