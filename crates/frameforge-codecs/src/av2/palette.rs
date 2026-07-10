@@ -7,9 +7,13 @@ pub(crate) const AV2_LUMA_PALETTE_MAX_COLORS: usize = 8;
 pub(crate) const AV2_LUMA_PALETTE_BLOCK_SIZE: usize = 8;
 const AV2_LUMA_INTRA_TILE_SIZE: usize = 64;
 const AV2_LUMA_INTRA_MODE_SWITCH_SAD_MARGIN: usize = 64;
+const AV2_LUMA_DPCM_NONZERO_COST: usize = 124;
+const AV2_LUMA_DPCM_LEVEL_SCALE: usize = 20000;
+const AV2_LUMA_DPCM_SCORE_MARGIN: usize = 1024;
+const AV2_LUMA_DPCM_PALETTE_SYNTAX_BONUS: usize = 4096;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 124;
 const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 20000;
-const AV2_ENABLE_LUMA_DPCM_444: bool = false;
+const AV2_ENABLE_LUMA_DPCM_444: bool = true;
 const LOSSLESS_DC_PREDICTOR: u8 = 128;
 const LOSSLESS_H_PRED_LEFT_EDGE: u8 = 129;
 const LOSSLESS_V_PRED_ABOVE_EDGE: u8 = 127;
@@ -413,11 +417,139 @@ impl Av2LumaPalette444 {
         (use_bdpcm, mode)
     }
 
-    fn luma_bdpcm_horz_direction_for_block(&self, _x0: usize, _y0: usize) -> bool {
-        // Keep the first luma-DPCM step hardware-cheap: two-color 64x64
-        // tiles use vertical DPCM only, avoiding a per-block direction-cost
-        // scorer and additional predictor-edge storage in RTL.
-        false
+    fn luma_bdpcm_horz_decision_for_block(&self, x0: usize, y0: usize) -> Option<bool> {
+        let palette_score = self.luma_palette_coeff_score_for_block(x0, y0);
+        let vert_score = self.luma_bdpcm_coeff_score_for_block(x0, y0, false);
+        let horz_score = self.luma_bdpcm_coeff_score_for_block(x0, y0, true);
+        let (horz, dpcm_score) = if horz_score < vert_score {
+            (true, horz_score)
+        } else {
+            (false, vert_score)
+        };
+
+        (dpcm_score + AV2_LUMA_DPCM_SCORE_MARGIN
+            < palette_score + AV2_LUMA_DPCM_PALETTE_SYNTAX_BONUS)
+            .then_some(horz)
+    }
+
+    fn luma_palette_coeff_score_for_block(&self, x0: usize, y0: usize) -> usize {
+        let mut score = 0usize;
+        for txb_y in 0..2 {
+            for txb_x in 0..2 {
+                let residual = self.luma_palette_residual4x4(x0 + txb_x * 4, y0 + txb_y * 4);
+                score += luma_coeff_score(&av2_fwht4x4_for_score(&residual));
+            }
+        }
+        score
+    }
+
+    fn luma_bdpcm_coeff_score_for_block(&self, x0: usize, y0: usize, horz: bool) -> usize {
+        let tile_origin_x = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_origin_y = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let mut score = 0usize;
+        for txb_y in 0..2 {
+            for txb_x in 0..2 {
+                let residual = self.luma_bdpcm_residual4x4(
+                    x0 + txb_x * 4,
+                    y0 + txb_y * 4,
+                    tile_origin_x,
+                    tile_origin_y,
+                    horz,
+                );
+                score += luma_coeff_score(&av2_fwht4x4_for_score(&residual));
+            }
+        }
+        score
+    }
+
+    fn luma_palette_residual4x4(&self, x0: usize, y0: usize) -> [i32; 16] {
+        let mut residual = [0i32; 16];
+        for local_y in 0..4 {
+            let y = y0 + local_y;
+            for local_x in 0..4 {
+                let x = x0 + local_x;
+                residual[local_y * 4 + local_x] =
+                    i32::from(self.y_sample(x, y)) - i32::from(self.luma_prediction_sample(x, y));
+            }
+        }
+        residual
+    }
+
+    fn luma_bdpcm_residual4x4(
+        &self,
+        x0: usize,
+        y0: usize,
+        tile_origin_x: usize,
+        tile_origin_y: usize,
+        horz: bool,
+    ) -> [i32; 16] {
+        let mut residual = [0i32; 16];
+        for local_y in 0..4 {
+            let y = y0 + local_y;
+            for local_x in 0..4 {
+                let x = x0 + local_x;
+                residual[local_y * 4 + local_x] = if horz {
+                    let row_predictor = i32::from(self.luma_h_predictor(
+                        x0,
+                        y0,
+                        local_y,
+                        tile_origin_x,
+                        tile_origin_y,
+                    ));
+                    if local_x == 0 {
+                        i32::from(self.y_sample(x, y)) - row_predictor
+                    } else {
+                        i32::from(self.y_sample(x, y)) - i32::from(self.y_sample(x - 1, y))
+                    }
+                } else if local_y == 0 {
+                    let col_predictor = i32::from(self.luma_v_predictor(
+                        x0,
+                        y0,
+                        local_x,
+                        tile_origin_x,
+                        tile_origin_y,
+                    ));
+                    i32::from(self.y_sample(x, y)) - col_predictor
+                } else {
+                    i32::from(self.y_sample(x, y)) - i32::from(self.y_sample(x, y - 1))
+                };
+            }
+        }
+        residual
+    }
+
+    fn luma_h_predictor(
+        &self,
+        x0: usize,
+        y0: usize,
+        local_y: usize,
+        tile_origin_x: usize,
+        tile_origin_y: usize,
+    ) -> u8 {
+        if x0 > tile_origin_x {
+            self.y_sample(x0 - 1, y0 + local_y)
+        } else if y0 > tile_origin_y {
+            self.y_sample(x0, y0 - 1)
+        } else {
+            LOSSLESS_H_PRED_LEFT_EDGE
+        }
+    }
+
+    fn luma_v_predictor(
+        &self,
+        x0: usize,
+        y0: usize,
+        local_x: usize,
+        tile_origin_x: usize,
+        tile_origin_y: usize,
+    ) -> u8 {
+        if y0 > tile_origin_y {
+            self.y_sample(x0 + local_x, y0 - 1)
+        } else if x0 > tile_origin_x {
+            self.y_sample(x0 - 1, y0)
+        } else {
+            LOSSLESS_V_PRED_ABOVE_EDGE
+        }
     }
 
     pub(crate) fn index_at(&self, x: usize, y: usize) -> u8 {
@@ -993,6 +1125,19 @@ fn chroma_bdpcm_coeff_score(residual: &[i32; 16]) -> usize {
     score
 }
 
+fn luma_coeff_score(coefficients: &[i32; 16]) -> usize {
+    let mut score = 0usize;
+    for &coefficient in coefficients {
+        debug_assert_eq!(coefficient % 8, 0);
+        let level = (coefficient.unsigned_abs() / 8) as usize;
+        if level == 0 {
+            continue;
+        }
+        score += AV2_LUMA_DPCM_NONZERO_COST + (level.min(255) * AV2_LUMA_DPCM_LEVEL_SCALE) / 100;
+    }
+    score
+}
+
 fn av2_fwht4x4_for_score(input: &[i32; 16]) -> [i32; 16] {
     let mut output = [0i32; 16];
     for i in 0..4 {
@@ -1163,7 +1308,7 @@ pub(crate) fn build_luma_palette_444(
                     let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
                     let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
                     palette.luma_bdpcm_horz[block_index] =
-                        Some(palette.luma_bdpcm_horz_direction_for_block(x0, y0));
+                        palette.luma_bdpcm_horz_decision_for_block(x0, y0);
                 }
             }
         }

@@ -1454,20 +1454,28 @@ impl Av2LumaModeContext {
         }
     }
 
-    fn syntax_for_leaf(&self, row_mi: usize, col_mi: usize) -> Av2LumaModeSyntax {
+    fn syntax_for_leaf(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Av2LumaModeSyntax {
+        let bottom_left_mode = col_mi.checked_sub(1).and_then(|col| {
+            self.mode_at_mi(row_mi + block_size.mi_height().saturating_sub(1), col)
+        });
+        let above_right_mode = row_mi
+            .checked_sub(1)
+            .and_then(|row| self.mode_at_mi(row, col_mi + block_size.mi_width().saturating_sub(1)));
+        av2_luma_mode_syntax_for_block(bottom_left_mode, above_right_mode)
+    }
+
+    fn mode_at_mi(&self, row_mi: usize, col_mi: usize) -> Option<Av2LumaIntraMode> {
         let block_row = row_mi / (MVP_LEAF_BLOCK_SIZE / MI_SIZE);
         let block_col = col_mi / (MVP_LEAF_BLOCK_SIZE / MI_SIZE);
-        let bottom_left_mode = if block_col > 0 && block_row + 1 < self.blocks_high {
-            self.modes[(block_row + 1) * self.blocks_wide + block_col - 1]
-        } else {
-            None
-        };
-        let above_right_mode = if block_row > 0 && block_col + 1 < self.blocks_wide {
-            self.modes[(block_row - 1) * self.blocks_wide + block_col + 1]
-        } else {
-            None
-        };
-        av2_luma_mode_syntax_for_block(bottom_left_mode, above_right_mode)
+        if block_row >= self.blocks_high || block_col >= self.blocks_wide {
+            return None;
+        }
+        self.modes[block_row * self.blocks_wide + block_col]
     }
 
     fn update_leaf(
@@ -1918,10 +1926,19 @@ impl Av2Black444TilePlan {
                     col: col_mi,
                     block_size,
                 });
+                let coded_luma_mode = if use_dpcm_y {
+                    if luma_bdpcm_horz {
+                        Av2LumaIntraMode::Horizontal
+                    } else {
+                        Av2LumaIntraMode::Vertical
+                    }
+                } else {
+                    luma_mode
+                };
                 self.decisions.push(Av2TileDecision {
                     kind: Av2TileDecisionKind::IntraChromaMode {
                         use_bdpcm_uv,
-                        luma_mode,
+                        luma_mode: coded_luma_mode,
                         chroma_intra_mode,
                     },
                     row: row_mi,
@@ -2067,7 +2084,11 @@ impl Av2Black444TilePlan {
                     dpcm_horz,
                     use_fsc,
                 } => {
-                    let mode_syntax = luma_mode_context.syntax_for_leaf(decision.row, decision.col);
+                    let mode_syntax = luma_mode_context.syntax_for_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
                     let mode_context = mode_syntax.context;
                     let mode_index = mode_syntax.index_for(mode);
                     let fsc_context =
