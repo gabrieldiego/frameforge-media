@@ -667,7 +667,11 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
                 Some(ChromaSampling::Cs420 | ChromaSampling::Cs444)
             ) && matches!(format.bit_depth().bits(), 8 | 10)
         }
-        "vvc" => format.is_yuv() && format.bit_depth().bits() == 8,
+        "vvc" => match format.chroma_sampling() {
+            Some(ChromaSampling::Cs420) => matches!(format.bit_depth().bits(), 8..=12),
+            Some(ChromaSampling::Cs422 | ChromaSampling::Cs444) => format.bit_depth().bits() == 8,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -1083,6 +1087,45 @@ mod tests {
                 input: Some(path.to_string_lossy().to_string()),
                 output: Some("out.obu".to_string()),
                 codec: Some("av2".to_string()),
+                video: Some(args::VideoSpec {
+                    width: 8,
+                    height: 8,
+                    pixel_format: Some(format_name),
+                }),
+                frames: None,
+                ..EncodeArgs::default()
+            };
+
+            let job = encode_job(&args).expect("build encode job");
+            assert_eq!(job.frames, 1);
+            assert_eq!(job.source_format, format);
+            assert_eq!(job.format, format);
+
+            let mut reader = open_job_reader(&job).expect("open reader");
+            let mut forwarded = Vec::new();
+            reader
+                .read_to_end(&mut forwarded)
+                .expect("read forwarded frame");
+            assert_eq!(forwarded, input);
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn encode_job_preserves_high_bit_depth_yuv420_for_vvc_path() {
+        for bits in [10, 12] {
+            let format_name = format!("yuv420p{bits}le");
+            let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
+            let format = PixelFormat::yuv420(bits).unwrap();
+            let input = vec![0x55; format.frame_len(8, 8).unwrap()];
+            let mut file = File::create(&path).expect("create temp yuv");
+            file.write_all(&input).expect("write temp yuv");
+            drop(file);
+
+            let args = EncodeArgs {
+                input: Some(path.to_string_lossy().to_string()),
+                output: Some("out.266".to_string()),
+                codec: Some("vvc".to_string()),
                 video: Some(args::VideoSpec {
                     width: 8,
                     height: 8,

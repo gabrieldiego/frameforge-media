@@ -4,6 +4,17 @@ fn vvc_test_slice_config() -> VvcSliceSyntaxConfig {
     VvcSliceSyntaxConfig::yuv420_residual()
 }
 
+fn vvc_sps_rbsp_8bit(
+    geometry: VvcVideoGeometry,
+    slice_config: VvcSliceSyntaxConfig,
+) -> VvcSyntaxRbsp {
+    vvc_sps_rbsp(
+        geometry,
+        slice_config,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+    )
+}
+
 fn vvc_named_field<'a>(rbsp: &'a VvcSyntaxRbsp, name: &str) -> Option<&'a VvcSyntaxField> {
     rbsp.fields.iter().find(|field| field.name == name)
 }
@@ -64,7 +75,7 @@ fn assert_vvc_field_absent(rbsp: &VvcSyntaxRbsp, name: &str) {
 }
 
 fn assert_vvc_parameter_sets_signal_geometry(geometry: VvcVideoGeometry) {
-    let sps = vvc_sps_rbsp(geometry, vvc_test_slice_config());
+    let sps = vvc_sps_rbsp_8bit(geometry, vvc_test_slice_config());
     assert_eq!(
         vvc_ue_value(&sps, "sps_pic_width_max_in_luma_samples") as usize,
         geometry.coded_width()
@@ -91,6 +102,26 @@ fn assert_vvc_parameter_sets_signal_geometry(geometry: VvcVideoGeometry) {
         vvc_ue_value(&pps, "pps_pic_height_in_luma_samples") as usize,
         geometry.coded_height()
     );
+}
+
+#[test]
+fn vvc_sps_signals_native_420_bit_depth_profiles() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    for (bits, expected_profile) in [(8, 1), (10, 1), (12, 2)] {
+        let rbsp = vvc_sps_rbsp(
+            geometry,
+            VvcSliceSyntaxConfig::yuv420_residual(),
+            SampleBitDepth::new(bits).expect("valid bit depth"),
+        );
+        assert_eq!(
+            vvc_ue_value(&rbsp, "sps_bitdepth_minus8"),
+            u32::from(bits - 8)
+        );
+        assert_eq!(vvc_u_value(&rbsp, "general_profile_idc"), expected_profile);
+    }
 }
 
 fn assert_vvc_annex_b_has_min_picture_nals(bytes: &[u8], frames: usize) -> Vec<VvcNalInfo> {
@@ -301,7 +332,7 @@ fn parses_vvc_black_one_frame_headers() {
 #[test]
 fn vvc_parameter_sets_are_generated_from_named_syntax() {
     let geometry = VvcVideoGeometry::validation_minimum();
-    let sps = vvc_sps_rbsp(geometry, vvc_test_slice_config());
+    let sps = vvc_sps_rbsp_8bit(geometry, vvc_test_slice_config());
     let pps = vvc_pps_rbsp(geometry);
 
     assert!(!sps.bytes.is_empty());
@@ -415,7 +446,7 @@ fn vvc_sps_tool_flags_follow_the_active_slice_config() {
         width: 16,
         height: 16,
     };
-    let rbsp = vvc_sps_rbsp(geometry, vvc_test_slice_config());
+    let rbsp = vvc_sps_rbsp_8bit(geometry, vvc_test_slice_config());
 
     assert_vvc_flag(&rbsp, "sps_ref_pic_resampling_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_res_change_in_clvs_allowed_flag", false);
@@ -456,7 +487,7 @@ fn vvc_sps_tool_flags_can_enable_gated_tools_from_one_config() {
     config.tools.dependent_quantization_enabled = true;
     config.tools.sign_data_hiding_enabled = true;
 
-    let rbsp = vvc_sps_rbsp(geometry, config);
+    let rbsp = vvc_sps_rbsp_8bit(geometry, config);
     assert_vvc_flag(&rbsp, "sps_transform_skip_enabled_flag", true);
     assert_eq!(
         vvc_ue_value(&rbsp, "sps_log2_transform_skip_max_size_minus2"),
@@ -471,7 +502,7 @@ fn vvc_sps_tool_flags_can_enable_gated_tools_from_one_config() {
     assert_vvc_flag(&rbsp, "sps_sign_data_hiding_enabled_flag", true);
 
     let palette = VvcSliceSyntaxConfig::palette_444();
-    let palette_rbsp = vvc_sps_rbsp(geometry, palette);
+    let palette_rbsp = vvc_sps_rbsp_8bit(geometry, palette);
     assert_vvc_flag(&rbsp, "sps_qtbtt_dual_tree_intra_flag", true);
     assert_vvc_flag(&palette_rbsp, "sps_qtbtt_dual_tree_intra_flag", false);
     assert_eq!(vvc_u_value(&palette_rbsp, "sps_chroma_format_idc"), 3);
@@ -517,7 +548,7 @@ fn vvc_cabac_tool_flags_are_read_from_the_active_slice_config() {
     disabled_mrl.tools.mrl_enabled = false;
 
     assert_vvc_flag(
-        &vvc_sps_rbsp(geometry, disabled_mrl),
+        &vvc_sps_rbsp_8bit(geometry, disabled_mrl),
         "sps_mrl_enabled_flag",
         false,
     );
@@ -1479,19 +1510,54 @@ fn vvc_bitstream_path_accepts_sampled_non_black_input() {
 }
 
 #[test]
-fn vvc_input_path_accepts_wider_yuv420p_formats() {
+fn vvc_input_path_preserves_native_yuv420p_high_depth() {
     let expected = vvc_yuv420p8_annex_b_from_input(
         &solid_yuv420p8(65, 128, 192, 1),
         VvcEncodeParams { frames: 1 },
     )
     .unwrap();
-    for bit_depth in 9..=16 {
+    for bit_depth in 9..=12 {
         let format = PixelFormat::yuv420(bit_depth).unwrap();
         let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
+        let frame = sample_vvc_yuv_frame(
+            &input,
+            VvcEncodeParams { frames: 1 },
+            VvcVideoGeometry {
+                width: 8,
+                height: 8,
+            },
+            format,
+        )
+        .unwrap();
+        assert_eq!(frame.luma[0], 65u16 << (bit_depth - 8));
+
+        let artifacts = vvc_yuv_encode_artifacts_from_input_with_limits(
+            &input,
+            VvcEncodeParams { frames: 1 },
+            VvcVideoGeometry {
+                width: 8,
+                height: 8,
+            },
+            VvcVideoLimits::unbounded(),
+            format,
+        )
+        .unwrap();
+        assert_ne!(artifacts.bitstream, expected);
         assert_eq!(
-            vvc_yuv420p_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format).unwrap(),
-            expected
+            artifacts.reconstruction.len(),
+            Picture::expected_len(8, 8, format)
         );
+    }
+}
+
+#[test]
+fn vvc_input_path_rejects_unsupported_yuv420p_depths() {
+    for bit_depth in 13..=16 {
+        let format = PixelFormat::yuv420(bit_depth).unwrap();
+        let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
+        let err = vvc_yuv420p_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
+            .unwrap_err();
+        assert!(err.contains("8..12"), "{err}");
     }
 }
 
@@ -1502,10 +1568,7 @@ fn vvc_input_path_accepts_supported_yuv_subsampling() {
         VvcEncodeParams { frames: 1 },
     )
     .unwrap();
-    for (format, chroma_samples) in [
-        (PixelFormat::yuv422(8).unwrap(), 32),
-        (PixelFormat::yuv422(10).unwrap(), 32),
-    ] {
+    for (format, chroma_samples) in [(PixelFormat::yuv422(8).unwrap(), 32)] {
         let input =
             solid_yuv_planar_high(65, 128, 192, format.bit_depth().bits(), chroma_samples, 1);
         assert_eq!(
@@ -1514,6 +1577,15 @@ fn vvc_input_path_accepts_supported_yuv_subsampling() {
             expected
         );
     }
+}
+
+#[test]
+fn vvc_input_path_rejects_high_depth_yuv422_until_native_path_exists() {
+    let format = PixelFormat::yuv422(10).unwrap();
+    let input = solid_yuv_planar_high(65, 128, 192, format.bit_depth().bits(), 32, 1);
+    let err = vvc_default_yuv_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
+        .unwrap_err();
+    assert!(err.contains("4:2:2"), "{err}");
 }
 
 #[test]
@@ -1776,9 +1848,9 @@ fn vvc_palette_444_cu_syntax_carries_palette_indices_for_lossless_8x8() {
             chroma_sampling: ChromaSampling::Cs444,
             bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
-        luma: luma.clone(),
-        cb: cb.clone(),
-        cr: cr.clone(),
+        luma: luma.iter().copied().map(u16::from).collect(),
+        cb: cb.iter().copied().map(u16::from).collect(),
+        cr: cr.iter().copied().map(u16::from).collect(),
         chroma_len: 64,
     };
 
@@ -1824,9 +1896,9 @@ fn vvc_palette_444_cu_syntax_uses_escape_values_after_31_entries() {
             chroma_sampling: ChromaSampling::Cs444,
             bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
-        luma: luma.clone(),
-        cb: cb.clone(),
-        cr: cr.clone(),
+        luma: luma.iter().copied().map(u16::from).collect(),
+        cb: cb.iter().copied().map(u16::from).collect(),
+        cr: cr.iter().copied().map(u16::from).collect(),
         chroma_len: 64,
     };
 
@@ -1880,9 +1952,9 @@ fn vvc_palette_444_uses_ibc_for_repeated_8x8_block() {
             chroma_sampling: ChromaSampling::Cs444,
             bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
-        luma: luma.clone(),
-        cb: cb.clone(),
-        cr: cr.clone(),
+        luma: luma.iter().copied().map(u16::from).collect(),
+        cb: cb.iter().copied().map(u16::from).collect(),
+        cr: cr.iter().copied().map(u16::from).collect(),
         chroma_len: geometry.luma_samples(),
     };
 
@@ -1934,9 +2006,9 @@ fn vvc_palette_444_uses_transform_skip_residual_for_left_ibc_delta() {
             chroma_sampling: ChromaSampling::Cs444,
             bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
-        luma: luma.clone(),
-        cb: cb.clone(),
-        cr: cr.clone(),
+        luma: luma.iter().copied().map(u16::from).collect(),
+        cb: cb.iter().copied().map(u16::from).collect(),
+        cr: cr.iter().copied().map(u16::from).collect(),
         chroma_len: geometry.luma_samples(),
     };
 
@@ -1997,9 +2069,9 @@ fn vvc_palette_444_uses_horizontal_bdpcm_for_left_predicted_rows() {
             chroma_sampling: ChromaSampling::Cs444,
             bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
-        luma: luma.clone(),
-        cb: cb.clone(),
-        cr: cr.clone(),
+        luma: luma.iter().copied().map(u16::from).collect(),
+        cb: cb.iter().copied().map(u16::from).collect(),
+        cr: cr.iter().copied().map(u16::from).collect(),
         chroma_len: geometry.luma_samples(),
     };
 

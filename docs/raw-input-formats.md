@@ -96,8 +96,11 @@ Current behavior:
 - AV2 accepts `yuv444p8` and `yuv444p10le` natively for the current 4:4:4 path.
   Higher 4:4:4 depths are scaled to `yuv444p8` before encoding until a
   reference-valid 12-bit profile path is added.
-- VVC accepts 8-bit planar YUV layouts in the CLI path; higher-bit-depth planar
-  YUV inputs are scaled to the same layout at 8-bit.
+- VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
+  residual path. Higher 4:2:0 depths are scaled to `yuv420p8` before encoding.
+- VVC accepts 8-bit 4:2:2 compatibility input and 8-bit 4:4:4 palette input.
+  Higher 4:2:2 and 4:4:4 depths are scaled to the same layout at 8-bit before
+  encoding until those paths gain native high-depth syntax and reconstruction.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 

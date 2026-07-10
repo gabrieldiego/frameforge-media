@@ -477,10 +477,16 @@ def vvc_reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
-    if vector.fmt == "yuv420p8":
+    bit_depth = generate_test_vectors.yuv420_bit_depth(vector.fmt)
+    if bit_depth is not None:
         chroma_format = "420"
+        if bit_depth > 12:
+            raise SystemExit(
+                f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
+            )
     elif vector.fmt == "yuv444p8":
         chroma_format = "444"
+        bit_depth = 8
     else:
         raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
 
@@ -491,7 +497,7 @@ def vvc_reference_encode_command(
     ]
     if vector.lossless:
         command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless.cfg")])
-        if vector.fmt == "yuv444p8":
+        if chroma_format == "444":
             command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless444.cfg")])
 
     command.extend(
@@ -510,8 +516,8 @@ def vvc_reference_encode_command(
             str(reference_integer_fps(vector)),
             "-f",
             str(vector.frames),
-            "--InputBitDepth=8",
-            "--InternalBitDepth=8",
+            f"--InputBitDepth={bit_depth}",
+            f"--InternalBitDepth={bit_depth}",
             f"--InputChromaFormat={chroma_format}",
             f"--ChromaFormatIDC={chroma_format}",
             "--TemporalSubsampleRatio=1",

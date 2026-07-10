@@ -1,4 +1,4 @@
-use crate::picture::ChromaSampling;
+use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::{
     vvc_cabac_bits, VvcCodingTreeConfig, VvcNalUnit, VvcNalUnitType, VvcQuantizedColor,
@@ -47,12 +47,13 @@ pub(in crate::vvc) fn vvc_poc_lsb_for_frame_idx(frame_idx: usize) -> u32 {
 pub(in crate::vvc) fn vvc_sps_unit(
     geometry: VvcVideoGeometry,
     slice_config: VvcSliceSyntaxConfig,
+    bit_depth: SampleBitDepth,
 ) -> VvcNalUnit {
     VvcNalUnit {
         nal_unit_type: VvcNalUnitType::Sps,
         layer_id: 0,
         temporal_id: 0,
-        rbsp_payload: vvc_configured_sps_payload(geometry, slice_config),
+        rbsp_payload: vvc_configured_sps_payload(geometry, slice_config, bit_depth),
     }
 }
 
@@ -155,19 +156,25 @@ fn vvc_ctu_slice_unit_with_poc(
 
 #[cfg(test)]
 pub(in crate::vvc) fn vvc_sps_payload(geometry: VvcVideoGeometry) -> Vec<u8> {
-    vvc_configured_sps_payload(geometry, VvcSliceSyntaxConfig::yuv420_residual())
+    vvc_configured_sps_payload(
+        geometry,
+        VvcSliceSyntaxConfig::yuv420_residual(),
+        SampleBitDepth::new(8).expect("valid bit depth"),
+    )
 }
 
 fn vvc_configured_sps_payload(
     geometry: VvcVideoGeometry,
     slice_config: VvcSliceSyntaxConfig,
+    bit_depth: SampleBitDepth,
 ) -> Vec<u8> {
-    vvc_sps_rbsp(geometry, slice_config).bytes
+    vvc_sps_rbsp(geometry, slice_config, bit_depth).bytes
 }
 
 pub(in crate::vvc) fn vvc_sps_rbsp(
     geometry: VvcVideoGeometry,
     slice_config: VvcSliceSyntaxConfig,
+    bit_depth: SampleBitDepth,
 ) -> VvcSyntaxRbsp {
     let mut writer = VvcSyntaxWriter::new();
     let config = slice_config.coding_tree;
@@ -191,7 +198,7 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
     writer.write_flag("sps_ptl_dpb_hrd_params_present_flag", true);
     writer.write_u(
         "general_profile_idc",
-        vvc_general_profile_idc(config, palette_enabled) as u64,
+        vvc_general_profile_idc(config, palette_enabled, bit_depth) as u64,
         7,
     );
     writer.write_flag("general_tier_flag", false);
@@ -231,7 +238,10 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
         geometry.crop_bottom(config.chroma_sampling),
     );
     writer.write_flag("sps_subpic_info_present_flag", false);
-    writer.write_ue("sps_bitdepth_minus8", 0);
+    writer.write_ue(
+        "sps_bitdepth_minus8",
+        u32::from(bit_depth.bits().saturating_sub(8)),
+    );
     writer.write_flag("sps_entropy_coding_sync_enabled_flag", false);
     writer.write_flag(
         "sps_entry_point_offsets_present_flag",
@@ -452,12 +462,18 @@ fn chroma_format_idc(chroma_sampling: ChromaSampling) -> u32 {
     }
 }
 
-fn vvc_general_profile_idc(config: VvcCodingTreeConfig, palette_enabled: bool) -> u32 {
+fn vvc_general_profile_idc(
+    config: VvcCodingTreeConfig,
+    palette_enabled: bool,
+    bit_depth: SampleBitDepth,
+) -> u32 {
     if config.chroma_sampling == ChromaSampling::Cs444 || palette_enabled {
         // TODO(vvc): Signal a concrete 4:4:4-capable profile once the full
         // PTL/GCI constraint set is generated. Profile NONE avoids the Main 10
         // palette-off constraint while this clean-room subset is still forming.
         0
+    } else if bit_depth.bits() > 10 {
+        2
     } else {
         1
     }

@@ -1,4 +1,4 @@
-use super::{VvcSampledFrame, VVC_CTU_SIZE};
+use super::{VvcSample, VvcSampledFrame, VVC_CTU_SIZE};
 
 const VVC_IBC_CU_SIZE: usize = 8;
 const VVC_IBC_CUS_PER_CTU: usize =
@@ -318,8 +318,8 @@ fn vvc_ibc_hash_8x8(frame: &VvcSampledFrame, origin_x: usize, origin_y: usize) -
     hash
 }
 
-fn vvc_ibc_hash_byte(hash: u32, value: u8) -> u32 {
-    let mixed = hash ^ u32::from(value);
+fn vvc_ibc_hash_byte(hash: u32, value: VvcSample) -> u32 {
+    let mixed = hash ^ u32::from(value as u8);
     let mixed = mixed ^ mixed.wrapping_shl(13);
     let mixed = mixed ^ mixed.wrapping_shr(17);
     mixed ^ mixed.wrapping_shl(5)

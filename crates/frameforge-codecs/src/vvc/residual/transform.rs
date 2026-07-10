@@ -1,7 +1,9 @@
+use super::super::VvcSample;
 use super::{
     VvcQuantizedTransformBlock, VvcTransformComponent, VvcTuTransformBlock,
     VVC_CHROMA_AC_POSITIONS_2X2,
 };
+use crate::picture::SampleBitDepth;
 
 pub(in crate::vvc) const VVC_LUMA_DC_BASE: i16 = 114;
 pub(in crate::vvc) const VVC_CHROMA_DC_BASE: i16 = 128;
@@ -64,7 +66,7 @@ pub(in crate::vvc) fn transform_vvc_tu(
     component: VvcTransformComponent,
     width: u16,
     height: u16,
-    samples: &[u8],
+    samples: &[VvcSample],
 ) -> VvcTuTransformBlock {
     debug_assert!(width > 0);
     debug_assert!(height > 0);
@@ -74,17 +76,21 @@ pub(in crate::vvc) fn transform_vvc_tu(
         sample_count,
         "transform input must contain one sample per TU position"
     );
-    let sum: u32 = samples.iter().map(|sample| u32::from(*sample)).sum();
-    let dc_sample = ((sum + (sample_count as u32 / 2)) / sample_count as u32) as u8;
+    let sum: u64 = samples.iter().map(|sample| u64::from(*sample)).sum();
+    let dc_sample = ((sum + (sample_count as u64 / 2)) / sample_count as u64) as VvcSample;
     let mut ac_coeffs = Vec::with_capacity(sample_count.saturating_sub(1));
     for sample in samples.iter().skip(1) {
-        ac_coeffs.push(i16::from(*sample) - i16::from(dc_sample));
+        ac_coeffs.push(
+            (i32::from(*sample) - i32::from(dc_sample))
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        );
     }
     VvcTuTransformBlock {
         component,
         width,
         height,
-        dc_coeff: i16::from(dc_sample) - component.dc_base(),
+        dc_coeff: (i32::from(dc_sample) - i32::from(component.dc_base()))
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
         ac_coeffs,
     }
 }
@@ -142,17 +148,31 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_residual_levels(
     width: u16,
     height: u16,
     coeff_levels: &[i16],
+    bit_depth: SampleBitDepth,
 ) -> Vec<i16> {
-    inverse_transform_vvc_residual_levels_with_qp(width, height, coeff_levels, VVC_LUMA_QP)
+    inverse_transform_vvc_residual_levels_with_qp(
+        width,
+        height,
+        coeff_levels,
+        VVC_LUMA_QP,
+        bit_depth,
+    )
 }
 
 pub(in crate::vvc) fn inverse_transform_vvc_chroma_residual_levels(
     width: u16,
     height: u16,
     coeff_levels: &[i16],
+    bit_depth: SampleBitDepth,
 ) -> Vec<i16> {
     // Current SPS/PPS chroma QP mapping table maps slice QP 32 to chroma QP 34.
-    inverse_transform_vvc_residual_levels_with_qp(width, height, coeff_levels, VVC_CHROMA_QP)
+    inverse_transform_vvc_residual_levels_with_qp(
+        width,
+        height,
+        coeff_levels,
+        VVC_CHROMA_QP,
+        bit_depth,
+    )
 }
 
 fn inverse_transform_vvc_residual_levels_with_qp(
@@ -160,6 +180,7 @@ fn inverse_transform_vvc_residual_levels_with_qp(
     height: u16,
     coeff_levels: &[i16],
     qp: i32,
+    bit_depth: SampleBitDepth,
 ) -> Vec<i16> {
     let width_usize = usize::from(width);
     let height_usize = usize::from(height);
@@ -187,9 +208,9 @@ fn inverse_transform_vvc_residual_levels_with_qp(
     }
 
     let residual_bd_shift = if width > 1 && height > 1 {
-        5 + 15 - 8
+        5 + 15 - i32::from(bit_depth.bits())
     } else {
-        6 + 15 - 8
+        6 + 15 - i32::from(bit_depth.bits())
     };
     let residual_offset = 1 << (residual_bd_shift - 1);
     let mut residuals = vec![0; coeff_levels.len()];
@@ -212,6 +233,7 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_dc(
     residuals: &[i16],
     width: u16,
     height: u16,
+    bit_depth: SampleBitDepth,
 ) -> i16 {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
@@ -219,11 +241,11 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_dc(
     debug_assert!([4, 8, 16, 32].contains(&height));
 
     let residual_sum: i64 = residuals.iter().map(|value| i64::from(*value)).sum();
-    if width == 4 && height == 4 {
+    if width == 4 && height == 4 && bit_depth.bits() == 8 {
         return quantize_vvc_chroma_4x4_dc_level_from_sum(residual_sum);
     }
 
-    quantize_vvc_chroma_residual_dc_by_search(residual_sum, residuals, width, height)
+    quantize_vvc_chroma_residual_dc_by_search(residual_sum, residuals, width, height, bit_depth)
 }
 
 fn quantize_vvc_chroma_4x4_dc_level_from_sum(residual_sum: i64) -> i16 {
@@ -250,6 +272,7 @@ fn quantize_vvc_chroma_residual_dc_by_search(
     residuals: &[i16],
     width: u16,
     height: u16,
+    bit_depth: SampleBitDepth,
 ) -> i16 {
     let mut best_level = 0;
     let original_sse = residuals
@@ -264,6 +287,7 @@ fn quantize_vvc_chroma_residual_dc_by_search(
             width,
             height,
             VVC_CHROMA_QP,
+            bit_depth,
         ));
         let sample_count = residuals.len() as i64;
         let sse = original_sse + (sample_count * reconstructed * reconstructed)
@@ -280,6 +304,7 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
     residuals: &[i16],
     width: u16,
     height: u16,
+    bit_depth: SampleBitDepth,
 ) -> VvcQuantizedTransformBlock {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
@@ -287,7 +312,7 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
     debug_assert!([4, 8, 16, 32].contains(&height));
 
     let mut coeff_levels = vec![0; coefficient_count];
-    coeff_levels[0] = quantize_vvc_chroma_residual_dc(residuals, width, height);
+    coeff_levels[0] = quantize_vvc_chroma_residual_dc(residuals, width, height, bit_depth);
     let mut ac_coeffs = [0; 15];
     if residuals_have_ac_energy(residuals) {
         // H.266 7.3.11.10 transform_unit() can carry all chroma AC
@@ -481,7 +506,13 @@ fn dct2_value(size: u16, k: usize, n: usize) -> i32 {
     }
 }
 
-fn dc_only_residual_from_level(level: i16, width: u16, height: u16, qp: i32) -> i16 {
+fn dc_only_residual_from_level(
+    level: i16,
+    width: u16,
+    height: u16,
+    qp: i32,
+    bit_depth: SampleBitDepth,
+) -> i16 {
     if level == 0 {
         return 0;
     }
@@ -492,9 +523,9 @@ fn dc_only_residual_from_level(level: i16, width: u16, height: u16, qp: i32) -> 
         64 * dequantized
     };
     let residual_bd_shift = if width > 1 && height > 1 {
-        5 + 15 - 8
+        5 + 15 - i32::from(bit_depth.bits())
     } else {
-        6 + 15 - 8
+        6 + 15 - i32::from(bit_depth.bits())
     };
     let residual_offset = 1 << (residual_bd_shift - 1);
     ((64 * vertical + residual_offset) >> residual_bd_shift) as i16

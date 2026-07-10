@@ -5,7 +5,7 @@ use super::{
     residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream, VvcResidualComponent},
     sample_vvc_yuv_frame, vvc_picture_ctu_count, vvc_poc_lsb_for_frame_idx, vvc_slice_address_bits,
     VvcCabacContext, VvcCabacContexts, VvcCabacEncoder, VvcCtuCabacOp, VvcCtuPartitionShape,
-    VvcEncodeParams, VvcNalUnit, VvcPictureKind, VvcSampledColor, VvcSampledFrame,
+    VvcEncodeParams, VvcNalUnit, VvcPictureKind, VvcSample, VvcSampledColor, VvcSampledFrame,
     VvcSliceSyntaxConfig, VvcSyntaxWriter, VvcVideoGeometry, VVC_CTU_SIZE,
 };
 
@@ -278,9 +278,9 @@ fn vvc_transform_skip_residual_444_left_8x8(
                 + decision.ref_origin_x
                 + x_off;
             let in_residual_subset = x_off < 4 && y_off < 4;
-            let y_diff = i16::from(frame.luma[cur]) - i16::from(frame.luma[ref_idx]);
-            let cb_diff = i16::from(frame.cb[cur]) - i16::from(frame.cb[ref_idx]);
-            let cr_diff = i16::from(frame.cr[cur]) - i16::from(frame.cr[ref_idx]);
+            let y_diff = vvc_palette_sample_diff_i16(frame.luma[cur], frame.luma[ref_idx]);
+            let cb_diff = vvc_palette_sample_diff_i16(frame.cb[cur], frame.cb[ref_idx]);
+            let cr_diff = vvc_palette_sample_diff_i16(frame.cr[cur], frame.cr[ref_idx]);
             if !in_residual_subset && (y_diff != 0 || cb_diff != 0 || cr_diff != 0) {
                 return None;
             }
@@ -384,7 +384,7 @@ fn vvc_bdpcm_horizontal_444_8x8(
 }
 
 fn vvc_bdpcm_horizontal_coefficients(
-    plane: &[u8],
+    plane: &[VvcSample],
     stride: usize,
     origin_x: usize,
     origin_y: usize,
@@ -394,11 +394,11 @@ fn vvc_bdpcm_horizontal_coefficients(
     for y_off in 0..8 {
         let row = origin_y + y_off;
         let left = row * stride + origin_x - 1;
-        let left_sample = i16::from(plane[left]);
-        let mut prev_residual = 0i16;
+        let left_sample = i32::from(plane[left]);
+        let mut prev_residual = 0i32;
         for x_off in 0..8 {
             let cur = row * stride + origin_x + x_off;
-            let residual = i16::from(plane[cur]) - left_sample;
+            let residual = i32::from(plane[cur]) - left_sample;
             let coeff = if x_off == 0 {
                 residual
             } else {
@@ -409,13 +409,19 @@ fn vvc_bdpcm_horizontal_coefficients(
                 return None;
             }
             if in_residual_subset {
-                coeffs[y_off * 8 + x_off] = coeff;
+                coeffs[y_off * 8 + x_off] =
+                    coeff.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
                 cbf |= coeff != 0;
             }
             prev_residual = residual;
         }
     }
     Some((coeffs, cbf))
+}
+
+fn vvc_palette_sample_diff_i16(sample: VvcSample, reference: VvcSample) -> i16 {
+    (i32::from(sample) - i32::from(reference)).clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+        as i16
 }
 
 fn add_i16_to_u8(sample: u8, delta: i16) -> u8 {
@@ -1213,9 +1219,9 @@ fn vvc_palette_444_sample_at(frame: &VvcSampledFrame, x: usize, y: usize) -> Vvc
     let sample_y = y.min(frame.geometry.height.saturating_sub(1));
     let index = sample_y * frame.geometry.width + sample_x;
     VvcSampledColor {
-        y: frame.luma[index],
-        u: frame.cb[index],
-        v: frame.cr[index],
+        y: super::vvc_downshift_sample_to_u8(frame.luma[index], frame.format.bit_depth),
+        u: super::vvc_downshift_sample_to_u8(frame.cb[index], frame.format.bit_depth),
+        v: super::vvc_downshift_sample_to_u8(frame.cr[index], frame.format.bit_depth),
     }
 }
 

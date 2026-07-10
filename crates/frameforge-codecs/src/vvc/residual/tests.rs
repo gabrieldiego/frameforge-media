@@ -71,7 +71,12 @@ fn vvc_luma_residual_quantization_reconstructs_solid_residual() {
         .all(|level| *level == 0));
     let mut levels = vec![0; 8 * 8];
     levels[0] = quantized.reconstructed_dc_coeff;
-    let reconstructed = inverse_transform_vvc_luma_residual_levels(8, 8, &levels);
+    let reconstructed = inverse_transform_vvc_luma_residual_levels(
+        8,
+        8,
+        &levels,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+    );
     let max_error = reconstructed
         .iter()
         .zip(residuals)
