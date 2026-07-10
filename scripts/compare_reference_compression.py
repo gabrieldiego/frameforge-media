@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import generate_test_vectors
@@ -163,12 +164,28 @@ def run_case(
         str(args.ff),
         "encode",
         str(vector_path),
-        "--encode",
-        f"{args.codec}:{frameforge_output}",
+        "--video",
+        f"{vector.width}x{vector.height}:{vector.fmt}",
+        "--frames",
+        str(vector.frames),
     ]
+    if vector.fps is not None:
+        frameforge_cmd.extend(["--fps", vector.fps])
+    frameforge_cmd.extend(
+        [
+            "--encode",
+            f"{args.codec}:{frameforge_output}",
+        ]
+    )
     if vector.lossless:
         frameforge_cmd.extend(["--set", "lossless"])
-    reference_cmd = reference_encode_command(vector, vector_path, reference_output, reference_encoder, args)
+    reference_cmd = reference_encode_command(
+        vector,
+        vector_path,
+        reference_output,
+        reference_encoder,
+        args,
+    )
     metadata = reference_cache_metadata(vector, vector_path, reference_encoder, reference_cmd, args)
     metadata_path = reference_metadata_path(reference_output)
 
@@ -347,7 +364,7 @@ def av2_reference_encode_command(
         f"--limit={vector.frames}",
         f"--width={vector.width}",
         f"--height={vector.height}",
-        f"--fps={vector.fps or 30}/1",
+        f"--fps={reference_fps_ratio(vector)}",
         "--input-bit-depth=8",
         "--bit-depth=8",
         "--cpu-used=9",
@@ -406,7 +423,7 @@ def vvc_reference_encode_command(
             "-hgt",
             str(vector.height),
             "-fr",
-            str(vector.fps or 30),
+            str(reference_integer_fps(vector)),
             "-f",
             str(vector.frames),
             "--InputBitDepth=8",
@@ -420,6 +437,20 @@ def vvc_reference_encode_command(
     if args.reference_args:
         command.extend(shlex.split(args.reference_args))
     return command
+
+
+def reference_fps_ratio(vector: generate_test_vectors.TestVector) -> str:
+    fps = fps_fraction(vector)
+    return f"{fps.numerator}/{fps.denominator}"
+
+
+def reference_integer_fps(vector: generate_test_vectors.TestVector) -> int:
+    fps = fps_fraction(vector)
+    return (fps.numerator + fps.denominator // 2) // fps.denominator
+
+
+def fps_fraction(vector: generate_test_vectors.TestVector) -> Fraction:
+    return Fraction(vector.fps or "30")
 
 
 def run_logged(command: list[str]) -> subprocess.CompletedProcess[str]:

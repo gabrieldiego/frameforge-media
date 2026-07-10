@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 try:
@@ -37,7 +38,7 @@ class TestVector:
     frames: int
     fmt: str
     pattern: str
-    fps: int | None
+    fps: str | None
     source_path: Path | None
     source: str | None
     crop_x: int | None
@@ -46,8 +47,16 @@ class TestVector:
 
     @property
     def filename(self) -> str:
-        fps_part = f"_{self.fps}" if self.fps is not None else ""
+        fps_part = f"_{filename_fps_label(self.fps)}" if self.fps is not None else ""
         return f"{self.name}_{self.width}x{self.height}{fps_part}_{self.frames}f_{self.fmt}.yuv"
+
+
+@dataclass(frozen=True)
+class Y4mMetadata:
+    width: int
+    height: int
+    fmt: str
+    fps: str | None
 
 
 @dataclass(frozen=True)
@@ -167,15 +176,62 @@ def parse_key_value_fields(value: str) -> dict[str, str]:
 
 def parse_vector(row: dict[str, str], path: Path) -> TestVector:
     context = f"{path}:{row.get('name', '').strip() or '<unnamed>'}"
+    name = required_field(row, "name", context)
+    pattern = required_field(row, "pattern", context)
+    source_path = parse_optional_path(row.get("path", ""))
+    y4m_metadata = None
+    if (
+        pattern == "source_file"
+        and source_path is not None
+        and source_path.suffix.lower() == ".y4m"
+    ):
+        y4m_metadata = read_y4m_metadata(source_path, name)
+
+    width = parse_optional_positive_int(row.get("width", ""), "width")
+    height = parse_optional_positive_int(row.get("height", ""), "height")
+    fmt = optional_field(row.get("format", ""))
+    fps = parse_optional_fps(row.get("fps", ""), "fps")
+
+    if y4m_metadata is not None:
+        if width is not None and width != y4m_metadata.width:
+            raise ValueError(
+                f"{context} declares width {width}, but Y4M source is {y4m_metadata.width}"
+            )
+        if height is not None and height != y4m_metadata.height:
+            raise ValueError(
+                f"{context} declares height {height}, but Y4M source is {y4m_metadata.height}"
+            )
+        if fmt is not None and fmt != y4m_metadata.fmt:
+            raise ValueError(f"{context} declares {fmt}, but Y4M source is {y4m_metadata.fmt}")
+        if (
+            fps is not None
+            and y4m_metadata.fps is not None
+            and not fps_matches(fps, y4m_metadata.fps)
+        ):
+            raise ValueError(
+                f"{context} declares {fps} fps, but Y4M source is {y4m_metadata.fps}"
+            )
+        width = width or y4m_metadata.width
+        height = height or y4m_metadata.height
+        fmt = fmt or y4m_metadata.fmt
+        fps = fps or y4m_metadata.fps
+
+    if width is None:
+        raise ValueError(f"missing width in {context}")
+    if height is None:
+        raise ValueError(f"missing height in {context}")
+    if fmt is None:
+        raise ValueError(f"missing format in {context}")
+
     return TestVector(
-        name=required_field(row, "name", context),
-        width=parse_positive_int(required_field(row, "width", context), "width"),
-        height=parse_positive_int(required_field(row, "height", context), "height"),
+        name=name,
+        width=width,
+        height=height,
         frames=parse_positive_int(required_field(row, "frames", context), "frames"),
-        fmt=required_field(row, "format", context),
-        pattern=required_field(row, "pattern", context),
-        fps=parse_optional_int(row.get("fps", ""), "fps"),
-        source_path=parse_optional_path(row.get("path", "")),
+        fmt=fmt,
+        pattern=pattern,
+        fps=fps,
+        source_path=source_path,
         source=optional_field(row.get("source", "")),
         crop_x=parse_optional_non_negative_int(row.get("crop_x", ""), "crop_x"),
         crop_y=parse_optional_non_negative_int(row.get("crop_y", ""), "crop_y"),
@@ -207,17 +263,11 @@ def parse_positive_int(value: str, field: str) -> int:
     return parsed
 
 
-def parse_optional_int(value: str | None, field: str) -> int | None:
+def parse_optional_positive_int(value: str | None, field: str) -> int | None:
     stripped = optional_field(value)
     if stripped is None:
         return None
-    try:
-        parsed = int(stripped)
-    except ValueError as err:
-        raise ValueError(f"{field} expects an integer, got '{stripped}'") from err
-    if parsed <= 0:
-        raise ValueError(f"{field} expects a positive integer, got {parsed}")
-    return parsed
+    return parse_positive_int(stripped, field)
 
 
 def parse_optional_non_negative_int(value: str | None, field: str) -> int | None:
@@ -252,6 +302,53 @@ def parse_optional_path(value: str | None) -> Path | None:
     return Path(stripped)
 
 
+def parse_optional_fps(value: str | None, field: str) -> str | None:
+    stripped = optional_field(value)
+    if stripped is None:
+        return None
+    parse_fps_fraction(stripped, field)
+    return stripped
+
+
+def parse_fps_fraction(value: str, field: str) -> Fraction:
+    try:
+        parsed = Fraction(value)
+    except ValueError as err:
+        raise ValueError(f"{field} expects a positive frame rate, got '{value}'") from err
+    if parsed <= 0:
+        raise ValueError(f"{field} expects a positive frame rate, got '{value}'")
+    return parsed
+
+
+def filename_fps_label(value: str | None) -> str:
+    if value is None:
+        return ""
+    return value.replace("/", "over")
+
+
+def fps_matches(declared: str, actual: str) -> bool:
+    declared_fraction = parse_fps_fraction(declared, "fps")
+    actual_fraction = parse_fps_fraction(actual, "Y4M fps")
+    if "/" not in declared and "." not in declared:
+        rounded = (
+            actual_fraction.numerator + actual_fraction.denominator // 2
+        ) // actual_fraction.denominator
+        return int(declared) == rounded
+    if "/" in declared:
+        return declared_fraction == actual_fraction
+    return abs(declared_fraction - actual_fraction) <= Fraction(1, 100)
+
+
+def read_y4m_metadata(path: Path, context: str) -> Y4mMetadata:
+    if not path.exists():
+        raise ValueError(f"{context} source file does not exist: {path}")
+    with path.open("rb") as source:
+        header = source.readline()
+    if not header.startswith(b"YUV4MPEG2 "):
+        raise ValueError(f"{context} source is not a Y4M stream: {path}")
+    return parse_y4m_metadata(header.decode("ascii", errors="replace").strip(), context)
+
+
 def generate_yuv(vector: TestVector, sources: dict[str, TestVectorSource]) -> bytes:
     validate_vector(vector)
     if vector.pattern == "source_crop":
@@ -281,6 +378,8 @@ def generate_source_file_clip(vector: TestVector) -> bytes:
         raise ValueError(f"{vector.name} uses source_file but has no path")
     if not vector.source_path.exists():
         raise ValueError(f"{vector.name} source file does not exist: {vector.source_path}")
+    if vector.source_path.suffix.lower() == ".y4m":
+        return generate_y4m_source_file_clip(vector)
     frame_len = raw_frame_len(vector)
     byte_len = frame_len * vector.frames
     with vector.source_path.open("rb") as source:
@@ -290,6 +389,116 @@ def generate_source_file_clip(vector: TestVector) -> bytes:
             f"{vector.name} source is too short: expected {byte_len} byte(s), got {len(data)}"
         )
     return data
+
+
+def generate_y4m_source_file_clip(vector: TestVector) -> bytes:
+    frame_len = raw_frame_len(vector)
+    out = bytearray()
+    with vector.source_path.open("rb") as source:
+        header = source.readline()
+        if not header.startswith(b"YUV4MPEG2 "):
+            raise ValueError(f"{vector.name} source is not a Y4M stream: {vector.source_path}")
+        metadata = parse_y4m_metadata(
+            header.decode("ascii", errors="replace").strip(),
+            vector.name,
+        )
+        validate_y4m_header(vector, metadata)
+        for frame_index in range(vector.frames):
+            frame_header = source.readline()
+            if not frame_header:
+                raise ValueError(
+                    f"{vector.name} Y4M source is too short: missing frame {frame_index + 1}"
+                )
+            if not frame_header.startswith(b"FRAME"):
+                raise ValueError(
+                    f"{vector.name} Y4M source has invalid frame marker at frame {frame_index + 1}"
+                )
+            frame = source.read(frame_len)
+            if len(frame) != frame_len:
+                raise ValueError(
+                    f"{vector.name} Y4M source is too short: expected {frame_len} byte(s) "
+                    f"for frame {frame_index + 1}, got {len(frame)}"
+                )
+            out.extend(frame)
+    return bytes(out)
+
+
+def parse_y4m_metadata(header: str, context: str) -> Y4mMetadata:
+    tags = y4m_header_tags(header)
+    return Y4mMetadata(
+        width=parse_y4m_positive_int(tags.get("W"), "width", context),
+        height=parse_y4m_positive_int(tags.get("H"), "height", context),
+        fmt=y4m_pixel_format(tags.get("C")),
+        fps=y4m_fps(tags.get("F"), context),
+    )
+
+
+def validate_y4m_header(vector: TestVector, metadata: Y4mMetadata) -> None:
+    if metadata.width != vector.width or metadata.height != vector.height:
+        raise ValueError(
+            f"{vector.name} declares {vector.width}x{vector.height}, "
+            f"but Y4M source is {metadata.width}x{metadata.height}"
+        )
+    if metadata.fmt != vector.fmt:
+        raise ValueError(f"{vector.name} declares {vector.fmt}, but Y4M source is {metadata.fmt}")
+    if (
+        vector.fps is not None
+        and metadata.fps is not None
+        and not fps_matches(vector.fps, metadata.fps)
+    ):
+        raise ValueError(
+            f"{vector.name} declares {vector.fps} fps, but Y4M source is {metadata.fps}"
+        )
+
+
+def y4m_header_tags(header: str) -> dict[str, str]:
+    fields = header.split()
+    if not fields or fields[0] != "YUV4MPEG2":
+        raise ValueError(f"invalid Y4M header: {header}")
+    tags: dict[str, str] = {}
+    for field in fields[1:]:
+        if len(field) >= 2:
+            tags[field[0]] = field[1:]
+    return tags
+
+
+def parse_y4m_positive_int(value: str | None, field: str, context: str) -> int:
+    if value is None:
+        raise ValueError(f"{context} Y4M header is missing {field}")
+    try:
+        parsed = int(value)
+    except ValueError as err:
+        raise ValueError(f"{context} Y4M {field} expects an integer, got '{value}'") from err
+    if parsed <= 0:
+        raise ValueError(f"{context} Y4M {field} expects a positive integer, got {parsed}")
+    return parsed
+
+
+def y4m_pixel_format(chroma_tag: str | None) -> str:
+    normalized = (chroma_tag or "420").lower()
+    if normalized in {"420", "420jpeg", "420mpeg2", "420paldv"}:
+        return "yuv420p8"
+    if normalized == "420p10":
+        return "yuv420p10le"
+    if normalized == "444":
+        return "yuv444p8"
+    raise ValueError(f"unsupported Y4M chroma format: {chroma_tag or '<default>'}")
+
+
+def y4m_fps(value: str | None, context: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        num_text, den_text = value.split(":", 1)
+        num = int(num_text)
+        den = int(den_text)
+    except ValueError as err:
+        raise ValueError(f"{context} Y4M fps expects N:D, got '{value}'") from err
+    if num <= 0 or den <= 0:
+        raise ValueError(f"{context} Y4M fps expects positive N:D, got '{value}'")
+    if den == 1:
+        return str(num)
+    return f"{num}/{den}"
 
 
 def generate_source_crop(vector: TestVector, sources: dict[str, TestVectorSource]) -> bytes:

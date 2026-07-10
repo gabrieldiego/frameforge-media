@@ -67,19 +67,25 @@ def main() -> int:
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
         return 2
 
+    vector_set = load_vector_set(args.set, args.set_dir)
     if args.source_filters:
-        vector_set = load_vector_set(args.set, args.set_dir)
-        cases = vector_set.vectors
+        cases = [(vector, None) for vector in vector_set.vectors]
     else:
-        cases = generate_test_vectors.generate_vectors(args.set, args.vector_dir, args.set_dir)
+        paths = generate_test_vectors.generate_vectors(args.set, args.vector_dir, args.set_dir)
+        vectors_by_filename = {vector.filename: vector for vector in vector_set.vectors}
+        cases = [(vectors_by_filename[path.name], path) for path in paths]
     if args.limit:
         cases = cases[: args.limit]
 
     results: list[ValidationResult] = []
-    for index, vector in enumerate(cases, start=1):
+    for index, (vector, vector_path) in enumerate(cases, start=1):
         name = vector.filename if args.source_filters else vector.name
         print(f"[{index:03d}/{len(cases):03d}] {name}", flush=True)
-        result = run_source_case(vector, args) if args.source_filters else run_file_case(vector, args)
+        if args.source_filters:
+            result = run_source_case(vector, args)
+        else:
+            assert vector_path is not None
+            result = run_file_case(vector, vector_path, args)
         results.append(result)
         size = "n/a" if result.bytes_written is None else str(result.bytes_written)
         print(f"  {result.status}: {result.reason} ({size} byte(s))", flush=True)
@@ -114,18 +120,30 @@ def load_vector_set(set_name: str, set_dir: Path) -> generate_test_vectors.TestV
     return sets[set_name]
 
 
-def run_file_case(vector: Path, args: argparse.Namespace) -> ValidationResult:
-    output, recon, reference_recon, log = case_paths(vector.stem, args)
+def run_file_case(
+    vector: generate_test_vectors.TestVector, vector_path: Path, args: argparse.Namespace
+) -> ValidationResult:
+    output, recon, reference_recon, log = case_paths(vector_path.stem, args)
     command = [
         str(args.ff),
         "encode",
-        str(vector),
-        "--encode",
-        f"{args.codec}:{output}",
-        "--recon",
-        str(recon),
+        str(vector_path),
+        "--video",
+        f"{vector.width}x{vector.height}:{vector.fmt}",
+        "--frames",
+        str(vector.frames),
     ]
-    return run_command(vector.name, output, recon, reference_recon, log, command, args)
+    if vector.fps is not None:
+        command.extend(["--fps", vector.fps])
+    command.extend(
+        [
+            "--encode",
+            f"{args.codec}:{output}",
+            "--recon",
+            str(recon),
+        ]
+    )
+    return run_command(vector_path.name, output, recon, reference_recon, log, command, args)
 
 
 def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Namespace) -> ValidationResult:
@@ -142,7 +160,7 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
         str(vector.frames),
     ]
     if vector.fps is not None:
-        command.extend(["--fps", str(vector.fps)])
+        command.extend(["--fps", vector.fps])
     command.extend(["--encode", f"{args.codec}:{output}", "--recon", str(recon)])
     return run_command(vector.filename, output, recon, reference_recon, log, command, args)
 
