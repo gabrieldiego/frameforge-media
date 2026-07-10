@@ -12,7 +12,6 @@ const MVP_SUPERBLOCK_SIZE: usize = 64;
 const MVP_LEAF_BLOCK_SIZE: usize = AV2_LUMA_PALETTE_BLOCK_SIZE;
 const MI_SIZE: usize = 4;
 const PARTITION_CONTEXT_DIM: usize = MVP_SUPERBLOCK_SIZE / MI_SIZE;
-const TX4X4_MAX_BLOCK_DIM: usize = MVP_SUPERBLOCK_SIZE / 4;
 const TX4X4_SIZE: usize = 4;
 const TX4X4_SAMPLES: usize = TX4X4_SIZE * TX4X4_SIZE;
 const TX4X4_SCAN: [usize; TX4X4_SAMPLES] = [0, 4, 1, 8, 5, 2, 12, 9, 6, 3, 13, 10, 7, 14, 11, 15];
@@ -1294,15 +1293,15 @@ struct Av2Black444TilePlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2PartitionContext {
-    above: [u8; PARTITION_CONTEXT_DIM],
-    left: [u8; PARTITION_CONTEXT_DIM],
+    above: Vec<u8>,
+    left: Vec<u8>,
 }
 
 impl Av2PartitionContext {
-    fn new() -> Self {
+    fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
         Self {
-            above: [0; PARTITION_CONTEXT_DIM],
-            left: [0; PARTITION_CONTEXT_DIM],
+            above: vec![0; visible_cols_mi],
+            left: vec![0; visible_rows_mi],
         }
     }
 
@@ -1326,10 +1325,10 @@ impl Av2PartitionContext {
         // AV2 v1.0.0 Section 9.3 partition context conversion tables, mirrored
         // from AVM partition_context_lookup[] and update_partition_context().
         let (above, left) = partition_context_lookup(block_size);
-        for index in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
+        for index in col_mi..(col_mi + block_size.mi_width()).min(self.above.len()) {
             self.above[index] = above;
         }
-        for index in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
+        for index in row_mi..(row_mi + block_size.mi_height()).min(self.left.len()) {
             self.left[index] = left;
         }
     }
@@ -1337,28 +1336,31 @@ impl Av2PartitionContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2CodedMiContext {
-    coded: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+    coded: Vec<bool>,
+    rows: usize,
+    cols: usize,
 }
 
 impl Av2CodedMiContext {
-    fn new() -> Self {
+    fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
         Self {
-            coded: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+            coded: vec![false; visible_rows_mi * visible_cols_mi],
+            rows: visible_rows_mi,
+            cols: visible_cols_mi,
         }
     }
 
     fn is_coded(&self, row_mi: usize, col_mi: usize) -> bool {
-        self.coded
-            .get(row_mi)
-            .and_then(|row| row.get(col_mi))
-            .copied()
-            .unwrap_or(false)
+        if row_mi >= self.rows || col_mi >= self.cols {
+            return false;
+        }
+        self.coded[row_mi * self.cols + col_mi]
     }
 
     fn update_leaf(&mut self, row_mi: usize, col_mi: usize, block_size: Av2MvpBlockSize) {
-        for row in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
-            for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
-                self.coded[row][col] = true;
+        for row in row_mi..(row_mi + block_size.mi_height()).min(self.rows) {
+            for col in col_mi..(col_mi + block_size.mi_width()).min(self.cols) {
+                self.coded[row * self.cols + col] = true;
             }
         }
     }
@@ -1379,7 +1381,7 @@ impl Av2PaletteColorCacheContext {
     }
 
     fn cache(&self, row_mi: usize, col_mi: usize) -> Vec<u8> {
-        let above = if row_mi > 0 {
+        let above = if row_mi > 0 && row_mi % PARTITION_CONTEXT_DIM != 0 {
             self.above.get(col_mi).and_then(|entry| entry.as_deref())
         } else {
             None
@@ -1507,15 +1509,19 @@ impl Av2LumaModeContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2FscModeContext {
-    coded: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
-    use_fsc: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+    coded: Vec<bool>,
+    use_fsc: Vec<bool>,
+    rows: usize,
+    cols: usize,
 }
 
 impl Av2FscModeContext {
-    fn new() -> Self {
+    fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
         Self {
-            coded: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
-            use_fsc: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+            coded: vec![false; visible_rows_mi * visible_cols_mi],
+            use_fsc: vec![false; visible_rows_mi * visible_cols_mi],
+            rows: visible_rows_mi,
+            cols: visible_cols_mi,
         }
     }
 
@@ -1552,19 +1558,21 @@ impl Av2FscModeContext {
         block_size: Av2MvpBlockSize,
         use_fsc: bool,
     ) {
-        for row in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
-            for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
-                self.coded[row][col] = true;
-                self.use_fsc[row][col] = use_fsc;
+        for row in row_mi..(row_mi + block_size.mi_height()).min(self.rows) {
+            for col in col_mi..(col_mi + block_size.mi_width()).min(self.cols) {
+                let index = row * self.cols + col;
+                self.coded[index] = true;
+                self.use_fsc[index] = use_fsc;
             }
         }
     }
 
     fn state_at(&self, row_mi: usize, col_mi: usize) -> Option<bool> {
-        if row_mi >= PARTITION_CONTEXT_DIM || col_mi >= PARTITION_CONTEXT_DIM {
+        if row_mi >= self.rows || col_mi >= self.cols {
             return None;
         }
-        self.coded[row_mi][col_mi].then_some(self.use_fsc[row_mi][col_mi])
+        let index = row_mi * self.cols + col_mi;
+        self.coded[index].then_some(self.use_fsc[index])
     }
 
     fn bottom_left_state(
@@ -1706,13 +1714,9 @@ impl Av2Black444TilePlan {
             "AV2 MVP tile plan expects a shared luma/chroma partition tree"
         );
         assert!(
-            region.width <= MVP_SUPERBLOCK_SIZE && region.height <= MVP_SUPERBLOCK_SIZE,
-            "AV2 MVP tile plan covers one independently-coded 64x64 superblock tile"
-        );
-        assert!(
             region.origin_x % MVP_SUPERBLOCK_SIZE == 0
                 && region.origin_y % MVP_SUPERBLOCK_SIZE == 0,
-            "AV2 MVP independent tiles are aligned to 64x64 superblock origins"
+            "AV2 MVP tiles are aligned to 64x64 superblock origins"
         );
         assert!(
             region.width % 8 == 0 && region.height % 8 == 0,
@@ -1733,17 +1737,21 @@ impl Av2Black444TilePlan {
             allow_intrabc,
             max_ref_bv_count,
         };
-        let mut partition_context = Av2PartitionContext::new();
-        plan.visit_block(
-            0,
-            0,
-            Av2MvpBlockSize::BLOCK_64X64,
-            visible_rows_mi,
-            visible_cols_mi,
-            &mut partition_context,
-            ibc,
-            palette,
-        );
+        let mut partition_context = Av2PartitionContext::new(visible_rows_mi, visible_cols_mi);
+        for row_mi in (0..visible_rows_mi).step_by(PARTITION_CONTEXT_DIM) {
+            for col_mi in (0..visible_cols_mi).step_by(PARTITION_CONTEXT_DIM) {
+                plan.visit_block(
+                    row_mi,
+                    col_mi,
+                    Av2MvpBlockSize::BLOCK_64X64,
+                    visible_rows_mi,
+                    visible_cols_mi,
+                    &mut partition_context,
+                    ibc,
+                    palette,
+                );
+            }
+        }
         plan
     }
 
@@ -2001,15 +2009,20 @@ impl Av2Black444TilePlan {
         palette: Option<&Av2LumaPalette444>,
         _ibc: Option<&Av2LocalIbc444>,
     ) {
-        let mut partition_context = Av2PartitionContext::new();
-        let mut txb_contexts = Av2TxbEntropyContexts::new();
-        let mut intrabc_context = Av2IntrabcContext::new();
-        let mut coded_mi_context = Av2CodedMiContext::new();
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut txb_contexts =
+            Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut intrabc_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut coded_mi_context =
+            Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut palette_cache_context =
             Av2PaletteColorCacheContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
-        let mut fsc_mode_context = Av2FscModeContext::new();
+        let mut fsc_mode_context =
+            Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -2230,9 +2243,12 @@ impl Av2Black444TilePlan {
         writer: &mut Av2EntropyWriter,
         lossy: &mut Av2Lossy420TileState<'_>,
     ) {
-        let mut partition_context = Av2PartitionContext::new();
-        let mut txb_contexts = Av2TxbEntropyContexts::new();
-        let mut intrabc_context = Av2IntrabcContext::new();
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut txb_contexts =
+            Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut intrabc_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -2314,23 +2330,23 @@ impl Av2Black444TilePlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2TxbEntropyContexts {
-    y_above: [u8; TX4X4_MAX_BLOCK_DIM],
-    y_left: [u8; TX4X4_MAX_BLOCK_DIM],
-    u_above: [u8; TX4X4_MAX_BLOCK_DIM],
-    u_left: [u8; TX4X4_MAX_BLOCK_DIM],
-    v_above: [u8; TX4X4_MAX_BLOCK_DIM],
-    v_left: [u8; TX4X4_MAX_BLOCK_DIM],
+    y_above: Vec<u8>,
+    y_left: Vec<u8>,
+    u_above: Vec<u8>,
+    u_left: Vec<u8>,
+    v_above: Vec<u8>,
+    v_left: Vec<u8>,
 }
 
 impl Av2TxbEntropyContexts {
-    fn new() -> Self {
+    fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
         Self {
-            y_above: [0; TX4X4_MAX_BLOCK_DIM],
-            y_left: [0; TX4X4_MAX_BLOCK_DIM],
-            u_above: [0; TX4X4_MAX_BLOCK_DIM],
-            u_left: [0; TX4X4_MAX_BLOCK_DIM],
-            v_above: [0; TX4X4_MAX_BLOCK_DIM],
-            v_left: [0; TX4X4_MAX_BLOCK_DIM],
+            y_above: vec![0; visible_cols_mi],
+            y_left: vec![0; visible_rows_mi],
+            u_above: vec![0; visible_cols_mi],
+            u_left: vec![0; visible_rows_mi],
+            v_above: vec![0; visible_cols_mi],
+            v_left: vec![0; visible_rows_mi],
         }
     }
 
@@ -2348,12 +2364,12 @@ impl Av2TxbEntropyContexts {
         let txb_height = block_size
             .tx4x4_height()
             .min(visible_rows_mi.saturating_sub(row_mi));
-        for col in col_mi..(col_mi + txb_width).min(TX4X4_MAX_BLOCK_DIM) {
+        for col in col_mi..(col_mi + txb_width).min(self.y_above.len()) {
             self.y_above[col] = 0;
             self.u_above[col] = 0;
             self.v_above[col] = 0;
         }
-        for row in row_mi..(row_mi + txb_height).min(TX4X4_MAX_BLOCK_DIM) {
+        for row in row_mi..(row_mi + txb_height).min(self.y_left.len()) {
             self.y_left[row] = 0;
             self.u_left[row] = 0;
             self.v_left[row] = 0;
@@ -2363,17 +2379,21 @@ impl Av2TxbEntropyContexts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2IntrabcContext {
-    coded: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
-    ibc: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
-    skip: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+    coded: Vec<bool>,
+    ibc: Vec<bool>,
+    skip: Vec<bool>,
+    rows: usize,
+    cols: usize,
 }
 
 impl Av2IntrabcContext {
-    fn new() -> Self {
+    fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
         Self {
-            coded: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
-            ibc: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
-            skip: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+            coded: vec![false; visible_rows_mi * visible_cols_mi],
+            ibc: vec![false; visible_rows_mi * visible_cols_mi],
+            skip: vec![false; visible_rows_mi * visible_cols_mi],
+            rows: visible_rows_mi,
+            cols: visible_cols_mi,
         }
     }
 
@@ -2400,11 +2420,12 @@ impl Av2IntrabcContext {
         use_intrabc: bool,
         skip_txfm: bool,
     ) {
-        for row in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
-            for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
-                self.coded[row][col] = true;
-                self.ibc[row][col] = use_intrabc;
-                self.skip[row][col] = skip_txfm;
+        for row in row_mi..(row_mi + block_size.mi_height()).min(self.rows) {
+            for col in col_mi..(col_mi + block_size.mi_width()).min(self.cols) {
+                let index = row * self.cols + col;
+                self.coded[index] = true;
+                self.ibc[index] = use_intrabc;
+                self.skip[index] = skip_txfm;
             }
         }
     }
@@ -2444,12 +2465,13 @@ impl Av2IntrabcContext {
     }
 
     fn state_at(&self, row_mi: usize, col_mi: usize) -> Option<Av2IntrabcNeighborState> {
-        if row_mi >= PARTITION_CONTEXT_DIM || col_mi >= PARTITION_CONTEXT_DIM {
+        if row_mi >= self.rows || col_mi >= self.cols {
             return None;
         }
-        self.coded[row_mi][col_mi].then_some(Av2IntrabcNeighborState {
-            ibc: self.ibc[row_mi][col_mi],
-            skip: self.skip[row_mi][col_mi],
+        let index = row_mi * self.cols + col_mi;
+        self.coded[index].then_some(Av2IntrabcNeighborState {
+            ibc: self.ibc[index],
+            skip: self.skip[index],
         })
     }
 
@@ -4565,7 +4587,7 @@ fn luma_palette_fsc_is_rate_worthy(
     chroma_use_bdpcm: bool,
     chroma_intra_mode: Av2ChromaIntraMode,
 ) -> bool {
-    let coded_mi_context = Av2CodedMiContext::new();
+    let coded_mi_context = Av2CodedMiContext::new(PARTITION_CONTEXT_DIM, PARTITION_CONTEXT_DIM);
     let mut fsc_score = 96usize;
     let mut transform_score = 0usize;
 
@@ -5140,7 +5162,8 @@ fn chroma_d45_above_edge(
     leaf_width: usize,
     coded_mi_context: &Av2CodedMiContext,
 ) -> [u8; 8] {
-    let tile_right = (tile_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
+    let sb_origin_x = (txb_x0 / MVP_SUPERBLOCK_SIZE) * MVP_SUPERBLOCK_SIZE;
+    let sb_right = (sb_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
     let have_top = txb_y0 > tile_origin_y;
     let have_left = txb_x0 > tile_origin_x;
     let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 8];
@@ -5148,11 +5171,8 @@ fn chroma_d45_above_edge(
         for index in 0..above.len() {
             let x = txb_x0 + index;
             let external_top_right_coded = txb_y0 == leaf_y0
-                && x < tile_right
-                && coded_mi_context.is_coded(
-                    (txb_y0 - 1 - tile_origin_y) / MI_SIZE,
-                    (x - tile_origin_x) / MI_SIZE,
-                );
+                && x < sb_right
+                && coded_mi_context.is_coded((txb_y0 - 1) / MI_SIZE, x / MI_SIZE);
             if x < leaf_x0 + leaf_width || external_top_right_coded {
                 above[index] = chroma_sample(palette, plane, x, txb_y0 - 1);
             } else if index > 0 {
@@ -5226,7 +5246,8 @@ fn chroma_d203_left_edge(
     leaf_height: usize,
     coded_mi_context: &Av2CodedMiContext,
 ) -> [u8; 8] {
-    let tile_bottom = (tile_origin_y + MVP_SUPERBLOCK_SIZE).min(palette.height());
+    let sb_origin_y = (txb_y0 / MVP_SUPERBLOCK_SIZE) * MVP_SUPERBLOCK_SIZE;
+    let sb_bottom = (sb_origin_y + MVP_SUPERBLOCK_SIZE).min(palette.height());
     let have_top = txb_y0 > tile_origin_y;
     let have_left = txb_x0 > tile_origin_x;
     let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 8];
@@ -5234,11 +5255,8 @@ fn chroma_d203_left_edge(
         for index in 0..left.len() {
             let y = txb_y0 + index;
             let external_bottom_left_coded = txb_x0 == leaf_x0
-                && y < tile_bottom
-                && coded_mi_context.is_coded(
-                    (y - tile_origin_y) / MI_SIZE,
-                    (txb_x0 - 1 - tile_origin_x) / MI_SIZE,
-                );
+                && y < sb_bottom
+                && coded_mi_context.is_coded(y / MI_SIZE, (txb_x0 - 1) / MI_SIZE);
             // Match AVM has_bottom_left(): only TXBs on the leaf's left edge
             // may use D203 bottom-left overhang samples.
             if y < txb_y0 + TX4X4_SIZE
@@ -5373,28 +5391,24 @@ fn chroma_smooth_edges(
         left[..TX4X4_SIZE].fill(chroma_sample(palette, plane, txb_x0, txb_y0 - 1));
     }
 
-    let tile_right = (tile_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
+    let sb_origin_x = (txb_x0 / MVP_SUPERBLOCK_SIZE) * MVP_SUPERBLOCK_SIZE;
+    let sb_right = (sb_origin_x + MVP_SUPERBLOCK_SIZE).min(palette.width());
     let external_top_right_coded = have_top
         && txb_y0 == leaf_y0
-        && txb_x0 + TX4X4_SIZE < tile_right
-        && coded_mi_context.is_coded(
-            (txb_y0 - 1 - tile_origin_y) / MI_SIZE,
-            (txb_x0 + TX4X4_SIZE - tile_origin_x) / MI_SIZE,
-        );
+        && txb_x0 + TX4X4_SIZE < sb_right
+        && coded_mi_context.is_coded((txb_y0 - 1) / MI_SIZE, (txb_x0 + TX4X4_SIZE) / MI_SIZE);
     if have_top && (txb_x0 + TX4X4_SIZE < leaf_x0 + leaf_width || external_top_right_coded) {
         above[TX4X4_SIZE] = chroma_sample(palette, plane, txb_x0 + TX4X4_SIZE, txb_y0 - 1);
     } else {
         above[TX4X4_SIZE] = above[TX4X4_SIZE - 1];
     }
 
-    let tile_bottom = (tile_origin_y + MVP_SUPERBLOCK_SIZE).min(palette.height());
+    let sb_origin_y = (txb_y0 / MVP_SUPERBLOCK_SIZE) * MVP_SUPERBLOCK_SIZE;
+    let sb_bottom = (sb_origin_y + MVP_SUPERBLOCK_SIZE).min(palette.height());
     let external_bottom_left_coded = have_left
         && txb_x0 == leaf_x0
-        && txb_y0 + TX4X4_SIZE < tile_bottom
-        && coded_mi_context.is_coded(
-            (txb_y0 + TX4X4_SIZE - tile_origin_y) / MI_SIZE,
-            (txb_x0 - 1 - tile_origin_x) / MI_SIZE,
-        );
+        && txb_y0 + TX4X4_SIZE < sb_bottom
+        && coded_mi_context.is_coded((txb_y0 + TX4X4_SIZE) / MI_SIZE, (txb_x0 - 1) / MI_SIZE);
     if have_left
         && txb_x0 == leaf_x0
         && (txb_y0 + TX4X4_SIZE < leaf_y0 + leaf_height || external_bottom_left_coded)

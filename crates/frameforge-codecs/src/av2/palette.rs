@@ -5,7 +5,6 @@ use std::cmp::Reverse;
 pub(crate) const AV2_LUMA_PALETTE_MIN_COLORS: usize = 2;
 pub(crate) const AV2_LUMA_PALETTE_MAX_COLORS: usize = 8;
 pub(crate) const AV2_LUMA_PALETTE_BLOCK_SIZE: usize = 8;
-const AV2_LUMA_INTRA_TILE_SIZE: usize = 64;
 const AV2_LUMA_INTRA_MODE_SWITCH_SAD_MARGIN: usize = 64;
 const AV2_LUMA_DPCM_NONZERO_COST: usize = 124;
 const AV2_LUMA_DPCM_LEVEL_SCALE: usize = 20000;
@@ -444,8 +443,8 @@ impl Av2LumaPalette444 {
     }
 
     fn luma_bdpcm_coeff_score_for_block(&self, x0: usize, y0: usize, horz: bool) -> usize {
-        let tile_origin_x = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_origin_y = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_origin_x = 0;
+        let tile_origin_y = 0;
         let mut score = 0usize;
         for txb_y in 0..2 {
             for txb_x in 0..2 {
@@ -602,8 +601,8 @@ impl Av2LumaPalette444 {
     }
 
     fn chroma_bdpcm_residuals(&self, plane: &[u8], x0: usize, y0: usize, horz: bool) -> [i32; 16] {
-        let tile_x0 = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_x0 = 0;
+        let tile_y0 = 0;
         let mut residual = [0i32; 16];
         for local_y in 0..4 {
             let y = y0 + local_y;
@@ -646,8 +645,8 @@ impl Av2LumaPalette444 {
         leaf_height: usize,
         mode: Av2ChromaIntraMode,
     ) -> [i32; 16] {
-        let tile_x0 = (txb_x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (txb_y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_x0 = 0;
+        let tile_y0 = 0;
         let dc_predictor = (mode == Av2ChromaIntraMode::Dc)
             .then(|| self.chroma_dc_predictor(plane, txb_x0, txb_y0));
         let smooth_edges = matches!(
@@ -788,9 +787,9 @@ impl Av2LumaPalette444 {
         leaf_y0: usize,
         leaf_width: usize,
     ) -> [u8; 8] {
-        let tile_x0 = (txb_x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (txb_y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_right = (tile_x0 + AV2_LUMA_INTRA_TILE_SIZE).min(self.width);
+        let tile_x0 = 0;
+        let tile_y0 = 0;
+        let tile_right = self.width;
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
         let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 8];
@@ -860,9 +859,9 @@ impl Av2LumaPalette444 {
         leaf_y0: usize,
         leaf_height: usize,
     ) -> [u8; 8] {
-        let tile_x0 = (txb_x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (txb_y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_bottom = (tile_y0 + AV2_LUMA_INTRA_TILE_SIZE).min(self.height);
+        let tile_x0 = 0;
+        let tile_y0 = 0;
+        let tile_bottom = self.height;
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
         let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 8];
@@ -898,8 +897,8 @@ impl Av2LumaPalette444 {
         debug_assert!(txb_x0 >= leaf_x0 && txb_y0 >= leaf_y0);
         debug_assert!(txb_x0 + 4 <= leaf_x0 + leaf_width);
         debug_assert!(txb_y0 + 4 <= leaf_y0 + leaf_height);
-        let tile_x0 = (txb_x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (txb_y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_x0 = 0;
+        let tile_y0 = 0;
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
         let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 5];
@@ -921,7 +920,7 @@ impl Av2LumaPalette444 {
             left[..4].fill(self.chroma_sample(plane, txb_x0, txb_y0 - 1));
         }
 
-        let tile_right = (tile_x0 + AV2_LUMA_INTRA_TILE_SIZE).min(self.width);
+        let tile_right = self.width;
         if have_top
             && (txb_x0 + 4 < leaf_x0 + leaf_width || (txb_y0 == leaf_y0 && txb_x0 + 4 < tile_right))
         {
@@ -944,8 +943,8 @@ impl Av2LumaPalette444 {
     }
 
     fn chroma_dc_predictor(&self, plane: &[u8], x0: usize, y0: usize) -> u8 {
-        let tile_x0 = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
+        let tile_x0 = 0;
+        let tile_y0 = 0;
         let have_left = x0 != tile_x0;
         let have_top = y0 != tile_y0;
         if !have_left && !have_top {
@@ -1327,13 +1326,8 @@ fn choose_luma_intra_mode(
     let mut best_mode = Av2LumaIntraMode::Dc;
     let mut best_sad = luma_prediction_sad(y_plane, width, x0, y0, block, best_mode);
 
-    // AV2 tiles are independent in this MVP path. Do not borrow predictors
-    // across 64x64 tile boundaries; the decoder has no reconstructed neighbor
-    // there.
-    let above_mode = (y0 % AV2_LUMA_INTRA_TILE_SIZE != 0)
-        .then(|| previous_modes[(block_y - 1) * blocks_wide + block_x]);
-    let left_mode = (x0 % AV2_LUMA_INTRA_TILE_SIZE != 0)
-        .then(|| previous_modes[block_y * blocks_wide + block_x - 1]);
+    let above_mode = (y0 != 0).then(|| previous_modes[(block_y - 1) * blocks_wide + block_x]);
+    let left_mode = (x0 != 0).then(|| previous_modes[block_y * blocks_wide + block_x - 1]);
 
     // AV2 v1.0.0 Sections 5.20.5.5 and 5.20.5.6, implemented in AVM as
     // get_y_mode_idx_ctx()/get_y_intra_mode_set(), derive the y_mode_idx
@@ -1343,10 +1337,7 @@ fn choose_luma_intra_mode(
     // 8x8 tile leaf that cannot seed a later block's directional context.
     let fixed_mode_ctx0 = above_mode.map_or(true, |mode| mode == Av2LumaIntraMode::Dc)
         && left_mode.map_or(true, |mode| mode == Av2LumaIntraMode::Dc);
-    let terminal_tile_leaf = (block_x + 1 == blocks_wide
-        || (x0 + AV2_LUMA_PALETTE_BLOCK_SIZE) % AV2_LUMA_INTRA_TILE_SIZE == 0)
-        && (block_y + 1 == blocks_high
-            || (y0 + AV2_LUMA_PALETTE_BLOCK_SIZE) % AV2_LUMA_INTRA_TILE_SIZE == 0);
+    let terminal_tile_leaf = block_x + 1 == blocks_wide && block_y + 1 == blocks_high;
 
     if fixed_mode_ctx0 && terminal_tile_leaf && above_mode == Some(Av2LumaIntraMode::Dc) {
         let sad = luma_prediction_sad(y_plane, width, x0, y0, block, Av2LumaIntraMode::Vertical);

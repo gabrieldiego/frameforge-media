@@ -213,12 +213,46 @@ impl Av2TileLayout {
         }
     }
 
+    fn single_for_geometry(geometry: Av2VideoGeometry) -> Self {
+        let limits = Av2TileLimits::for_geometry(geometry);
+        assert!(
+            limits.min_log2_cols == 0 && limits.min_log2 == 0,
+            "AV2 MVP single-tile layout exceeds the configured tile limits"
+        );
+        Self {
+            regions: vec![Av2TileRegion {
+                origin_x: 0,
+                origin_y: 0,
+                width: geometry.width,
+                height: geometry.height,
+            }],
+            cols: 1,
+            rows: 1,
+            log2_cols: 0,
+            log2_rows: 0,
+            min_log2_cols: limits.min_log2_cols,
+            min_log2_rows: limits.min_log2,
+            max_log2_cols: limits.max_log2_cols,
+            max_log2_rows: limits.max_log2_rows,
+        }
+    }
+
     fn tile_count(&self) -> usize {
         self.regions.len()
     }
 
     fn is_single_tile(&self) -> bool {
         self.tile_count() == 1
+    }
+}
+
+fn av2_tile_layout_for_frame_mode(
+    geometry: Av2VideoGeometry,
+    frame_mode: &Av2Mvp444FrameMode,
+) -> Av2TileLayout {
+    match frame_mode {
+        Av2Mvp444FrameMode::Black => Av2TileLayout::for_geometry(geometry),
+        Av2Mvp444FrameMode::LumaPalette { .. } => Av2TileLayout::single_for_geometry(geometry),
     }
 }
 
@@ -352,12 +386,11 @@ impl Av2Mvp444FrameMode {
     fn allow_intrabc(&self) -> bool {
         match self {
             Self::Black => false,
-            // AV2 allow_intrabc is a frame-header decision. Keep it enabled
-            // for non-black 4:4:4 screen-content frames so the RTL can start
-            // entropy as soon as streamed IBC decisions are available instead
-            // of waiting for a full-tile postpass just to discover whether any
-            // block copied.
-            Self::LumaPalette { .. } => true,
+            // Single-tile palette coding reuses prediction and entropy state
+            // across 64x64 superblocks. The current local IBC model is still
+            // tied to independent 64x64 tiles, so leave it off until the block
+            // vector predictor is modeled for multi-superblock tiles.
+            Self::LumaPalette { .. } => false,
         }
     }
 
@@ -652,7 +685,7 @@ fn av2_mvp_444_trace_jsonl_for_mode(
     geometry: Av2VideoGeometry,
     frame_mode: &Av2Mvp444FrameMode,
 ) -> Result<String, String> {
-    let tile_layout = Av2TileLayout::for_geometry(geometry);
+    let tile_layout = av2_tile_layout_for_frame_mode(geometry, frame_mode);
     let sequence = av2_mvp_444_sequence_header_payload(geometry, frame_mode.profile());
     let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(
         frame_mode.allow_screen_content_tools(),
@@ -1278,7 +1311,7 @@ fn av2_mvp_444_closed_loop_key_payload(
     geometry: Av2VideoGeometry,
     frame_mode: &Av2Mvp444FrameMode,
 ) -> Av2SyntaxPayload {
-    let tile_layout = Av2TileLayout::for_geometry(geometry);
+    let tile_layout = av2_tile_layout_for_frame_mode(geometry, frame_mode);
     let mut payload = av2_mvp_444_closed_loop_key_header_payload(
         frame_mode.allow_screen_content_tools(),
         frame_mode.allow_intrabc(),
