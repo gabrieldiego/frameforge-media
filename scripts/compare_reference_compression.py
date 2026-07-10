@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -53,11 +54,35 @@ def main() -> int:
         help="extra shell-style arguments appended to the reference encoder command",
     )
     parser.add_argument(
+        "--reference-preset",
+        choices=("default", "fast"),
+        default="fast",
+        help="reference encoder preset; 'default' keeps legacy AVM/VTM arguments",
+    )
+    parser.add_argument(
+        "--reference-threads",
+        default="auto",
+        help="reference encoder threads for fast AVM runs; use auto or a positive integer",
+    )
+    parser.add_argument(
+        "--avm-tile-columns",
+        default="auto",
+        help="AVM tile columns as log2 value for fast runs; use auto or a non-negative integer",
+    )
+    parser.add_argument(
+        "--avm-tile-rows",
+        default="0",
+        help="AVM tile rows as log2 value for fast runs; use auto or a non-negative integer",
+    )
+    parser.add_argument(
         "--refresh-reference",
         action="store_true",
         help="rerun reference encoders instead of reusing matching cached outputs",
     )
     args = parser.parse_args()
+    args.reference_threads = parse_auto_int(args.reference_threads, "reference threads", 1)
+    args.avm_tile_columns = parse_auto_int(args.avm_tile_columns, "AVM tile columns", 0)
+    args.avm_tile_rows = parse_auto_int(args.avm_tile_rows, "AVM tile rows", 0)
 
     if not args.ff.exists():
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
@@ -310,6 +335,10 @@ def reference_cache_metadata(
         "codec": args.codec,
         "set": args.set,
         "reference_args": args.reference_args,
+        "reference_preset": args.reference_preset,
+        "reference_threads": args.reference_threads,
+        "avm_tile_columns": args.avm_tile_columns,
+        "avm_tile_rows": args.avm_tile_rows,
         "reference_command": reference_cmd,
         "reference_encoder": {
             "path": str(encoder_path),
@@ -372,6 +401,7 @@ def av2_reference_encode_command(
         "--quiet",
         "--disable-warning-prompt",
     ]
+    command.extend(avm_reference_preset_args(vector, args))
     if vector.lossless:
         command.append("--lossless=1")
     if vector.fmt == "yuv420p8":
@@ -384,6 +414,60 @@ def av2_reference_encode_command(
         command.extend(shlex.split(args.reference_args))
     command.extend(["-o", str(output), str(vector_path)])
     return command
+
+
+def avm_reference_preset_args(
+    vector: generate_test_vectors.TestVector,
+    args: argparse.Namespace,
+) -> list[str]:
+    if args.reference_preset == "default":
+        return []
+
+    threads = reference_thread_count(args.reference_threads)
+    tile_columns = avm_tile_columns(vector, args.avm_tile_columns, threads)
+    tile_rows = avm_tile_rows(vector, args.avm_tile_rows, threads)
+    return [
+        f"--threads={threads}",
+        "--row-mt=1",
+        f"--tile-columns={tile_columns}",
+        f"--tile-rows={tile_rows}",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--enable-keyframe-filtering=0",
+        "--test-decode=off",
+    ]
+
+
+def reference_thread_count(value: int | None) -> int:
+    if value is not None:
+        return value
+    return max(1, os.cpu_count() or 1)
+
+
+def avm_tile_columns(
+    vector: generate_test_vectors.TestVector,
+    value: int | None,
+    threads: int,
+) -> int:
+    if value is not None:
+        return value
+    if threads <= 1 or vector.width < 1280:
+        return 0
+    if vector.width >= 3840 and threads >= 4:
+        return 2
+    return 1
+
+
+def avm_tile_rows(
+    vector: generate_test_vectors.TestVector,
+    value: int | None,
+    threads: int,
+) -> int:
+    if value is not None:
+        return value
+    if threads >= 8 and vector.height >= 2160:
+        return 1
+    return 0
 
 
 def vvc_reference_encode_command(
@@ -451,6 +535,21 @@ def reference_integer_fps(vector: generate_test_vectors.TestVector) -> int:
 
 def fps_fraction(vector: generate_test_vectors.TestVector) -> Fraction:
     return Fraction(vector.fps or "30")
+
+
+def parse_auto_int(value: str, field: str, min_value: int) -> int | None:
+    normalized = value.strip().lower()
+    if normalized == "auto":
+        return None
+    try:
+        parsed = int(normalized)
+    except ValueError as err:
+        raise SystemExit(
+            f"{field} expects auto or an integer >= {min_value}, got '{value}'"
+        ) from err
+    if parsed < min_value:
+        raise SystemExit(f"{field} expects auto or an integer >= {min_value}, got {parsed}")
+    return parsed
 
 
 def run_logged(command: list[str]) -> subprocess.CompletedProcess[str]:
