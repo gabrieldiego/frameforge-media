@@ -98,9 +98,14 @@ Current behavior:
   reference-valid 12-bit profile path is added.
 - VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
   residual path. Higher 4:2:0 depths are scaled to `yuv420p8` before encoding.
-- VVC accepts 8-bit 4:2:2 compatibility input and 8-bit 4:4:4 palette input.
-  Higher 4:2:2 and 4:4:4 depths are scaled to the same layout at 8-bit before
-  encoding until those paths gain native high-depth syntax and reconstruction.
+- VVC accepts `yuv444p8` through `yuv444p12le` natively for the current 4:4:4
+  palette path. Higher 4:4:4 depths are scaled to `yuv444p8` before encoding.
+  Palette entries carry native samples; high-depth escape-coded samples follow
+  VTM palette escape level scaling, which is exact for zero-padded 8-bit
+  upconverts but can quantize arbitrary high-depth escape samples.
+- VVC accepts only 8-bit 4:2:2 compatibility input. Higher 4:2:2 depths are
+  scaled to `yuv422p8` before encoding until that path gains native high-depth
+  syntax and reconstruction.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 

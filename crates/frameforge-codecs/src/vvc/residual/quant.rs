@@ -183,8 +183,10 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantized
     let chroma_transforms = transform_vvc_chroma_default_tus(&frame);
     let _observed_chroma_dc = (chroma_transforms.cb.dc_coeff, chroma_transforms.cr.dc_coeff);
     let color = frame.sampled_color();
-    let cb_rem = quantize_vvc_chroma_sample(color.u);
-    let cr_rem = quantize_vvc_chroma_sample(color.v);
+    let cb_rem =
+        quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.u, frame.format.bit_depth));
+    let cr_rem =
+        quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.v, frame.format.bit_depth));
     let reconstructed_cb = reconstruct_vvc_chroma(cb_rem);
     let reconstructed_cr = reconstruct_vvc_chroma(cr_rem);
     VvcQuantizedColor {

@@ -52,6 +52,10 @@ fn vvc_u_value(rbsp: &VvcSyntaxRbsp, name: &str) -> u64 {
     vvc_field_bits_value(rbsp, field)
 }
 
+fn vvc_samples_from_u8(samples: Vec<u8>) -> Vec<VvcSample> {
+    samples.into_iter().map(VvcSample::from).collect()
+}
+
 fn vvc_ue_value(rbsp: &VvcSyntaxRbsp, name: &str) -> u32 {
     let field = vvc_named_field(rbsp, name).unwrap_or_else(|| panic!("missing {name}"));
     assert_eq!(field.code, VvcSyntaxCode::Ue, "{name} should be ue(v)");
@@ -1871,9 +1875,107 @@ fn vvc_palette_444_cu_syntax_carries_palette_indices_for_lossless_8x8() {
     );
 
     let decoded = vvc_palette_444_decode_reconstruction(geometry, syntax);
+    assert_eq!(decoded.luma, vvc_samples_from_u8(luma));
+    assert_eq!(decoded.cb, vvc_samples_from_u8(cb));
+    assert_eq!(decoded.cr, vvc_samples_from_u8(cr));
+}
+
+#[test]
+fn vvc_palette_444_cu_syntax_uses_native_high_depth_entries() {
+    let geometry = VvcVideoGeometry {
+        width: 8,
+        height: 8,
+    };
+    let bit_depth = SampleBitDepth::new(10).expect("valid bit depth");
+    let colors = [
+        VvcSampledColor {
+            y: 12,
+            u: 512,
+            v: 128,
+        },
+        VvcSampledColor {
+            y: 1023,
+            u: 768,
+            v: 900,
+        },
+    ];
+    let mut luma = Vec::with_capacity(64);
+    let mut cb = Vec::with_capacity(64);
+    let mut cr = Vec::with_capacity(64);
+    for idx in 0..64 {
+        let color = colors[idx % colors.len()];
+        luma.push(color.y);
+        cb.push(color.u);
+        cr.push(color.v);
+    }
+    let frame = VvcSampledFrame {
+        geometry,
+        format: VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs444,
+            bit_depth,
+        },
+        luma: luma.clone(),
+        cb: cb.clone(),
+        cr: cr.clone(),
+        chroma_len: 64,
+    };
+
+    let syntax = vvc_palette_444_cu_syntax(&frame, 0, 0);
+    assert_eq!(syntax.bit_depth, bit_depth);
+    assert_eq!(syntax.new_palette_entries, colors);
+    assert_eq!(
+        vvc_palette_444_new_entry_token_bit_counts(syntax.clone()),
+        vec![10; 6]
+    );
+
+    let decoded = vvc_palette_444_decode_reconstruction(geometry, syntax);
     assert_eq!(decoded.luma, luma);
     assert_eq!(decoded.cb, cb);
     assert_eq!(decoded.cr, cr);
+}
+
+#[test]
+fn vvc_palette_444_high_depth_escape_values_use_coded_levels() {
+    let geometry = VvcVideoGeometry {
+        width: 8,
+        height: 8,
+    };
+    let bit_depth = SampleBitDepth::new(10).expect("valid bit depth");
+    let mut luma = Vec::with_capacity(64);
+    let mut cb = Vec::with_capacity(64);
+    let mut cr = Vec::with_capacity(64);
+    for idx in 0..64 {
+        luma.push(if idx == 31 { 1023 } else { (idx as u16) * 4 });
+        cb.push(if idx == 31 { 510 } else { (idx as u16) * 8 });
+        cr.push(if idx == 31 { 258 } else { (idx as u16) * 12 });
+    }
+    let frame = VvcSampledFrame {
+        geometry,
+        format: VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs444,
+            bit_depth,
+        },
+        luma: luma.clone(),
+        cb: cb.clone(),
+        cr: cr.clone(),
+        chroma_len: 64,
+    };
+
+    let syntax = vvc_palette_444_cu_syntax(&frame, 0, 0);
+    assert!(syntax.palette_escape_val_present_flag);
+    assert_eq!(
+        syntax.palette_escape_values[31],
+        Some(VvcSampledColor {
+            y: 256,
+            u: 128,
+            v: 65,
+        })
+    );
+
+    let decoded = vvc_palette_444_decode_reconstruction(geometry, syntax);
+    assert_eq!(decoded.luma[31], 1023);
+    assert_eq!(decoded.cb[31], 512);
+    assert_eq!(decoded.cr[31], 260);
 }
 
 #[test]
@@ -1911,16 +2013,16 @@ fn vvc_palette_444_cu_syntax_uses_escape_values_after_31_entries() {
     assert_eq!(syntax.palette_indices[30], 30);
     assert_eq!(syntax.palette_indices[31], 31);
     let raw_escape_31 = VvcSampledColor {
-        y: luma[31],
-        u: cb[31],
-        v: cr[31],
+        y: VvcSample::from(luma[31]),
+        u: VvcSample::from(cb[31]),
+        v: VvcSample::from(cr[31]),
     };
     assert_eq!(syntax.palette_escape_values[31], Some(raw_escape_31));
 
     let decoded = vvc_palette_444_decode_reconstruction(geometry, syntax);
-    assert_eq!(decoded.luma, luma);
-    assert_eq!(decoded.cb, cb);
-    assert_eq!(decoded.cr, cr);
+    assert_eq!(decoded.luma, vvc_samples_from_u8(luma));
+    assert_eq!(decoded.cb, vvc_samples_from_u8(cb));
+    assert_eq!(decoded.cr, vvc_samples_from_u8(cr));
 }
 
 #[test]
@@ -1959,7 +2061,7 @@ fn vvc_palette_444_uses_ibc_for_repeated_8x8_block() {
     };
 
     let recon = vvc_palette_444_reconstruction_yuv(&frame);
-    assert_eq!(recon, [luma, cb, cr].concat());
+    assert_eq!(recon, vvc_samples_from_u8([luma, cb, cr].concat()));
 
     let mut ibc_search = super::ibc::VvcIbcHashSearch::new();
     ibc_search.record_palette_8x8(&frame, 0, 0);
@@ -2014,7 +2116,7 @@ fn vvc_palette_444_uses_transform_skip_residual_for_left_ibc_delta() {
 
     assert_eq!(
         vvc_palette_444_reconstruction_yuv(&frame),
-        [luma, cb, cr].concat()
+        vvc_samples_from_u8([luma, cb, cr].concat())
     );
 
     let ctx_bins = vvc_palette_444_cabac_context_bins(&frame);
@@ -2077,7 +2179,7 @@ fn vvc_palette_444_uses_horizontal_bdpcm_for_left_predicted_rows() {
 
     assert_eq!(
         vvc_palette_444_reconstruction_yuv(&frame),
-        [luma, cb, cr].concat()
+        vvc_samples_from_u8([luma, cb, cr].concat())
     );
 
     let ctx_bins = vvc_palette_444_cabac_context_bins(&frame);

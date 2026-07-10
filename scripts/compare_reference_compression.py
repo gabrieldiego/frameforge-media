@@ -484,11 +484,15 @@ def vvc_reference_encode_command(
             raise SystemExit(
                 f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
             )
-    elif vector.fmt == "yuv444p8":
-        chroma_format = "444"
-        bit_depth = 8
     else:
-        raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
+        bit_depth = generate_test_vectors.yuv444_bit_depth(vector.fmt)
+        if bit_depth is None:
+            raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
+        chroma_format = "444"
+        if bit_depth > 12:
+            raise SystemExit(
+                f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
+            )
 
     command = [
         encoder,

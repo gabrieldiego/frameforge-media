@@ -44,9 +44,10 @@ pub use palette::vvc_palette_444_cabac_dump_json;
 use palette::{
     vvc_palette_444_binarized_syntax_bits, vvc_palette_444_cabac_context_bins,
     vvc_palette_444_context_audit_rows, vvc_palette_444_cu_syntax,
-    vvc_palette_444_decode_reconstruction, vvc_palette_444_reconstruction_yuv,
-    vvc_palette_444_single_entry_syntax, vvc_palette_444_syntax_tokens,
-    vvc_palette_run_copy_context_id_for_audit, VvcPalettePredictorMode, VvcPaletteTreeType,
+    vvc_palette_444_decode_reconstruction, vvc_palette_444_new_entry_token_bit_counts,
+    vvc_palette_444_reconstruction_yuv, vvc_palette_444_single_entry_syntax,
+    vvc_palette_444_syntax_tokens, vvc_palette_run_copy_context_id_for_audit,
+    VvcPalettePredictorMode, VvcPaletteTreeType,
 };
 pub use residual::quantize_vvc_color;
 #[cfg(test)]
@@ -245,9 +246,9 @@ fn coded_canvas_dimension(value: usize) -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VvcSampledColor {
-    pub y: u8,
-    pub u: u8,
-    pub v: u8,
+    pub y: VvcSample,
+    pub u: VvcSample,
+    pub v: VvcSample,
 }
 
 pub(in crate::vvc) type VvcSample = u16;
@@ -422,18 +423,18 @@ impl VvcSampledFrame {
                 chroma_sampling: ChromaSampling::Cs420,
                 bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
             },
-            luma: vec![VvcSample::from(color.y); 64],
-            cb: vec![VvcSample::from(color.u); 16],
-            cr: vec![VvcSample::from(color.v); 16],
+            luma: vec![color.y; 64],
+            cb: vec![color.u; 16],
+            cr: vec![color.v; 16],
             chroma_len: 16,
         }
     }
 
     fn sampled_color(&self) -> VvcSampledColor {
         VvcSampledColor {
-            y: vvc_downshift_sample_to_u8(self.luma[0], self.format.bit_depth),
-            u: vvc_downshift_sample_to_u8(self.cb[0], self.format.bit_depth),
-            v: vvc_downshift_sample_to_u8(self.cr[0], self.format.bit_depth),
+            y: self.luma[0],
+            u: self.cb[0],
+            v: self.cr[0],
         }
     }
 
@@ -762,11 +763,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
                 for region in vvc_ctu_regions(geometry) {
                     let ctu_frame = extract_vvc_ctu_frame(&source_frame, region);
-                    let ctu_recon: Vec<VvcSample> =
-                        palette::vvc_palette_444_reconstruction_yuv(&ctu_frame)
-                            .into_iter()
-                            .map(VvcSample::from)
-                            .collect();
+                    let ctu_recon = palette::vvc_palette_444_reconstruction_yuv(&ctu_frame);
                     frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
                     write_annex_b_to(
                         &mut frame_bitstream,
@@ -1181,7 +1178,8 @@ fn validate_vvc_input_format(format: PixelFormat) -> Result<(), String> {
     };
     match chroma_sampling {
         ChromaSampling::Cs420 if (8..=12).contains(&format.bit_depth().bits()) => Ok(()),
-        ChromaSampling::Cs422 | ChromaSampling::Cs444 if format.bit_depth().bits() == 8 => Ok(()),
+        ChromaSampling::Cs422 if format.bit_depth().bits() == 8 => Ok(()),
+        ChromaSampling::Cs444 if (8..=12).contains(&format.bit_depth().bits()) => Ok(()),
         ChromaSampling::Cs420 => Err(format!(
             "VVC 4:2:0 input currently supports bit depths 8..12; got {format}"
         )),
@@ -1189,7 +1187,7 @@ fn validate_vvc_input_format(format: PixelFormat) -> Result<(), String> {
             "VVC 4:2:2 input currently supports only 8-bit compatibility input; got {format}"
         )),
         ChromaSampling::Cs444 => Err(format!(
-            "VVC 4:4:4 palette input currently supports only 8-bit; got {format}"
+            "VVC 4:4:4 palette input currently supports bit depths 8..12; got {format}"
         )),
         ChromaSampling::Monochrome => Err(format!(
             "VVC monochrome input is not wired yet; got {format}"

@@ -1,3 +1,5 @@
+use crate::picture::SampleBitDepth;
+
 use super::{VvcSample, VvcSampledFrame, VVC_CTU_SIZE};
 
 const VVC_IBC_CU_SIZE: usize = 8;
@@ -311,15 +313,24 @@ fn vvc_ibc_hash_8x8(frame: &VvcSampledFrame, origin_x: usize, origin_y: usize) -
                 let sample_x = origin_x + x_off;
                 let sample_y = origin_y + y_off;
                 let index = sample_y * frame.geometry.width + sample_x;
-                hash = vvc_ibc_hash_byte(hash, plane[index]);
+                hash = vvc_ibc_hash_sample(hash, plane[index], frame.format.bit_depth);
             }
         }
     }
     hash
 }
 
-fn vvc_ibc_hash_byte(hash: u32, value: VvcSample) -> u32 {
-    let mixed = hash ^ u32::from(value as u8);
+fn vvc_ibc_hash_sample(hash: u32, value: VvcSample, bit_depth: SampleBitDepth) -> u32 {
+    let hash = vvc_ibc_hash_byte(hash, value as u8);
+    if bit_depth.bits() > 8 {
+        vvc_ibc_hash_byte(hash, (value >> 8) as u8)
+    } else {
+        hash
+    }
+}
+
+fn vvc_ibc_hash_byte(hash: u32, value: u8) -> u32 {
+    let mixed = hash ^ u32::from(value);
     let mixed = mixed ^ mixed.wrapping_shl(13);
     let mixed = mixed ^ mixed.wrapping_shr(17);
     mixed ^ mixed.wrapping_shl(5)

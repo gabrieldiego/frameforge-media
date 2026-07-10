@@ -67,8 +67,8 @@ than as one enum variant per depth. The public API shape is documented in
 shared bit-depth converter when an input is higher-bit-depth but the selected
 codec path only accepts the same planar layout at 8-bit; this converter does
 not change chroma sampling or color family. Codec paths that support an exact
-higher depth, such as AV2 4:2:0/4:4:4 at 10 bits and VVC 4:2:0 through 12
-bits, receive the original raw format without conversion.
+higher depth, such as AV2 4:2:0/4:4:4 at 10 bits and VVC 4:2:0/4:4:4
+through 12 bits, receive the original raw format without conversion.
 
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.

@@ -1,4 +1,4 @@
-use crate::picture::{ChromaSampling, PixelFormat};
+use crate::picture::{ChromaSampling, PixelFormat, SampleBitDepth};
 
 use super::{
     ibc::{VvcIbcCuDecision, VvcIbcHashSearch},
@@ -21,6 +21,7 @@ pub(super) enum VvcPaletteTreeType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VvcPalette444Syntax {
     pub(super) tree_type: VvcPaletteTreeType,
+    pub(super) bit_depth: SampleBitDepth,
     pub(super) cb_width: usize,
     pub(super) cb_height: usize,
     pub(super) start_comp: u8,
@@ -33,8 +34,10 @@ pub(super) struct VvcPalette444Syntax {
     pub(super) palette_escape_val_present_flag: bool,
     pub(super) max_palette_index: u8,
     pub(super) palette_indices: Vec<u8>,
-    /// Raw PaletteEscapeVal samples from H.266 7.4.12.6. Palette slices use
-    /// SliceQpY 4 so H.266 8.4.5.3 reconstructs these 8-bit values exactly.
+    /// Coded PaletteEscapeVal levels from H.266 7.4.12.6. Palette slices use
+    /// SliceQpY 4 so H.266 8.4.5.3 reconstructs 8-bit escape values exactly
+    /// and reconstructs high-depth escape values by left-shifting the coded
+    /// level by the bit-depth QP offset.
     ///
     /// TODO(area): the RTL currently mirrors this as full-CU escape banks.
     /// Keep this semantic model simple, but use it as the reference for a
@@ -58,9 +61,9 @@ pub(super) struct VvcPaletteSyntaxToken {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VvcPalette444DecodedPicture {
-    pub(super) luma: Vec<u8>,
-    pub(super) cb: Vec<u8>,
-    pub(super) cr: Vec<u8>,
+    pub(super) luma: Vec<VvcSample>,
+    pub(super) cb: Vec<VvcSample>,
+    pub(super) cr: Vec<VvcSample>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +128,7 @@ pub fn vvc_palette_444_cabac_dump_json(
     Ok(json)
 }
 
-pub(super) fn vvc_palette_444_reconstruction_yuv(frame: &VvcSampledFrame) -> Vec<u8> {
+pub(super) fn vvc_palette_444_reconstruction_yuv(frame: &VvcSampledFrame) -> Vec<VvcSample> {
     debug_assert_eq!(frame.format.chroma_sampling, ChromaSampling::Cs444);
     let samples = frame.geometry.luma_samples();
     let mut luma = vec![0; samples];
@@ -175,6 +178,7 @@ pub(super) fn vvc_palette_444_reconstruction_yuv(frame: &VvcSampledFrame) -> Vec
                     &mut cb,
                     &mut cr,
                     frame.geometry.width,
+                    frame.format.bit_depth,
                     &residual,
                 );
                 ibc_search.record_ibc_8x8(frame, residual.decision);
@@ -186,6 +190,7 @@ pub(super) fn vvc_palette_444_reconstruction_yuv(frame: &VvcSampledFrame) -> Vec
                     &mut cb,
                     &mut cr,
                     frame.geometry.width,
+                    frame.format.bit_depth,
                     origin_x,
                     origin_y,
                     &bdpcm,
@@ -203,8 +208,10 @@ pub(super) fn vvc_palette_444_reconstruction_yuv(frame: &VvcSampledFrame) -> Vec
                     let color = if syntax.palette_escape_val_present_flag
                         && palette_index == syntax.max_palette_index
                     {
-                        syntax.palette_escape_values[local]
-                            .expect("escape-coded palette sample must carry raw component values")
+                        let escape_level = syntax.palette_escape_values[local].expect(
+                            "escape-coded palette sample must carry coded component levels",
+                        );
+                        vvc_palette_reconstruct_escape_color(escape_level, syntax.bit_depth)
                     } else {
                         syntax.new_palette_entries[palette_index as usize]
                     };
@@ -222,9 +229,9 @@ pub(super) fn vvc_palette_444_reconstruction_yuv(frame: &VvcSampledFrame) -> Vec
 }
 
 fn copy_vvc_ibc_444_8x8_reconstruction(
-    luma: &mut [u8],
-    cb: &mut [u8],
-    cr: &mut [u8],
+    luma: &mut [VvcSample],
+    cb: &mut [VvcSample],
+    cr: &mut [VvcSample],
     stride: usize,
     decision: VvcIbcCuDecision,
 ) {
@@ -238,10 +245,11 @@ fn copy_vvc_ibc_444_8x8_reconstruction(
 }
 
 fn add_vvc_transform_skip_residual_444_8x8_reconstruction(
-    luma: &mut [u8],
-    cb: &mut [u8],
-    cr: &mut [u8],
+    luma: &mut [VvcSample],
+    cb: &mut [VvcSample],
+    cr: &mut [VvcSample],
     stride: usize,
+    bit_depth: SampleBitDepth,
     residual: &VvcTransformSkipResidual444Cu,
 ) {
     let origin_x = residual.decision.origin_x;
@@ -250,9 +258,9 @@ fn add_vvc_transform_skip_residual_444_8x8_reconstruction(
         for x_off in 0..4 {
             let local = y_off * 8 + x_off;
             let dst = (origin_y + y_off) * stride + origin_x + x_off;
-            luma[dst] = add_i16_to_u8(luma[dst], residual.y_coeffs[local]);
-            cb[dst] = add_i16_to_u8(cb[dst], residual.cb_coeffs[local]);
-            cr[dst] = add_i16_to_u8(cr[dst], residual.cr_coeffs[local]);
+            luma[dst] = add_i16_to_sample(luma[dst], residual.y_coeffs[local], bit_depth);
+            cb[dst] = add_i16_to_sample(cb[dst], residual.cb_coeffs[local], bit_depth);
+            cr[dst] = add_i16_to_sample(cr[dst], residual.cr_coeffs[local], bit_depth);
         }
     }
 }
@@ -324,10 +332,11 @@ fn vvc_transform_skip_residual_444_left_8x8(
 }
 
 fn add_vvc_bdpcm_horizontal_444_8x8_reconstruction(
-    luma: &mut [u8],
-    cb: &mut [u8],
-    cr: &mut [u8],
+    luma: &mut [VvcSample],
+    cb: &mut [VvcSample],
+    cr: &mut [VvcSample],
     stride: usize,
+    bit_depth: SampleBitDepth,
     origin_x: usize,
     origin_y: usize,
     residual: &VvcBdpcm444Cu,
@@ -345,9 +354,9 @@ fn add_vvc_bdpcm_horizontal_444_8x8_reconstruction(
             cb_residual += residual.cb_coeffs[local];
             cr_residual += residual.cr_coeffs[local];
             let dst = row * stride + origin_x + x_off;
-            luma[dst] = add_i16_to_u8(luma[left], y_residual);
-            cb[dst] = add_i16_to_u8(cb[left], cb_residual);
-            cr[dst] = add_i16_to_u8(cr[left], cr_residual);
+            luma[dst] = add_i16_to_sample(luma[left], y_residual, bit_depth);
+            cb[dst] = add_i16_to_sample(cb[left], cb_residual, bit_depth);
+            cr[dst] = add_i16_to_sample(cr[left], cr_residual, bit_depth);
         }
     }
 }
@@ -424,9 +433,45 @@ fn vvc_palette_sample_diff_i16(sample: VvcSample, reference: VvcSample) -> i16 {
         as i16
 }
 
-fn add_i16_to_u8(sample: u8, delta: i16) -> u8 {
-    let value = i16::from(sample) + delta;
-    value.clamp(0, 255) as u8
+fn vvc_palette_escape_level_color(
+    color: VvcSampledColor,
+    bit_depth: SampleBitDepth,
+) -> VvcSampledColor {
+    VvcSampledColor {
+        y: vvc_palette_escape_level(color.y, bit_depth),
+        u: vvc_palette_escape_level(color.u, bit_depth),
+        v: vvc_palette_escape_level(color.v, bit_depth),
+    }
+}
+
+fn vvc_palette_reconstruct_escape_color(
+    color: VvcSampledColor,
+    bit_depth: SampleBitDepth,
+) -> VvcSampledColor {
+    VvcSampledColor {
+        y: vvc_palette_reconstruct_escape_level(color.y, bit_depth),
+        u: vvc_palette_reconstruct_escape_level(color.u, bit_depth),
+        v: vvc_palette_reconstruct_escape_level(color.v, bit_depth),
+    }
+}
+
+fn vvc_palette_escape_level(sample: VvcSample, bit_depth: SampleBitDepth) -> VvcSample {
+    let shift = u32::from(bit_depth.bits().saturating_sub(8));
+    if shift == 0 {
+        return sample;
+    }
+    let rounding = 1u32 << (shift - 1);
+    ((u32::from(sample) + rounding) >> shift) as VvcSample
+}
+
+fn vvc_palette_reconstruct_escape_level(level: VvcSample, bit_depth: SampleBitDepth) -> VvcSample {
+    let shift = u32::from(bit_depth.bits().saturating_sub(8));
+    (u32::from(level) << shift).min(u32::from(bit_depth.max_sample())) as VvcSample
+}
+
+fn add_i16_to_sample(sample: VvcSample, delta: i16, bit_depth: SampleBitDepth) -> VvcSample {
+    let value = i32::from(sample) + i32::from(delta);
+    value.clamp(0, i32::from(bit_depth.max_sample())) as VvcSample
 }
 
 pub(super) fn vvc_palette_444_ctu_slice_unit(
@@ -490,7 +535,8 @@ fn vvc_palette_444_slice_payload(
     super::header::write_vvc_slice_header_ref_pic_lists(&mut writer, picture_kind);
     // H.266 8.4.5.3 reconstructs palette_escape_val with levelScale[QP % 6].
     // The current PPS base QP is 32, so sh_qp_delta -28 gives SliceQpY 4 and
-    // levelScale[4] == 64, making 8-bit escape samples reconstruct exactly.
+    // levelScale[4] == 64. High-depth escape values are coded as levels that
+    // VTM reconstructs by the bit-depth QP offset.
     writer.write_se("sh_qp_delta", VVC_PALETTE_LOSSLESS_SH_QP_DELTA);
     if tool_flags.dependent_quantization_enabled {
         writer.write_flag("sh_dep_quant_used_flag", true);
@@ -1020,7 +1066,7 @@ fn append_vvc_palette_444_index_map(
                     }
                     let (x, y) = scan_positions[cur_pos];
                     let sample = palette_escape_values[y * 8 + x]
-                        .expect("escape-coded palette index must carry raw component values");
+                        .expect("escape-coded palette index must carry coded component levels");
                     let value = match component {
                         0 => sample.y,
                         1 => sample.u,
@@ -1125,6 +1171,7 @@ pub(super) fn vvc_palette_444_single_entry_syntax(
     //   run/copy/index syntax is not present.
     VvcPalette444Syntax {
         tree_type: VvcPaletteTreeType::SingleTree,
+        bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         cb_width: geometry.width,
         cb_height: geometry.height,
         start_comp: 0,
@@ -1166,13 +1213,18 @@ pub(super) fn vvc_palette_444_cu_syntax(
                     // H.266 7.3.11.6 and 7.4.12.6 define
                     // MaxPaletteIndex as CurrentPaletteSize - 1 plus
                     // palette_escape_val_present_flag. PaletteEscapeVal itself
-                    // is reconstructed through H.266 8.4.5.3. Palette slices
-                    // deliberately use SliceQpY 4 so the levelScale equation
-                    // is identity for 8-bit samples, preserving lossless
-                    // 4:4:4 coding while keeping the simple first-31-colours
-                    // palette heuristic.
+                    // is reconstructed through H.266 8.4.5.3. With SliceQpY 4,
+                    // high-depth escape levels reconstruct by the bit-depth QP
+                    // offset, so code the inverse level rather than the raw
+                    // native sample.
                     has_escape = true;
-                    (31, Some(color))
+                    (
+                        31,
+                        Some(vvc_palette_escape_level_color(
+                            color,
+                            frame.format.bit_depth,
+                        )),
+                    )
                 };
             indices.push(index);
             escape_values.push(escape_value);
@@ -1189,6 +1241,7 @@ pub(super) fn vvc_palette_444_cu_syntax(
     let max_palette_index = current_palette_size.saturating_sub(1) + u8::from(has_escape);
     VvcPalette444Syntax {
         tree_type: VvcPaletteTreeType::SingleTree,
+        bit_depth: frame.format.bit_depth,
         cb_width: width,
         cb_height: height,
         start_comp: 0,
@@ -1219,9 +1272,9 @@ fn vvc_palette_444_sample_at(frame: &VvcSampledFrame, x: usize, y: usize) -> Vvc
     let sample_y = y.min(frame.geometry.height.saturating_sub(1));
     let index = sample_y * frame.geometry.width + sample_x;
     VvcSampledColor {
-        y: super::vvc_downshift_sample_to_u8(frame.luma[index], frame.format.bit_depth),
-        u: super::vvc_downshift_sample_to_u8(frame.cb[index], frame.format.bit_depth),
-        v: super::vvc_downshift_sample_to_u8(frame.cr[index], frame.format.bit_depth),
+        y: frame.luma[index],
+        u: frame.cb[index],
+        v: frame.cr[index],
     }
 }
 
@@ -1272,6 +1325,22 @@ pub(super) fn vvc_palette_444_binarized_syntax_bits(syntax: VvcPalette444Syntax)
 }
 
 #[cfg(test)]
+pub(super) fn vvc_palette_444_new_entry_token_bit_counts(syntax: VvcPalette444Syntax) -> Vec<u8> {
+    vvc_palette_444_syntax_tokens(syntax, VvcPalettePredictorMode::SignalNewEntry)
+        .into_iter()
+        .filter_map(|token| {
+            if !token.name.starts_with("new_palette_entries") {
+                return None;
+            }
+            match token.kind {
+                VvcPaletteSyntaxTokenKind::FixedLength { bit_count, .. } => Some(bit_count),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub(super) fn vvc_palette_444_decode_reconstruction(
     geometry: VvcVideoGeometry,
     syntax: VvcPalette444Syntax,
@@ -1280,7 +1349,8 @@ pub(super) fn vvc_palette_444_decode_reconstruction(
     // PaletteIndexMap either selects CurrentPaletteEntries or, when equal to
     // MaxPaletteIndex with palette_escape_val_present_flag set, reconstructs
     // PaletteEscapeVal through equations (441)..(443). The encoder signals
-    // SliceQpY 4 for palette slices, so raw 8-bit escape samples are lossless.
+    // SliceQpY 4 for palette slices, so coded escape levels reconstruct by
+    // the same scaling VTM applies.
     debug_assert_eq!(syntax.tree_type, VvcPaletteTreeType::SingleTree);
     debug_assert_eq!(syntax.start_comp, 0);
     debug_assert_eq!(syntax.num_comps, 3);
@@ -1301,8 +1371,9 @@ pub(super) fn vvc_palette_444_decode_reconstruction(
     for (sample_idx, index) in syntax.palette_indices.iter().enumerate() {
         let color = if syntax.palette_escape_val_present_flag && *index == syntax.max_palette_index
         {
-            syntax.palette_escape_values[sample_idx]
-                .expect("escape-coded palette sample must carry raw component values")
+            let escape_level = syntax.palette_escape_values[sample_idx]
+                .expect("escape-coded palette sample must carry coded component levels");
+            vvc_palette_reconstruct_escape_color(escape_level, syntax.bit_depth)
         } else {
             syntax.new_palette_entries[*index as usize]
         };
@@ -1326,6 +1397,7 @@ pub(super) fn vvc_palette_444_syntax_tokens(
         syntax.current_palette_size,
         syntax.num_signalled_palette_entries
     );
+    let entry_bit_count = syntax.bit_depth.bits();
 
     let mut tokens = Vec::new();
     if predictor_mode == VvcPalettePredictorMode::SignalNewEntryAfterPredictor {
@@ -1349,7 +1421,7 @@ pub(super) fn vvc_palette_444_syntax_tokens(
             name: "new_palette_entries[0][i]",
             kind: VvcPaletteSyntaxTokenKind::FixedLength {
                 value: entry.y as u32,
-                bit_count: 8,
+                bit_count: entry_bit_count,
             },
         });
     }
@@ -1358,7 +1430,7 @@ pub(super) fn vvc_palette_444_syntax_tokens(
             name: "new_palette_entries[1][i]",
             kind: VvcPaletteSyntaxTokenKind::FixedLength {
                 value: entry.u as u32,
-                bit_count: 8,
+                bit_count: entry_bit_count,
             },
         });
     }
@@ -1367,7 +1439,7 @@ pub(super) fn vvc_palette_444_syntax_tokens(
             name: "new_palette_entries[2][i]",
             kind: VvcPaletteSyntaxTokenKind::FixedLength {
                 value: entry.v as u32,
-                bit_count: 8,
+                bit_count: entry_bit_count,
             },
         });
     }
