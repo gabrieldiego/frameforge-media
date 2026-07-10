@@ -74,51 +74,18 @@ impl SampleBitDepth {
 
 impl PixelFormat {
     // TODO(deprecated): prefer numeric constructors such as
-    // `PixelFormat::yuv420(8)` over named depth constants.
+    // `PixelFormat::yuv420(8)` over named 8-bit compatibility constants.
     #[allow(non_upper_case_globals)]
     pub const Yuv420p8: Self =
         Self::planar_yuv(ChromaSampling::Cs420, SampleBitDepth::new_unchecked(8));
     #[allow(non_upper_case_globals)]
-    pub const Yuv420p10: Self =
-        Self::planar_yuv(ChromaSampling::Cs420, SampleBitDepth::new_unchecked(10));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv420p12: Self =
-        Self::planar_yuv(ChromaSampling::Cs420, SampleBitDepth::new_unchecked(12));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv420p16: Self =
-        Self::planar_yuv(ChromaSampling::Cs420, SampleBitDepth::new_unchecked(16));
-    #[allow(non_upper_case_globals)]
     pub const Yuv422p8: Self =
         Self::planar_yuv(ChromaSampling::Cs422, SampleBitDepth::new_unchecked(8));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv422p10: Self =
-        Self::planar_yuv(ChromaSampling::Cs422, SampleBitDepth::new_unchecked(10));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv422p12: Self =
-        Self::planar_yuv(ChromaSampling::Cs422, SampleBitDepth::new_unchecked(12));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv422p16: Self =
-        Self::planar_yuv(ChromaSampling::Cs422, SampleBitDepth::new_unchecked(16));
     #[allow(non_upper_case_globals)]
     pub const Yuv444p8: Self =
         Self::planar_yuv(ChromaSampling::Cs444, SampleBitDepth::new_unchecked(8));
     #[allow(non_upper_case_globals)]
-    pub const Yuv444p10: Self =
-        Self::planar_yuv(ChromaSampling::Cs444, SampleBitDepth::new_unchecked(10));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv444p12: Self =
-        Self::planar_yuv(ChromaSampling::Cs444, SampleBitDepth::new_unchecked(12));
-    #[allow(non_upper_case_globals)]
-    pub const Yuv444p16: Self =
-        Self::planar_yuv(ChromaSampling::Cs444, SampleBitDepth::new_unchecked(16));
-    #[allow(non_upper_case_globals)]
     pub const Gray8: Self = Self::gray_with_depth(SampleBitDepth::new_unchecked(8));
-    #[allow(non_upper_case_globals)]
-    pub const Gray10: Self = Self::gray_with_depth(SampleBitDepth::new_unchecked(10));
-    #[allow(non_upper_case_globals)]
-    pub const Gray12: Self = Self::gray_with_depth(SampleBitDepth::new_unchecked(12));
-    #[allow(non_upper_case_globals)]
-    pub const Gray16: Self = Self::gray_with_depth(SampleBitDepth::new_unchecked(16));
 
     pub const fn planar_yuv(chroma_sampling: ChromaSampling, bit_depth: SampleBitDepth) -> Self {
         Self::PlanarYuv {
@@ -298,14 +265,12 @@ pub fn convert_planar_frame_bit_depth(
         });
     }
 
-    let source_bytes = source_format.bytes_per_sample();
     let target_bytes = target_format.bytes_per_sample();
-    let sample_count = expected / source_bytes;
+    let sample_count = expected / source_format.bytes_per_sample();
     let mut output = vec![0; sample_count * target_bytes];
     for sample_idx in 0..sample_count {
-        let source_offset = sample_idx * source_bytes;
-        let target_offset = sample_idx * target_bytes;
-        let source_sample = read_planar_sample(input, source_offset, source_format.bit_depth());
+        let source_sample = read_planar_sample(input, sample_idx, source_format.bit_depth())
+            .expect("validated source frame length must contain every source sample");
         let target_sample = scale_sample_bit_depth(
             source_sample,
             source_format.bit_depth(),
@@ -313,10 +278,11 @@ pub fn convert_planar_frame_bit_depth(
         );
         write_planar_sample(
             &mut output,
-            target_offset,
+            sample_idx,
             target_sample,
             target_format.bit_depth(),
-        );
+        )
+        .expect("allocated target frame length must contain every target sample");
     }
     Ok(output)
 }
@@ -335,22 +301,43 @@ pub fn scale_sample_bit_depth(
     ((sample * target_max + (source_max / 2)) / source_max) as u16
 }
 
-fn read_planar_sample(input: &[u8], offset: usize, bit_depth: SampleBitDepth) -> u16 {
+pub fn read_planar_sample(
+    input: &[u8],
+    sample_index: usize,
+    bit_depth: SampleBitDepth,
+) -> Option<u16> {
+    let offset = sample_index.checked_mul(bit_depth.bytes_per_sample())?;
     if bit_depth.bits() <= 8 {
-        input[offset] as u16
+        input.get(offset).copied().map(u16::from)
     } else {
-        u16::from_le_bytes([input[offset], input[offset + 1]])
+        Some(u16::from_le_bytes([
+            *input.get(offset)?,
+            *input.get(offset + 1)?,
+        ]))
     }
 }
 
-fn write_planar_sample(output: &mut [u8], offset: usize, sample: u16, bit_depth: SampleBitDepth) {
+pub fn write_planar_sample(
+    output: &mut [u8],
+    sample_index: usize,
+    sample: u16,
+    bit_depth: SampleBitDepth,
+) -> Option<()> {
+    let offset = sample_index.checked_mul(bit_depth.bytes_per_sample())?;
     if bit_depth.bits() <= 8 {
+        if offset >= output.len() {
+            return None;
+        }
         output[offset] = sample as u8;
     } else {
+        if offset + 1 >= output.len() {
+            return None;
+        }
         let bytes = sample.to_le_bytes();
         output[offset] = bytes[0];
         output[offset + 1] = bytes[1];
     }
+    Some(())
 }
 
 impl FromStr for PixelFormat {
@@ -527,7 +514,10 @@ mod tests {
         assert_eq!(PixelFormat::Yuv444p8.frame_len(16, 16), Some(768));
         assert_eq!(PixelFormat::Rgb24.frame_len(16, 16), Some(768));
         assert_eq!(PixelFormat::yuv420(9).unwrap().frame_len(16, 16), Some(768));
-        assert_eq!(PixelFormat::Yuv420p10.frame_len(16, 16), Some(768));
+        assert_eq!(
+            PixelFormat::yuv420(10).unwrap().frame_len(16, 16),
+            Some(768)
+        );
         assert_eq!(
             PixelFormat::yuv444(15).unwrap().frame_len(16, 16),
             Some(1536)
@@ -558,7 +548,10 @@ mod tests {
 
     #[test]
     fn parses_hardware_model_pixel_format_aliases() {
-        assert_eq!("i010".parse::<PixelFormat>(), Ok(PixelFormat::Yuv420p10));
+        assert_eq!(
+            "i010".parse::<PixelFormat>(),
+            Ok(PixelFormat::yuv420(10).unwrap())
+        );
         assert_eq!("yuv444p".parse::<PixelFormat>(), Ok(PixelFormat::Yuv444p8));
         assert_eq!("rgb24".parse::<PixelFormat>(), Ok(PixelFormat::Rgb24));
     }
@@ -597,7 +590,7 @@ mod tests {
         );
         assert_eq!(
             PixelFormat::Yuv444p8.with_bit_depth(SampleBitDepth::new(16).unwrap()),
-            Some(PixelFormat::Yuv444p16)
+            PixelFormat::yuv444(16)
         );
         assert_eq!(
             PixelFormat::Rgb24.with_bit_depth(SampleBitDepth::new(8).unwrap()),
@@ -620,7 +613,7 @@ mod tests {
             &input,
             2,
             2,
-            PixelFormat::Yuv420p10,
+            PixelFormat::yuv420(10).unwrap(),
             PixelFormat::Yuv420p8,
         )
         .unwrap();
@@ -630,15 +623,26 @@ mod tests {
 
     #[test]
     fn rejects_bit_depth_conversion_that_changes_chroma_layout() {
-        let input = vec![0; PixelFormat::Yuv420p10.frame_len(2, 2).unwrap()];
+        let input = vec![0; PixelFormat::yuv420(10).unwrap().frame_len(2, 2).unwrap()];
         let err = convert_planar_frame_bit_depth(
             &input,
             2,
             2,
-            PixelFormat::Yuv420p10,
+            PixelFormat::yuv420(10).unwrap(),
             PixelFormat::Yuv444p8,
         )
         .unwrap_err();
         assert!(err.to_string().contains("cannot change chroma layout"));
+    }
+
+    #[test]
+    fn reads_and_writes_planar_samples_by_numeric_bit_depth() {
+        let depth = SampleBitDepth::new(10).unwrap();
+        let mut data = vec![0; 4];
+        assert_eq!(write_planar_sample(&mut data, 0, 1023, depth), Some(()));
+        assert_eq!(write_planar_sample(&mut data, 1, 1, depth), Some(()));
+        assert_eq!(read_planar_sample(&data, 0, depth), Some(1023));
+        assert_eq!(read_planar_sample(&data, 1, depth), Some(1));
+        assert_eq!(read_planar_sample(&data, 2, depth), None);
     }
 }

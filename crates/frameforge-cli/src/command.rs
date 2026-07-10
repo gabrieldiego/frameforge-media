@@ -1018,7 +1018,8 @@ mod tests {
     #[test]
     fn encode_job_converts_high_bit_depth_planar_input_for_current_av2_path() {
         let path = temp_yuv_path("one_frame_8x8_yuv420p10le");
-        let samples = PixelFormat::Yuv420p10.frame_len(8, 8).unwrap() / 2;
+        let yuv420p10 = PixelFormat::yuv420(10).unwrap();
+        let samples = yuv420p10.frame_len(8, 8).unwrap() / 2;
         let input = (0..samples)
             .flat_map(|idx| {
                 let sample = if idx % 2 == 0 { 0u16 } else { 1023u16 };
@@ -1044,7 +1045,7 @@ mod tests {
 
         let job = encode_job(&args).expect("build encode job");
         assert_eq!(job.frames, 1);
-        assert_eq!(job.source_format, PixelFormat::Yuv420p10);
+        assert_eq!(job.source_format, yuv420p10);
         assert_eq!(job.format, PixelFormat::Yuv420p8);
 
         let mut reader = open_job_reader(&job).expect("open converting reader");

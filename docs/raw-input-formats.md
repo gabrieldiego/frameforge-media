@@ -66,8 +66,9 @@ let info = FrameInfo::new(1920, 1080, format)?;
 let bytes_per_frame = info.expected_len();
 ```
 
-Named constants such as `PixelFormat::Yuv420p8` are compatibility shims and are
-marked in code with a TODO to deprecate them in favor of numeric constructors.
+Named 8-bit constants such as `PixelFormat::Yuv420p8` are compatibility shims
+and are marked in code with a TODO to deprecate them in favor of numeric
+constructors. Higher bit depths should use numeric constructors directly.
 
 The shared helper `convert_planar_frame_bit_depth` changes only sample depth. It
 does not change chroma sampling, color family, plane order, or packed layout.

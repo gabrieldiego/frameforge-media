@@ -1502,7 +1502,10 @@ fn vvc_input_path_accepts_supported_yuv_subsampling() {
         VvcEncodeParams { frames: 1 },
     )
     .unwrap();
-    for (format, chroma_samples) in [(PixelFormat::Yuv422p8, 32), (PixelFormat::Yuv422p10, 32)] {
+    for (format, chroma_samples) in [
+        (PixelFormat::yuv422(8).unwrap(), 32),
+        (PixelFormat::yuv422(10).unwrap(), 32),
+    ] {
         let input =
             solid_yuv_planar_high(65, 128, 192, format.bit_depth().bits(), chroma_samples, 1);
         assert_eq!(
