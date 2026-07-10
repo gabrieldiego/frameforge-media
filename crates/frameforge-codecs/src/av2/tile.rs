@@ -290,6 +290,12 @@ const DEFAULT_SKIP_TXFM_CDFS: [[u16; 6]; 6] = [
     avm_cdf2(12366, 0, 0, -1),
     avm_cdf2(3320, 1, 1, 0),
 ];
+const DEFAULT_LOSSLESS_TX_SIZE_CDFS: [[u16; 6]; 4] = [
+    avm_cdf2(16384, 0, 0, -1),
+    avm_cdf2(16384, 1, 0, 0),
+    avm_cdf2(16384, 1, 0, 0),
+    avm_cdf2(16384, 1, 0, 0),
+];
 const DEFAULT_FSC_MODE_CTX0_CDFS: [[u16; 6]; 6] = [
     avm_cdf2(30503, 0, 0, 1),
     avm_cdf2(31244, 0, 0, 1),
@@ -297,6 +303,25 @@ const DEFAULT_FSC_MODE_CTX0_CDFS: [[u16; 6]; 6] = [
     avm_cdf2(32324, 1, 1, 1),
     avm_cdf2(32582, 1, 1, 1),
     avm_cdf2(32691, 1, 1, 1),
+];
+const DEFAULT_FSC_MODE_CDFS: [[[u16; 6]; 6]; 3] = [
+    DEFAULT_FSC_MODE_CTX0_CDFS,
+    [
+        avm_cdf2(27437, 0, 0, 0),
+        avm_cdf2(27242, 1, 1, 0),
+        avm_cdf2(28040, 1, 0, -1),
+        avm_cdf2(27589, 1, 0, -1),
+        avm_cdf2(27234, 0, -1, -2),
+        avm_cdf2(23583, -2, -2, -2),
+    ],
+    [
+        avm_cdf2(26068, 1, 0, 0),
+        avm_cdf2(22635, 1, 0, 0),
+        avm_cdf2(22069, 0, -1, -1),
+        avm_cdf2(19218, -1, -1, -2),
+        avm_cdf2(13701, -1, -1, -1),
+        avm_cdf2(4636, -1, -2, 1),
+    ],
 ];
 const DEFAULT_DO_SPLIT_CDFS: [[u16; 6]; 64] = [
     avm_cdf2(28084, 0, 0, 1),
@@ -536,6 +561,10 @@ const DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF: [u16; 6] = [
 ];
 const DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF: [u16; 6] = avm_cdf2(13655, 0, 0, -1);
 const DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF: [u16; 6] = avm_cdf2(22348, 0, 0, 0);
+const DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF: [u16; 6] = avm_cdf2(5437, -1, -2, -2);
+const DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF: [u16; 6] = avm_cdf2(17819, -1, 0, -1);
+const DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF: [u16; 6] = avm_cdf2(28074, 0, -1, 1);
+const DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF: [u16; 6] = avm_cdf2(30432, 1, -1, 0);
 const DEFAULT_V_TXB_SKIP_TX4X4_CTX0_CDF: [u16; 6] = avm_cdf2(1439, 1, 0, 1);
 const DEFAULT_V_TXB_SKIP_TX4X4_CTX1_CDF: [u16; 6] = avm_cdf2(6191, 0, 0, 0);
 const DEFAULT_V_TXB_SKIP_TX4X4_CTX2_CDF: [u16; 6] = avm_cdf2(14610, 0, 0, -1);
@@ -657,6 +686,40 @@ const DEFAULT_COEFF_BR_UV_CDFS: [[u16; 8]; 4] = [
     avm_cdf4(20674, 27680, 30329, 1, 0, 1),
     avm_cdf4(16228, 24293, 28314, 1, 0, 0),
     avm_cdf4(9580, 16283, 20959, 1, 0, 0),
+];
+const DEFAULT_COEFF_BASE_BOB_IDTX_CDFS: [[u16; 7]; 3] = [
+    avm_cdf3(9917, 17060, 1, 1, 0),
+    avm_cdf3(13841, 21928, 1, 1, -1),
+    avm_cdf3(11228, 19107, 1, 1, 0),
+];
+const DEFAULT_COEFF_BASE_IDTX_CDFS: [[u16; 8]; 7] = [
+    avm_cdf4(28343, 29890, 30977, 1, 1, 1),
+    avm_cdf4(20601, 26193, 28764, 1, 1, 1),
+    avm_cdf4(19490, 23791, 27048, 1, 0, 0),
+    avm_cdf4(16423, 19493, 22007, 1, 0, 1),
+    avm_cdf4(12176, 17688, 21070, 0, 0, -1),
+    avm_cdf4(11254, 15066, 18960, 0, 0, -1),
+    avm_cdf4(7135, 9594, 11748, 0, 0, -1),
+];
+const DEFAULT_COEFF_BR_IDTX_CDFS: [[u16; 8]; 7] = [
+    avm_cdf4(10358, 16536, 21006, 0, 1, 0),
+    avm_cdf4(10820, 18219, 22881, 1, 1, -1),
+    avm_cdf4(10100, 15687, 20193, 1, 0, 0),
+    avm_cdf4(10388, 15552, 19869, 1, 0, 0),
+    avm_cdf4(7467, 14671, 18379, 1, 1, 0),
+    avm_cdf4(5068, 8607, 12235, 0, 1, 0),
+    avm_cdf4(3545, 6569, 9269, 1, 1, 1),
+];
+const DEFAULT_IDTX_SIGN_CDFS: [[u16; 6]; 9] = [
+    avm_cdf2(15560, 1, 1, 1),
+    avm_cdf2(24775, 1, 1, 1),
+    avm_cdf2(7540, 1, 1, 1),
+    avm_cdf2(27844, 0, 0, 0),
+    avm_cdf2(3545, 1, 0, 0),
+    avm_cdf2(28880, 1, -1, -2),
+    avm_cdf2(4886, 1, -1, 0),
+    avm_cdf2(32178, 0, -1, -1),
+    avm_cdf2(1204, 1, 0, 0),
 ];
 const DEFAULT_COEFF_BR_Y_CDFS: [[u16; 8]; 7] = [
     avm_cdf4(22305, 28743, 30345, 0, -1, -1),
@@ -857,6 +920,15 @@ impl Av2MvpBlockSize {
             (16, 32) | (32, 16) | (32, 32) => 5,
             _ => unreachable!("unsupported AV2 MVP FSC block size"),
         })
+    }
+
+    fn lossless_tx_size_group(self) -> usize {
+        match (self.width, self.height) {
+            (8, 8) | (8, 16) | (16, 8) | (8, 32) | (32, 8) => 1,
+            (16, 16) | (16, 32) | (32, 16) => 2,
+            (32, 32) => 3,
+            _ => 0,
+        }
     }
 
     fn subsize(self, partition: Av2MvpPartition) -> Option<Self> {
@@ -1140,6 +1212,7 @@ enum Av2TileDecisionKind {
         mode: Av2LumaIntraMode,
         use_dpcm_y: bool,
         dpcm_horz: bool,
+        use_fsc: bool,
     },
     IntraChromaMode {
         use_bdpcm_uv: bool,
@@ -1153,6 +1226,7 @@ enum Av2TileDecisionKind {
         luma_bdpcm_horz: Option<bool>,
         chroma_use_bdpcm: bool,
         chroma_intra_mode: Av2ChromaIntraMode,
+        use_fsc: bool,
     },
 }
 
@@ -1412,6 +1486,103 @@ impl Av2LumaModeContext {
                 self.modes[row * self.blocks_wide + col] = Some(mode);
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Av2FscModeContext {
+    coded: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+    use_fsc: [[bool; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+}
+
+impl Av2FscModeContext {
+    fn new() -> Self {
+        Self {
+            coded: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+            use_fsc: [[false; PARTITION_CONTEXT_DIM]; PARTITION_CONTEXT_DIM],
+        }
+    }
+
+    fn context(&self, row_mi: usize, col_mi: usize, block_size: Av2MvpBlockSize) -> usize {
+        let not_at_sb_top_boundary = row_mi % PARTITION_CONTEXT_DIM != 0;
+        let mut count = 0usize;
+        let mut sum = 0usize;
+
+        let mut push = |use_fsc: Option<bool>| {
+            if count >= 2 {
+                return;
+            }
+            if let Some(use_fsc) = use_fsc {
+                sum += usize::from(use_fsc);
+                count += 1;
+            }
+        };
+
+        push(self.bottom_left_state(row_mi, col_mi, block_size));
+        if not_at_sb_top_boundary {
+            push(self.above_right_state(row_mi, col_mi, block_size));
+        }
+        push(self.left_state(row_mi, col_mi));
+        if not_at_sb_top_boundary {
+            push(self.above_state(row_mi, col_mi));
+        }
+        sum
+    }
+
+    fn update_leaf(
+        &mut self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+        use_fsc: bool,
+    ) {
+        for row in row_mi..(row_mi + block_size.mi_height()).min(PARTITION_CONTEXT_DIM) {
+            for col in col_mi..(col_mi + block_size.mi_width()).min(PARTITION_CONTEXT_DIM) {
+                self.coded[row][col] = true;
+                self.use_fsc[row][col] = use_fsc;
+            }
+        }
+    }
+
+    fn state_at(&self, row_mi: usize, col_mi: usize) -> Option<bool> {
+        if row_mi >= PARTITION_CONTEXT_DIM || col_mi >= PARTITION_CONTEXT_DIM {
+            return None;
+        }
+        self.coded[row_mi][col_mi].then_some(self.use_fsc[row_mi][col_mi])
+    }
+
+    fn bottom_left_state(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<bool> {
+        col_mi
+            .checked_sub(1)
+            .and_then(|col| self.state_at(row_mi + block_size.mi_height().saturating_sub(1), col))
+    }
+
+    fn above_right_state(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<bool> {
+        row_mi
+            .checked_sub(1)
+            .and_then(|row| self.state_at(row, col_mi + block_size.mi_width().saturating_sub(1)))
+    }
+
+    fn left_state(&self, row_mi: usize, col_mi: usize) -> Option<bool> {
+        col_mi
+            .checked_sub(1)
+            .and_then(|col| self.state_at(row_mi, col))
+    }
+
+    fn above_state(&self, row_mi: usize, col_mi: usize) -> Option<bool> {
+        row_mi
+            .checked_sub(1)
+            .and_then(|row| self.state_at(row, col_mi))
     }
 }
 
@@ -1721,11 +1892,16 @@ impl Av2Black444TilePlan {
                 use_bdpcm_uv,
                 chroma_intra_mode,
             } => {
+                let use_fsc = use_luma_palette
+                    && block_size.width == AV2_LUMA_PALETTE_BLOCK_SIZE
+                    && block_size.height == AV2_LUMA_PALETTE_BLOCK_SIZE
+                    && !use_dpcm_y;
                 self.decisions.push(Av2TileDecision {
                     kind: Av2TileDecisionKind::IntraLumaMode {
                         mode: luma_mode,
                         use_dpcm_y,
                         dpcm_horz: luma_bdpcm_horz,
+                        use_fsc,
                     },
                     row: row_mi,
                     col: col_mi,
@@ -1774,6 +1950,7 @@ impl Av2Black444TilePlan {
                                 luma_bdpcm_horz,
                                 chroma_use_bdpcm,
                                 chroma_intra_mode,
+                                use_fsc,
                             },
                             row: row_mi,
                             col: col_mi,
@@ -1800,6 +1977,7 @@ impl Av2Black444TilePlan {
             Av2PaletteColorCacheContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut fsc_mode_context = Av2FscModeContext::new();
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -1864,16 +2042,25 @@ impl Av2Black444TilePlan {
                         decision.block_size,
                         Av2LumaIntraMode::Dc,
                     );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        false,
+                    );
                     coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
                 Av2TileDecisionKind::IntraLumaMode {
                     mode,
                     use_dpcm_y,
                     dpcm_horz,
+                    use_fsc,
                 } => {
                     let mode_syntax = luma_mode_context.syntax_for_leaf(decision.row, decision.col);
                     let mode_context = mode_syntax.context;
                     let mode_index = mode_syntax.index_for(mode);
+                    let fsc_context =
+                        fsc_mode_context.context(decision.row, decision.col, decision.block_size);
                     write_intra_luma_mode(
                         writer,
                         *decision,
@@ -1882,6 +2069,8 @@ impl Av2Black444TilePlan {
                         mode_index,
                         use_dpcm_y,
                         dpcm_horz,
+                        use_fsc,
+                        fsc_context,
                     );
                     if mode != Av2LumaIntraMode::Dc || use_dpcm_y {
                         palette_cache_context.clear_leaf(
@@ -1904,6 +2093,12 @@ impl Av2Black444TilePlan {
                         decision.col,
                         decision.block_size,
                         coded_mode,
+                    );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        use_fsc,
                     );
                 }
                 Av2TileDecisionKind::IntraChromaMode {
@@ -1960,6 +2155,7 @@ impl Av2Black444TilePlan {
                     luma_bdpcm_horz,
                     chroma_use_bdpcm,
                     chroma_intra_mode,
+                    use_fsc,
                 } => {
                     write_luma_palette_residual_coefficients(
                         writer,
@@ -1974,6 +2170,7 @@ impl Av2Black444TilePlan {
                         luma_bdpcm_horz,
                         chroma_use_bdpcm,
                         chroma_intra_mode,
+                        use_fsc,
                     );
                     intrabc_context.update_leaf(
                         decision.row,
@@ -2023,6 +2220,7 @@ impl Av2Black444TilePlan {
                     mode,
                     use_dpcm_y: _,
                     dpcm_horz: _,
+                    use_fsc: _,
                 } => {
                     write_intra_luma_mode(
                         writer,
@@ -2032,6 +2230,8 @@ impl Av2Black444TilePlan {
                         mode.mode_index() as u8,
                         false,
                         false,
+                        false,
+                        0,
                     );
                 }
                 Av2TileDecisionKind::IntraChromaMode {
@@ -2842,6 +3042,8 @@ fn write_intra_luma_mode(
     mode_index: u8,
     use_dpcm_y: bool,
     dpcm_horz: bool,
+    use_fsc: bool,
+    fsc_context: usize,
 ) {
     let mut dpcm_cdf = DEFAULT_DPCM_CDF;
     // AV2 v1.0.0 Section 5.20.5.5 read_intra_y_mode(): lossless
@@ -2864,8 +3066,14 @@ fn write_intra_luma_mode(
             false,
         );
         if let Some(size_group) = decision.block_size.fsc_size_group() {
-            let mut fsc_cdf = DEFAULT_FSC_MODE_CTX0_CDFS[size_group];
-            writer.write_symbol("tile.intra.fsc_mode", 0, &mut fsc_cdf, 2, false);
+            let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
+            writer.write_symbol(
+                "tile.intra.fsc_mode",
+                usize::from(use_fsc),
+                &mut fsc_cdf,
+                2,
+                false,
+            );
         }
         return;
     }
@@ -2894,8 +3102,14 @@ fn write_intra_luma_mode(
     );
 
     if let Some(size_group) = decision.block_size.fsc_size_group() {
-        let mut fsc_cdf = DEFAULT_FSC_MODE_CTX0_CDFS[size_group];
-        writer.write_symbol("tile.intra.fsc_mode", 0, &mut fsc_cdf, 2, false);
+        let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
+        writer.write_symbol(
+            "tile.intra.fsc_mode",
+            usize::from(use_fsc),
+            &mut fsc_cdf,
+            2,
+            false,
+        );
     }
 }
 
@@ -2941,6 +3155,12 @@ fn write_intra_chroma_mode(
     if index >= 7 {
         writer.write_literal("tile.intra.uv_mode_idx_ext", (index - 7) as u32, 3);
     }
+}
+
+fn write_lossless_tx_size_4x4(writer: &mut Av2EntropyWriter, block_size: Av2MvpBlockSize) {
+    let bsize_group = block_size.lossless_tx_size_group();
+    let mut cdf = DEFAULT_LOSSLESS_TX_SIZE_CDFS[bsize_group];
+    writer.write_symbol("tile.lossless_tx_size_4x4", 0, &mut cdf, 2, false);
 }
 
 fn luma_mode_is_directional(mode: Av2LumaIntraMode) -> bool {
@@ -3896,6 +4116,7 @@ fn write_luma_palette_residual_coefficients(
     luma_bdpcm_horz: Option<bool>,
     chroma_use_bdpcm: bool,
     chroma_intra_mode: Av2ChromaIntraMode,
+    use_fsc: bool,
 ) {
     // AV2 v1.0.0 Sections 5.20.8.4 palette_tokens() and 5.20.7.27 coeffs():
     // palette supplies a luma predictor, not an escape-coded lossless sample
@@ -3917,6 +4138,9 @@ fn write_luma_palette_residual_coefficients(
     let leaf_y0 = tile_origin_y + decision.row * MI_SIZE;
     let leaf_width = decision.block_size.width;
     let leaf_height = decision.block_size.height;
+    if use_fsc {
+        write_lossless_tx_size_4x4(writer, decision.block_size);
+    }
     for row in 0..txb_height {
         let abs_row = decision.row + row;
         for col in 0..txb_width {
@@ -3926,7 +4150,9 @@ fn write_luma_palette_residual_coefficients(
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let txb_x0 = tile_origin_x + abs_col * TX4X4_SIZE;
             let txb_y0 = tile_origin_y + abs_row * TX4X4_SIZE;
-            let coefficients = if let Some(horz) = luma_bdpcm_horz {
+            let coefficients = if use_fsc {
+                luma_palette_idtx4x4_coefficients(palette, txb_x0, txb_y0)
+            } else if let Some(horz) = luma_bdpcm_horz {
                 luma_bdpcm_tx4x4_coefficients(
                     palette,
                     txb_x0,
@@ -3938,8 +4164,11 @@ fn write_luma_palette_residual_coefficients(
             } else {
                 luma_palette_tx4x4_coefficients(palette, txb_x0, txb_y0)
             };
-            let (context, _) =
-                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients);
+            let (context, _) = if use_fsc {
+                write_luma_palette_fsc_txb(writer, &coefficients)
+            } else {
+                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+            };
             contexts.y_above[abs_col] = context;
             contexts.y_left[abs_row] = context;
         }
@@ -3955,7 +4184,23 @@ fn write_luma_palette_residual_coefficients(
                     + 6;
             let txb_x0 = tile_origin_x + abs_col * TX4X4_SIZE;
             let txb_y0 = tile_origin_y + abs_row * TX4X4_SIZE;
-            let coefficients = if chroma_use_bdpcm {
+            let coefficients = if use_fsc {
+                chroma_idtx4x4_coefficients(
+                    palette,
+                    Av2ChromaPlane::U,
+                    txb_x0,
+                    txb_y0,
+                    tile_origin_x,
+                    tile_origin_y,
+                    leaf_x0,
+                    leaf_y0,
+                    leaf_width,
+                    leaf_height,
+                    coded_mi_context,
+                    chroma_use_bdpcm,
+                    chroma_intra_mode,
+                )
+            } else if chroma_use_bdpcm {
                 chroma_bdpcm_tx4x4_coefficients(
                     palette,
                     Av2ChromaPlane::U,
@@ -3982,7 +4227,7 @@ fn write_luma_palette_residual_coefficients(
                 )
             };
             let (context, nonzero) =
-                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::U, skip_ctx, &coefficients);
+                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::U, skip_ctx, &coefficients, use_fsc);
             contexts.u_above[abs_col] = context;
             contexts.u_left[abs_row] = context;
             last_u_txb_nonzero = nonzero;
@@ -4000,7 +4245,23 @@ fn write_luma_palette_residual_coefficients(
             );
             let txb_x0 = tile_origin_x + abs_col * TX4X4_SIZE;
             let txb_y0 = tile_origin_y + abs_row * TX4X4_SIZE;
-            let coefficients = if chroma_use_bdpcm {
+            let coefficients = if use_fsc {
+                chroma_idtx4x4_coefficients(
+                    palette,
+                    Av2ChromaPlane::V,
+                    txb_x0,
+                    txb_y0,
+                    tile_origin_x,
+                    tile_origin_y,
+                    leaf_x0,
+                    leaf_y0,
+                    leaf_width,
+                    leaf_height,
+                    coded_mi_context,
+                    chroma_use_bdpcm,
+                    chroma_intra_mode,
+                )
+            } else if chroma_use_bdpcm {
                 chroma_bdpcm_tx4x4_coefficients(
                     palette,
                     Av2ChromaPlane::V,
@@ -4027,7 +4288,7 @@ fn write_luma_palette_residual_coefficients(
                 )
             };
             let (context, _) =
-                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::V, skip_ctx, &coefficients);
+                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::V, skip_ctx, &coefficients, use_fsc);
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
         }
@@ -4073,11 +4334,11 @@ fn write_v_black_dc_txb(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 
 fn write_u_lossless_dc_txb(writer: &mut Av2EntropyWriter, skip_ctx: u8, sample: u8) -> u8 {
     if sample == LOSSLESS_DC_PREDICTOR {
-        write_u_txb_all_zero(writer, skip_ctx);
+        write_u_txb_all_zero(writer, skip_ctx, false);
         return 0;
     }
     let (level, negative) = lossless_dc_level_for_sample(sample);
-    write_u_txb_nonzero(writer, skip_ctx);
+    write_u_txb_nonzero(writer, skip_ctx, false);
     write_eob_one_uv(writer);
     write_uv_dc_level(writer, level);
     writer.write_literal("tile.coeff.u.dc_sign_negative", u32::from(negative), 1);
@@ -4107,7 +4368,7 @@ fn write_chroma_dc_delta_txb(
 ) -> (u8, bool) {
     if delta == 0 {
         match plane {
-            Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx),
+            Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, false),
             Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
         }
         return (0, false);
@@ -4115,7 +4376,7 @@ fn write_chroma_dc_delta_txb(
 
     let level = dc_delta_level(delta);
     match plane {
-        Av2ChromaPlane::U => write_u_txb_nonzero(writer, skip_ctx),
+        Av2ChromaPlane::U => write_u_txb_nonzero(writer, skip_ctx, false),
         Av2ChromaPlane::V => write_v_txb_nonzero(writer, skip_ctx),
     }
     write_eob_one_uv(writer);
@@ -4153,6 +4414,25 @@ fn luma_palette_tx4x4_coefficients(
     }
 
     av2_fwht4x4(&residual)
+}
+
+fn luma_palette_idtx4x4_coefficients(
+    palette: &Av2LumaPalette444,
+    x0: usize,
+    y0: usize,
+) -> [i32; TX4X4_SAMPLES] {
+    let mut residual = [0i32; TX4X4_SAMPLES];
+    for local_y in 0..TX4X4_SIZE {
+        let y = y0 + local_y;
+        for local_x in 0..TX4X4_SIZE {
+            let x = x0 + local_x;
+            let original = i32::from(palette.y_sample(x, y));
+            let predicted = i32::from(palette.luma_prediction_sample(x, y));
+            residual[local_y * TX4X4_SIZE + local_x] = original - predicted;
+        }
+    }
+
+    idtx4x4_coefficients(&residual)
 }
 
 fn luma_bdpcm_tx4x4_coefficients(
@@ -4214,6 +4494,20 @@ fn chroma_bdpcm_tx4x4_coefficients(
     tile_origin_y: usize,
     horz: bool,
 ) -> [i32; TX4X4_SAMPLES] {
+    let residual =
+        chroma_bdpcm_residual4x4(palette, plane, x0, y0, tile_origin_x, tile_origin_y, horz);
+    av2_fwht4x4(&residual)
+}
+
+fn chroma_bdpcm_residual4x4(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    x0: usize,
+    y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    horz: bool,
+) -> [i32; TX4X4_SAMPLES] {
     let mut residual = [0i32; TX4X4_SAMPLES];
     for local_y in 0..TX4X4_SIZE {
         let y = y0 + local_y;
@@ -4255,10 +4549,41 @@ fn chroma_bdpcm_tx4x4_coefficients(
         }
     }
 
-    av2_fwht4x4(&residual)
+    residual
 }
 
 fn chroma_intra_tx4x4_coefficients(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    x0: usize,
+    y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_width: usize,
+    leaf_height: usize,
+    coded_mi_context: &Av2CodedMiContext,
+    mode: Av2ChromaIntraMode,
+) -> [i32; TX4X4_SAMPLES] {
+    let residual = chroma_intra_residual4x4(
+        palette,
+        plane,
+        x0,
+        y0,
+        tile_origin_x,
+        tile_origin_y,
+        leaf_x0,
+        leaf_y0,
+        leaf_width,
+        leaf_height,
+        coded_mi_context,
+        mode,
+    );
+    av2_fwht4x4(&residual)
+}
+
+fn chroma_intra_residual4x4(
     palette: &Av2LumaPalette444,
     plane: Av2ChromaPlane,
     x0: usize,
@@ -4431,7 +4756,59 @@ fn chroma_intra_tx4x4_coefficients(
         }
     }
 
-    av2_fwht4x4(&residual)
+    residual
+}
+
+fn chroma_idtx4x4_coefficients(
+    palette: &Av2LumaPalette444,
+    plane: Av2ChromaPlane,
+    x0: usize,
+    y0: usize,
+    tile_origin_x: usize,
+    tile_origin_y: usize,
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_width: usize,
+    leaf_height: usize,
+    coded_mi_context: &Av2CodedMiContext,
+    use_bdpcm: bool,
+    mode: Av2ChromaIntraMode,
+) -> [i32; TX4X4_SAMPLES] {
+    let residual = if use_bdpcm {
+        chroma_bdpcm_residual4x4(
+            palette,
+            plane,
+            x0,
+            y0,
+            tile_origin_x,
+            tile_origin_y,
+            mode.is_horizontal(),
+        )
+    } else {
+        chroma_intra_residual4x4(
+            palette,
+            plane,
+            x0,
+            y0,
+            tile_origin_x,
+            tile_origin_y,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+            coded_mi_context,
+            mode,
+        )
+    };
+    idtx4x4_coefficients(&residual)
+}
+
+fn idtx4x4_coefficients(residual: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
+    let mut coefficients = [0i32; TX4X4_SAMPLES];
+    for (coefficient, residual) in coefficients.iter_mut().zip(residual.iter()) {
+        *coefficient = *residual * 8;
+    }
+    coefficients
 }
 
 fn chroma_d45_above_edge(
@@ -4963,23 +5340,99 @@ fn write_luma_palette_residual_txb(
     (lossless_entropy_context(cul_level, dc_val), true)
 }
 
+fn write_luma_palette_fsc_txb(
+    writer: &mut Av2EntropyWriter,
+    coefficients: &[i32; TX4X4_SAMPLES],
+) -> (u8, bool) {
+    let levels = lossless_coefficient_levels(coefficients);
+    let Some(bob) = TX4X4_SCAN.iter().position(|&pos| levels[pos] != 0) else {
+        write_y_fsc_txb_all_zero(writer);
+        return (0, false);
+    };
+
+    write_y_fsc_txb_nonzero(writer);
+    write_eob_y(writer, TX4X4_SAMPLES - bob);
+
+    for scan_index in bob..TX4X4_SAMPLES {
+        let pos = TX4X4_SCAN[scan_index];
+        let level = levels[pos];
+        if scan_index == bob {
+            let coeff_ctx = idtx_bob_context(scan_index);
+            let mut cdf = DEFAULT_COEFF_BASE_BOB_IDTX_CDFS[coeff_ctx];
+            writer.write_symbol(
+                "tile.coeff.y.idtx_base_bob",
+                level.min(3) as usize - 1,
+                &mut cdf,
+                3,
+                false,
+            );
+        } else {
+            let coeff_ctx = idtx_upper_levels_context(&levels, pos);
+            let mut cdf = DEFAULT_COEFF_BASE_IDTX_CDFS[coeff_ctx];
+            writer.write_symbol(
+                "tile.coeff.y.idtx_base",
+                level.min(3) as usize,
+                &mut cdf,
+                4,
+                false,
+            );
+        }
+        if level > 2 {
+            write_idtx_low_range(writer, &levels, pos, level);
+        }
+    }
+
+    let mut cul_level = 0u32;
+    let mut dc_val = 0i32;
+    let mut hr_level_avg = 0u32;
+    for scan_index in 0..TX4X4_SAMPLES {
+        let pos = TX4X4_SCAN[scan_index];
+        let level = levels[pos];
+        if level == 0 {
+            continue;
+        }
+        let negative = coefficients[pos] < 0;
+        let sign_ctx = idtx_sign_context(&levels, coefficients, pos);
+        let mut cdf = DEFAULT_IDTX_SIGN_CDFS[sign_ctx];
+        writer.write_symbol(
+            "tile.coeff.y.idtx_sign_negative",
+            usize::from(negative),
+            &mut cdf,
+            2,
+            false,
+        );
+        write_idtx_high_range(writer, level, &mut hr_level_avg);
+        if scan_index == 0 {
+            dc_val = if negative {
+                -(level as i32)
+            } else {
+                level as i32
+            };
+        }
+        cul_level += level;
+    }
+
+    (lossless_entropy_context(cul_level, dc_val), true)
+}
+
 fn write_chroma_bdpcm_txb(
     writer: &mut Av2EntropyWriter,
     plane: Av2ChromaPlane,
     skip_ctx: u8,
     coefficients: &[i32; TX4X4_SAMPLES],
+    use_fsc: bool,
 ) -> (u8, bool) {
     let levels = lossless_coefficient_levels(coefficients);
     let Some(eob) = tx4x4_eob(&levels) else {
         match plane {
-            Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx),
+            Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, use_fsc),
             Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
         }
         return (0, false);
     };
 
     match plane {
-        Av2ChromaPlane::U => write_u_txb_nonzero(writer, skip_ctx),
+        Av2ChromaPlane::U => write_u_txb_nonzero(writer, skip_ctx, use_fsc),
         Av2ChromaPlane::V => write_v_txb_nonzero(writer, skip_ctx),
     }
     write_eob_uv(writer, eob);
@@ -5286,6 +5739,23 @@ fn write_chroma_low_range(
     );
 }
 
+fn write_idtx_low_range(
+    writer: &mut Av2EntropyWriter,
+    levels: &[u32; TX4X4_SAMPLES],
+    pos: usize,
+    level: u32,
+) {
+    let br_ctx = idtx_br_context(levels, pos);
+    let mut cdf = DEFAULT_COEFF_BR_IDTX_CDFS[br_ctx];
+    writer.write_symbol(
+        "tile.coeff.y.idtx_low_range",
+        (level - 3).min(3) as usize,
+        &mut cdf,
+        4,
+        false,
+    );
+}
+
 fn write_luma_high_range(
     writer: &mut Av2EntropyWriter,
     pos: usize,
@@ -5302,6 +5772,20 @@ fn write_luma_high_range(
     write_adaptive_high_range_with_context(
         writer,
         "tile.coeff.y.high_range",
+        high_range,
+        *hr_level_avg,
+    );
+    *hr_level_avg = (*hr_level_avg + high_range) >> 1;
+}
+
+fn write_idtx_high_range(writer: &mut Av2EntropyWriter, level: u32, hr_level_avg: &mut u32) {
+    if level <= 5 {
+        return;
+    }
+    let high_range = level - 6;
+    write_adaptive_high_range_with_context(
+        writer,
+        "tile.coeff.y.idtx_high_range",
         high_range,
         *hr_level_avg,
     );
@@ -5469,6 +5953,99 @@ fn luma_br_context(levels: &[u32; TX4X4_SAMPLES], pos: usize) -> usize {
     ((mag + 1) >> 1).min(6) as usize
 }
 
+fn idtx_bob_context(scan_index: usize) -> usize {
+    if scan_index <= TX4X4_SAMPLES / 8 {
+        0
+    } else if scan_index <= TX4X4_SAMPLES / 4 {
+        1
+    } else {
+        2
+    }
+}
+
+fn idtx_upper_levels_context(levels: &[u32; TX4X4_SAMPLES], pos: usize) -> usize {
+    let mag = idtx_left_level(levels, pos).min(3) + idtx_above_level(levels, pos).min(3);
+    mag.min(6) as usize
+}
+
+fn idtx_br_context(levels: &[u32; TX4X4_SAMPLES], pos: usize) -> usize {
+    let mag = idtx_left_level(levels, pos).min(5) + idtx_above_level(levels, pos).min(5);
+    mag.min(6) as usize
+}
+
+fn idtx_sign_context(
+    levels: &[u32; TX4X4_SAMPLES],
+    coefficients: &[i32; TX4X4_SAMPLES],
+    pos: usize,
+) -> usize {
+    let mut sign_sum = 0i32;
+    if let Some(left) = idtx_left_pos(pos).filter(|&left| levels[left] != 0) {
+        sign_sum += idtx_sign_value(coefficients[left]);
+    }
+    if let Some(above) = idtx_above_pos(pos).filter(|&above| levels[above] != 0) {
+        sign_sum += idtx_sign_value(coefficients[above]);
+    }
+    if let Some(above_left) = idtx_above_left_pos(pos).filter(|&above_left| levels[above_left] != 0)
+    {
+        sign_sum += idtx_sign_value(coefficients[above_left]);
+    }
+    let mut ctx = if sign_sum > 2 {
+        5
+    } else if sign_sum < -2 {
+        6
+    } else if sign_sum > 0 {
+        1
+    } else if sign_sum < 0 {
+        2
+    } else {
+        0
+    };
+    if levels[pos] > 3 && ctx != 0 {
+        ctx += 2;
+    }
+    ctx
+}
+
+fn idtx_sign_value(coefficient: i32) -> i32 {
+    if coefficient < 0 {
+        -1
+    } else {
+        1
+    }
+}
+
+fn idtx_left_level(levels: &[u32; TX4X4_SAMPLES], pos: usize) -> u32 {
+    idtx_left_pos(pos).map_or(0, |left| levels[left].min(127))
+}
+
+fn idtx_above_level(levels: &[u32; TX4X4_SAMPLES], pos: usize) -> u32 {
+    idtx_above_pos(pos).map_or(0, |above| levels[above].min(127))
+}
+
+fn idtx_left_pos(pos: usize) -> Option<usize> {
+    if pos % TX4X4_SIZE != 0 {
+        Some(pos - 1)
+    } else {
+        None
+    }
+}
+
+fn idtx_above_pos(pos: usize) -> Option<usize> {
+    if pos >= TX4X4_SIZE {
+        Some(pos - TX4X4_SIZE)
+    } else {
+        None
+    }
+}
+
+fn idtx_above_left_pos(pos: usize) -> Option<usize> {
+    if pos % TX4X4_SIZE != 0 && pos >= TX4X4_SIZE {
+        Some(pos - TX4X4_SIZE - 1)
+    } else {
+        None
+    }
+}
+
 fn tx4x4_level_at(
     levels: &[u32; TX4X4_SAMPLES],
     pos: usize,
@@ -5575,15 +6152,49 @@ fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
     writer.write_symbol(name, 0, &mut cdf, 2, false);
 }
 
-fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+fn write_y_fsc_txb_all_zero(writer: &mut Av2EntropyWriter) {
+    let mut cdf = DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF;
+    writer.write_symbol(
+        "tile.coeff.y.txb_all_zero_fsc_tx4x4_ctx9",
+        1,
+        &mut cdf,
+        2,
+        false,
+    );
+}
+
+fn write_y_fsc_txb_nonzero(writer: &mut Av2EntropyWriter) {
+    let mut cdf = DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF;
+    writer.write_symbol(
+        "tile.coeff.y.txb_nonzero_fsc_tx4x4_ctx9",
+        0,
+        &mut cdf,
+        2,
+        false,
+    );
+}
+
+fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
     let (name, mut cdf) = match skip_ctx {
+        6 if use_fsc => (
+            "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx6",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF,
+        ),
         6 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx6",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF,
         ),
+        7 if use_fsc => (
+            "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx7",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF,
+        ),
         7 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx7",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF,
+        ),
+        8 if use_fsc => (
+            "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx8",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
         ),
         8 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx8",
@@ -5649,15 +6260,27 @@ fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
     writer.write_symbol(name, 0, &mut cdf, 2, false);
 }
 
-fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
     let (name, mut cdf) = match skip_ctx {
+        6 if use_fsc => (
+            "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx6",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF,
+        ),
         6 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx6",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF,
         ),
+        7 if use_fsc => (
+            "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx7",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF,
+        ),
         7 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx7",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF,
+        ),
+        8 if use_fsc => (
+            "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx8",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
         ),
         8 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx8",
@@ -5997,6 +6620,7 @@ mod tests {
                         mode: Av2LumaIntraMode::Dc,
                         use_dpcm_y: false,
                         dpcm_horz: false,
+                        use_fsc: false,
                     }
             })
             .count();

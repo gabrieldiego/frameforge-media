@@ -121,9 +121,9 @@ impl Av2Black444MvpProfile {
             def_max_bvp_drl_bits_minus_min: 0,
             allow_frame_max_bvp_drl_bits: false,
             enable_bawp: false,
-            enable_fsc: false,
+            enable_fsc: true,
             // AVM read_sequence_transform_quant_entropy_group_tool_flags()
-            // sets IDTX from this bit only when FSC is disabled.
+            // derives IDTX intra from FSC when FSC is enabled.
             enable_idtx_intra: true,
             enable_chroma_dctonly: false,
             enable_cctx: false,
@@ -1706,7 +1706,7 @@ mod tests {
 
         assert_eq!(
             payload.bytes,
-            vec![0x92, 0x06, 0x95, 0x7f, 0xfc, 0x00, 0x01, 0x08, 0x06, 0xe0, 0x22]
+            vec![0x92, 0x06, 0x95, 0x7f, 0xfc, 0x00, 0x01, 0x10, 0x0d, 0xc0, 0x44,]
         );
         assert_has_field(
             &payload,
@@ -1726,15 +1726,15 @@ mod tests {
             &payload,
             "sequence_transform.base_uv_ac_delta_q_minus_min",
             Av2SyntaxCode::Literal,
-            70,
+            69,
             5,
         );
         assert_has_field(
             &payload,
             "trailing_bits",
             Av2SyntaxCode::TrailingBits,
-            86,
-            2,
+            85,
+            3,
         );
     }
 
@@ -1908,8 +1908,8 @@ mod tests {
         let trace = av2_mvp_444_trace_jsonl_for_frame(&input, request)
             .expect("AV2 trace should be emitted");
         assert!(
-            trace.contains("tile.coeff.y.txb_nonzero_tx4x4_ctx"),
-            "over-limit luma palette blocks must emit lossless luma coefficient residuals"
+            trace.contains("tile.coeff.y.idtx_base"),
+            "over-limit luma palette blocks must emit lossless FSC luma coefficient residuals"
         );
         assert!(recon[y_plane_len..].iter().all(|&sample| sample == 0));
     }
