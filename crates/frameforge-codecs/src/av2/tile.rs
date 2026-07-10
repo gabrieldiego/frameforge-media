@@ -22,9 +22,10 @@ const LOSSLESS_V_PRED_ABOVE_EDGE: u8 = 127;
 const BLACK_LOSSLESS_DC_LEVEL: u16 = 512;
 const NONZERO_NEGATIVE_DC_ENTROPY_CONTEXT: u8 = 15;
 const NONZERO_POSITIVE_DC_ENTROPY_CONTEXT: u8 = 23;
-// Merge only palette regions whose child 8x8 blocks share the same luma and
-// chroma mode decisions; local IBC sees merged regions as intra leaves.
-const AV2_ENABLE_LUMA_PALETTE_REGION_MERGE: bool = true;
+// Region merging saves partition syntax, but the current merge test does not
+// estimate the larger leaf's palette-map and residual cost. Keep it disabled
+// for lossless screenshot content until merge decisions are rate modeled.
+const AV2_ENABLE_LUMA_PALETTE_REGION_MERGE: bool = false;
 
 const fn avm_cdf2(a0: u16, p0: i16, p1: i16, p2: i16) -> [u16; 6] {
     [

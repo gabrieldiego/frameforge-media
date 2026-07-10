@@ -5,11 +5,12 @@ use std::cmp::Reverse;
 pub(crate) const AV2_LUMA_PALETTE_MIN_COLORS: usize = 2;
 pub(crate) const AV2_LUMA_PALETTE_MAX_COLORS: usize = 8;
 pub(crate) const AV2_LUMA_PALETTE_BLOCK_SIZE: usize = 8;
+const AV2_LUMA_PALETTE_SOFT_MAX_COLORS: usize = 6;
 const AV2_LUMA_INTRA_MODE_SWITCH_SAD_MARGIN: usize = 64;
 const AV2_LUMA_DPCM_NONZERO_COST: usize = 124;
 const AV2_LUMA_DPCM_LEVEL_SCALE: usize = 20000;
 const AV2_LUMA_DPCM_SCORE_MARGIN: usize = 1024;
-const AV2_LUMA_DPCM_PALETTE_SYNTAX_BONUS: usize = 4096;
+const AV2_LUMA_DPCM_PALETTE_SYNTAX_BONUS: usize = 3072;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 124;
 const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 20000;
 const AV2_ENABLE_LUMA_DPCM_444: bool = true;
@@ -146,9 +147,10 @@ impl Av2LumaPalette444 {
         let mut intra_smooth_v_score = 0usize;
         let mut intra_smooth_h_score = 0usize;
         let mut intra_paeth_score = 0usize;
-        // Directional chroma predictors are legal here even after neighboring
-        // smooth modes; suppressing them only narrows the lossless mode search.
-        let directional_allowed = true;
+        // The local coefficient proxy currently over-selects directional
+        // chroma for screenshot content. Keep the search to basic, smooth, and
+        // Paeth families until the mode cost model includes syntax context.
+        let directional_allowed = false;
         for plane in [&self.u_plane, &self.v_plane] {
             for txb_y in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
                 for txb_x in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
@@ -1473,11 +1475,12 @@ fn build_luma_palette_block(
     }
 
     let unique_colors = counts.iter().filter(|&&count| count != 0).count();
-    let target_colors =
-        unique_colors.clamp(AV2_LUMA_PALETTE_MIN_COLORS, AV2_LUMA_PALETTE_MAX_COLORS);
+    let target_colors = unique_colors
+        .clamp(AV2_LUMA_PALETTE_MIN_COLORS, AV2_LUMA_PALETTE_MAX_COLORS)
+        .min(AV2_LUMA_PALETTE_SOFT_MAX_COLORS);
 
-    let mut colors = if unique_colors > AV2_LUMA_PALETTE_MAX_COLORS {
-        quantized_luma_palette_values(&counts, &first_positions, AV2_LUMA_PALETTE_MAX_COLORS)
+    let mut colors = if unique_colors > target_colors {
+        quantized_luma_palette_values(&counts, &first_positions, target_colors)
     } else {
         collected
     };
