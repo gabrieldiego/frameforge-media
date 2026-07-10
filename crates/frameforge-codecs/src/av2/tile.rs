@@ -127,93 +127,100 @@ const fn avm_cdf7(
     ]
 }
 
-const fn avm_cdf2_padded(a0: u16) -> [u16; 12] {
-    [AVM_CDF_PROB_TOP - a0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+const fn avm_cdf2_padded(a0: u16, p0: i16, p1: i16, p2: i16) -> [u16; 12] {
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[3] = (p0 + 2) as u16;
+    cdf[4] = (p1 + 3) as u16;
+    cdf[5] = (p2 + 4) as u16;
+    cdf
 }
 
-const fn avm_cdf3_padded(a0: u16, a1: u16) -> [u16; 12] {
-    [
-        AVM_CDF_PROB_TOP - a0,
-        AVM_CDF_PROB_TOP - a1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+const fn avm_cdf3_padded(a0: u16, a1: u16, p0: i16, p1: i16, p2: i16) -> [u16; 12] {
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[1] = AVM_CDF_PROB_TOP - a1;
+    cdf[4] = (p0 + 2) as u16;
+    cdf[5] = (p1 + 3) as u16;
+    cdf[6] = (p2 + 4) as u16;
+    cdf
 }
 
-const fn avm_cdf4_padded(a0: u16, a1: u16, a2: u16) -> [u16; 12] {
-    [
-        AVM_CDF_PROB_TOP - a0,
-        AVM_CDF_PROB_TOP - a1,
-        AVM_CDF_PROB_TOP - a2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+const fn avm_cdf4_padded(a0: u16, a1: u16, a2: u16, p0: i16, p1: i16, p2: i16) -> [u16; 12] {
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[1] = AVM_CDF_PROB_TOP - a1;
+    cdf[2] = AVM_CDF_PROB_TOP - a2;
+    cdf[5] = (p0 + 3) as u16;
+    cdf[6] = (p1 + 4) as u16;
+    cdf[7] = (p2 + 5) as u16;
+    cdf
 }
 
-const fn avm_cdf5_padded(a0: u16, a1: u16, a2: u16, a3: u16) -> [u16; 12] {
-    [
-        AVM_CDF_PROB_TOP - a0,
-        AVM_CDF_PROB_TOP - a1,
-        AVM_CDF_PROB_TOP - a2,
-        AVM_CDF_PROB_TOP - a3,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+const fn avm_cdf5_padded(
+    a0: u16,
+    a1: u16,
+    a2: u16,
+    a3: u16,
+    p0: i16,
+    p1: i16,
+    p2: i16,
+) -> [u16; 12] {
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[1] = AVM_CDF_PROB_TOP - a1;
+    cdf[2] = AVM_CDF_PROB_TOP - a2;
+    cdf[3] = AVM_CDF_PROB_TOP - a3;
+    cdf[6] = (p0 + 3) as u16;
+    cdf[7] = (p1 + 4) as u16;
+    cdf[8] = (p2 + 5) as u16;
+    cdf
 }
 
-const fn avm_cdf6_padded(a0: u16, a1: u16, a2: u16, a3: u16, a4: u16) -> [u16; 12] {
-    [
-        AVM_CDF_PROB_TOP - a0,
-        AVM_CDF_PROB_TOP - a1,
-        AVM_CDF_PROB_TOP - a2,
-        AVM_CDF_PROB_TOP - a3,
-        AVM_CDF_PROB_TOP - a4,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+const fn avm_cdf6_padded(
+    a0: u16,
+    a1: u16,
+    a2: u16,
+    a3: u16,
+    a4: u16,
+    p0: i16,
+    p1: i16,
+    p2: i16,
+) -> [u16; 12] {
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[1] = AVM_CDF_PROB_TOP - a1;
+    cdf[2] = AVM_CDF_PROB_TOP - a2;
+    cdf[3] = AVM_CDF_PROB_TOP - a3;
+    cdf[4] = AVM_CDF_PROB_TOP - a4;
+    cdf[7] = (p0 + 3) as u16;
+    cdf[8] = (p1 + 4) as u16;
+    cdf[9] = (p2 + 5) as u16;
+    cdf
 }
 
-const fn avm_cdf7_padded(a0: u16, a1: u16, a2: u16, a3: u16, a4: u16, a5: u16) -> [u16; 12] {
-    [
-        AVM_CDF_PROB_TOP - a0,
-        AVM_CDF_PROB_TOP - a1,
-        AVM_CDF_PROB_TOP - a2,
-        AVM_CDF_PROB_TOP - a3,
-        AVM_CDF_PROB_TOP - a4,
-        AVM_CDF_PROB_TOP - a5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+const fn avm_cdf7_padded(
+    a0: u16,
+    a1: u16,
+    a2: u16,
+    a3: u16,
+    a4: u16,
+    a5: u16,
+    p0: i16,
+    p1: i16,
+    p2: i16,
+) -> [u16; 12] {
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[1] = AVM_CDF_PROB_TOP - a1;
+    cdf[2] = AVM_CDF_PROB_TOP - a2;
+    cdf[3] = AVM_CDF_PROB_TOP - a3;
+    cdf[4] = AVM_CDF_PROB_TOP - a4;
+    cdf[5] = AVM_CDF_PROB_TOP - a5;
+    cdf[8] = (p0 + 3) as u16;
+    cdf[9] = (p1 + 4) as u16;
+    cdf[10] = (p2 + 5) as u16;
+    cdf
 }
 
 const fn avm_cdf8_padded(
@@ -224,21 +231,22 @@ const fn avm_cdf8_padded(
     a4: u16,
     a5: u16,
     a6: u16,
+    p0: i16,
+    p1: i16,
+    p2: i16,
 ) -> [u16; 12] {
-    [
-        AVM_CDF_PROB_TOP - a0,
-        AVM_CDF_PROB_TOP - a1,
-        AVM_CDF_PROB_TOP - a2,
-        AVM_CDF_PROB_TOP - a3,
-        AVM_CDF_PROB_TOP - a4,
-        AVM_CDF_PROB_TOP - a5,
-        AVM_CDF_PROB_TOP - a6,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+    let mut cdf = [0; 12];
+    cdf[0] = AVM_CDF_PROB_TOP - a0;
+    cdf[1] = AVM_CDF_PROB_TOP - a1;
+    cdf[2] = AVM_CDF_PROB_TOP - a2;
+    cdf[3] = AVM_CDF_PROB_TOP - a3;
+    cdf[4] = AVM_CDF_PROB_TOP - a4;
+    cdf[5] = AVM_CDF_PROB_TOP - a5;
+    cdf[6] = AVM_CDF_PROB_TOP - a6;
+    cdf[9] = (p0 + 3) as u16;
+    cdf[10] = (p1 + 4) as u16;
+    cdf[11] = (p2 + 5) as u16;
+    cdf
 }
 
 const DEFAULT_DPCM_CDF: [u16; 6] = [16384, 0, 0, 2, 3, 4];
@@ -491,9 +499,9 @@ const DEFAULT_Y_MODE_IDX_CDFS: [[u16; 12]; 3] = [
         AVM_CDF_PROB_TOP - 27169,
         0,
         0,
-        4, // AVM_PARA8(0, 0, 0)
+        3, // AVM_PARA8(0, 0, 0)
         4,
-        4,
+        5,
     ],
     [
         AVM_CDF_PROB_TOP - 5636,
@@ -505,9 +513,9 @@ const DEFAULT_Y_MODE_IDX_CDFS: [[u16; 12]; 3] = [
         AVM_CDF_PROB_TOP - 25607,
         0,
         0,
-        4, // AVM_PARA8(0, 0, 0)
+        3, // AVM_PARA8(0, 0, 0)
         4,
-        4,
+        5,
     ],
 ];
 const DEFAULT_UV_MODE_CTX0_CDF: [u16; 12] = [
@@ -765,53 +773,53 @@ const DEFAULT_IDENTITY_ROW_CDF_Y: [[u16; 7]; 4] = [
 ];
 const DEFAULT_PALETTE_Y_COLOR_INDEX_CDFS: [[[u16; 12]; 5]; 7] = [
     [
-        avm_cdf2_padded(28140),
-        avm_cdf2_padded(16384),
-        avm_cdf2_padded(8582),
-        avm_cdf2_padded(27413),
-        avm_cdf2_padded(30429),
+        avm_cdf2_padded(28140, 1, 1, 0),
+        avm_cdf2_padded(16384, 0, 0, 0),
+        avm_cdf2_padded(8582, 0, -1, -1),
+        avm_cdf2_padded(27413, -1, -1, -2),
+        avm_cdf2_padded(30429, 1, 1, 1),
     ],
     [
-        avm_cdf3_padded(25350, 29026),
-        avm_cdf3_padded(11363, 25273),
-        avm_cdf3_padded(6841, 28579),
-        avm_cdf3_padded(21350, 26012),
-        avm_cdf3_padded(30573, 31646),
+        avm_cdf3_padded(25350, 29026, 1, 1, 0),
+        avm_cdf3_padded(11363, 25273, 0, -1, -2),
+        avm_cdf3_padded(6841, 28579, 0, 0, -1),
+        avm_cdf3_padded(21350, 26012, 0, -1, -1),
+        avm_cdf3_padded(30573, 31646, 1, 1, 1),
     ],
     [
-        avm_cdf4_padded(23706, 26962, 29060),
-        avm_cdf4_padded(9976, 22516, 27382),
-        avm_cdf4_padded(6691, 25460, 29234),
-        avm_cdf4_padded(18909, 23925, 28403),
-        avm_cdf4_padded(30308, 31076, 31818),
+        avm_cdf4_padded(23706, 26962, 29060, 0, 0, 0),
+        avm_cdf4_padded(9976, 22516, 27382, 0, 0, -1),
+        avm_cdf4_padded(6691, 25460, 29234, 0, -1, -1),
+        avm_cdf4_padded(18909, 23925, 28403, -1, -1, -1),
+        avm_cdf4_padded(30308, 31076, 31818, 1, 1, 1),
     ],
     [
-        avm_cdf5_padded(24116, 26957, 28486, 29941),
-        avm_cdf5_padded(9568, 20472, 24294, 28942),
-        avm_cdf5_padded(5706, 25243, 28040, 30406),
-        avm_cdf5_padded(20105, 22982, 27024, 28911),
-        avm_cdf5_padded(30897, 31342, 31766, 32199),
+        avm_cdf5_padded(24116, 26957, 28486, 29941, 0, 0, 0),
+        avm_cdf5_padded(9568, 20472, 24294, 28942, 1, -1, -1),
+        avm_cdf5_padded(5706, 25243, 28040, 30406, 1, 0, -1),
+        avm_cdf5_padded(20105, 22982, 27024, 28911, -1, -1, -1),
+        avm_cdf5_padded(30897, 31342, 31766, 32199, 1, 1, 1),
     ],
     [
-        avm_cdf6_padded(20824, 24227, 25926, 27459, 29266),
-        avm_cdf6_padded(8141, 18989, 21599, 26182, 28576),
-        avm_cdf6_padded(5252, 24340, 26450, 28438, 30625),
-        avm_cdf6_padded(19519, 22695, 25587, 26972, 28423),
-        avm_cdf6_padded(30383, 30890, 31247, 31653, 32150),
+        avm_cdf6_padded(20824, 24227, 25926, 27459, 29266, 1, 0, 0),
+        avm_cdf6_padded(8141, 18989, 21599, 26182, 28576, 1, 0, 0),
+        avm_cdf6_padded(5252, 24340, 26450, 28438, 30625, 1, 0, 0),
+        avm_cdf6_padded(19519, 22695, 25587, 26972, 28423, 0, -1, -1),
+        avm_cdf6_padded(30383, 30890, 31247, 31653, 32150, 1, 0, 1),
     ],
     [
-        avm_cdf7_padded(21628, 24512, 25873, 27054, 28131, 29539),
-        avm_cdf7_padded(8028, 18264, 20613, 25424, 27112, 28906),
-        avm_cdf7_padded(6489, 22242, 24461, 26394, 28350, 30510),
-        avm_cdf7_padded(22048, 24429, 26990, 27944, 28417, 29574),
-        avm_cdf7_padded(30801, 31205, 31472, 31728, 32005, 32305),
+        avm_cdf7_padded(21628, 24512, 25873, 27054, 28131, 29539, 1, -1, 0),
+        avm_cdf7_padded(8028, 18264, 20613, 25424, 27112, 28906, 1, 1, 0),
+        avm_cdf7_padded(6489, 22242, 24461, 26394, 28350, 30510, 1, 0, 0),
+        avm_cdf7_padded(22048, 24429, 26990, 27944, 28417, 29574, 1, 0, -1),
+        avm_cdf7_padded(30801, 31205, 31472, 31728, 32005, 32305, 1, 1, 1),
     ],
     [
-        avm_cdf8_padded(22471, 25083, 25984, 26893, 27654, 28750, 29903),
-        avm_cdf8_padded(7542, 17057, 19151, 23550, 25459, 27066, 28804),
-        avm_cdf8_padded(7582, 20437, 22728, 24622, 26515, 28579, 30632),
-        avm_cdf8_padded(22102, 24144, 26916, 28151, 28846, 29212, 30153),
-        avm_cdf8_padded(30524, 30887, 31156, 31393, 31626, 31911, 32281),
+        avm_cdf8_padded(22471, 25083, 25984, 26893, 27654, 28750, 29903, 1, 1, 1),
+        avm_cdf8_padded(7542, 17057, 19151, 23550, 25459, 27066, 28804, 1, 1, 0),
+        avm_cdf8_padded(7582, 20437, 22728, 24622, 26515, 28579, 30632, 1, 1, 0),
+        avm_cdf8_padded(22102, 24144, 26916, 28151, 28846, 29212, 30153, 0, 0, 0),
+        avm_cdf8_padded(30524, 30887, 31156, 31393, 31626, 31911, 32281, 1, 1, 1),
     ],
 ];
 
@@ -1623,7 +1631,7 @@ pub(crate) fn av2_black_444_tile_entropy_payload_for_region_with_intrabc(
         None,
         None,
     );
-    let mut writer = Av2EntropyWriter::new();
+    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
     plan.write_entropy(&mut writer, None, None);
     writer.finish()
 }
@@ -1635,7 +1643,7 @@ pub(crate) fn av2_black_tile_entropy_payload_for_region(
 ) -> Av2EntropyPayload {
     let plan =
         Av2Black444TilePlan::for_region(region, profile, chroma_format, false, false, None, None);
-    let mut writer = Av2EntropyWriter::new();
+    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
     plan.write_entropy(&mut writer, None, None);
     writer.finish()
 }
@@ -1656,7 +1664,7 @@ pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region(
         Some(ibc),
         Some(palette),
     );
-    let mut writer = Av2EntropyWriter::new();
+    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
     plan.write_entropy(&mut writer, Some(palette), Some(ibc));
     writer.finish()
 }
@@ -1677,7 +1685,7 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
         None,
         None,
     );
-    let mut writer = Av2EntropyWriter::new();
+    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
     let mut lossy = Av2Lossy420TileState::new(geometry, region, source, recon);
     plan.write_lossy_420_entropy(&mut writer, &mut lossy);
     writer.finish()
@@ -1696,10 +1704,6 @@ impl Av2Black444TilePlan {
         assert!(
             !profile.enable_sdp,
             "AV2 MVP tile plan expects a shared luma/chroma partition tree"
-        );
-        assert!(
-            profile.disable_cdf_update,
-            "AV2 MVP tile plan expects fixed frame-initial CDFs"
         );
         assert!(
             region.width <= MVP_SUPERBLOCK_SIZE && region.height <= MVP_SUPERBLOCK_SIZE,
@@ -3194,9 +3198,12 @@ fn write_intra_luma_mode(
         false,
     );
 
-    let mut mode_idx_cdf = DEFAULT_Y_MODE_IDX_CDFS[usize::from(mode_context.min(2))];
-    writer.write_symbol(
+    let mode_context = mode_context.min(2);
+    let mut mode_idx_cdf = DEFAULT_Y_MODE_IDX_CDFS[usize::from(mode_context)];
+    writer.write_symbol_with_cdf_key(
         mode.symbol_name(),
+        "tile.intra.y_mode_idx",
+        usize::from(mode_context),
         usize::from(mode_index),
         &mut mode_idx_cdf,
         8,
@@ -3247,13 +3254,22 @@ fn write_intra_chroma_mode(
         return;
     }
 
-    let mut uv_mode_cdf = if luma_mode_is_directional(luma_mode) {
+    let uv_mode_context = usize::from(luma_mode_is_directional(luma_mode));
+    let mut uv_mode_cdf = if uv_mode_context != 0 {
         DEFAULT_UV_MODE_CTX1_CDF
     } else {
         DEFAULT_UV_MODE_CTX0_CDF
     };
     let (name, index) = chroma_uv_mode_symbol(luma_mode, chroma_intra_mode);
-    writer.write_symbol(name, index.min(7), &mut uv_mode_cdf, 8, false);
+    writer.write_symbol_with_cdf_key(
+        name,
+        "tile.intra.uv_mode_idx",
+        uv_mode_context,
+        index.min(7),
+        &mut uv_mode_cdf,
+        8,
+        false,
+    );
     if index >= 7 {
         writer.write_literal("tile.intra.uv_mode_idx_ext", (index - 7) as u32, 3);
     }
@@ -3518,8 +3534,9 @@ fn write_luma_palette_color_map(
             prev_identity_row_flag
         };
         let mut cdf = DEFAULT_IDENTITY_ROW_CDF_Y[ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_key(
             "tile.palette.y_identity_row_flag",
+            ctx,
             identity_row_flag,
             &mut cdf,
             3,
@@ -3545,8 +3562,10 @@ fn write_luma_palette_color_map(
                 );
                 let mut color_cdf = DEFAULT_PALETTE_Y_COLOR_INDEX_CDFS
                     [colors - AV2_LUMA_PALETTE_MIN_COLORS][color_ctx];
-                writer.write_symbol(
+                let cdf_key = (colors - AV2_LUMA_PALETTE_MIN_COLORS) * 5 + color_ctx;
+                writer.write_symbol_with_key(
                     "tile.palette.y_color_index",
+                    cdf_key,
                     color_token,
                     &mut color_cdf,
                     colors,
@@ -5821,7 +5840,7 @@ fn write_eob_y(writer: &mut Av2EntropyWriter, eob: usize) {
         let bit = (eob_extra & (1 << eob_shift)) != 0;
         let mut extra_cdf = DEFAULT_EOB_EXTRA_CDF;
         writer.write_symbol(
-            "tile.coeff.y.eob_extra_bit",
+            "tile.coeff.eob_extra_bit",
             usize::from(bit),
             &mut extra_cdf,
             2,
@@ -5843,7 +5862,7 @@ fn write_eob_uv(writer: &mut Av2EntropyWriter, eob: usize) {
         let bit = (eob_extra & (1 << eob_shift)) != 0;
         let mut extra_cdf = DEFAULT_EOB_EXTRA_CDF;
         writer.write_symbol(
-            "tile.coeff.uv.eob_extra_bit",
+            "tile.coeff.eob_extra_bit",
             usize::from(bit),
             &mut extra_cdf,
             2,
@@ -6420,7 +6439,15 @@ fn write_y_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 luma TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol(name, 1, &mut cdf, 2, false);
+    writer.write_symbol_with_cdf_key(
+        name,
+        "tile.coeff.y.txb_skip_tx4x4",
+        usize::from(skip_ctx),
+        1,
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
@@ -6447,13 +6474,23 @@ fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 luma TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol(name, 0, &mut cdf, 2, false);
+    writer.write_symbol_with_cdf_key(
+        name,
+        "tile.coeff.y.txb_skip_tx4x4",
+        usize::from(skip_ctx),
+        0,
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_y_fsc_txb_all_zero(writer: &mut Av2EntropyWriter) {
     let mut cdf = DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF;
-    writer.write_symbol(
+    writer.write_symbol_with_cdf_key(
         "tile.coeff.y.txb_all_zero_fsc_tx4x4_ctx9",
+        "tile.coeff.y.txb_skip_fsc_tx4x4",
+        9,
         1,
         &mut cdf,
         2,
@@ -6463,8 +6500,10 @@ fn write_y_fsc_txb_all_zero(writer: &mut Av2EntropyWriter) {
 
 fn write_y_fsc_txb_nonzero(writer: &mut Av2EntropyWriter) {
     let mut cdf = DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF;
-    writer.write_symbol(
+    writer.write_symbol_with_cdf_key(
         "tile.coeff.y.txb_nonzero_fsc_tx4x4_ctx9",
+        "tile.coeff.y.txb_skip_fsc_tx4x4",
+        9,
         0,
         &mut cdf,
         2,
@@ -6473,34 +6512,40 @@ fn write_y_fsc_txb_nonzero(writer: &mut Av2EntropyWriter) {
 }
 
 fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
-    let (name, mut cdf) = match skip_ctx {
+    let (name, cdf_name, mut cdf) = match skip_ctx {
         6 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx6",
+            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF,
         ),
         6 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx6",
+            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF,
         ),
         7 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx7",
+            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF,
         ),
         7 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx7",
+            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF,
         ),
         8 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx8",
+            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
         ),
         8 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx8",
+            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
         ),
         _ => panic!("unsupported AV2 U TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol(name, 0, &mut cdf, 2, false);
+    writer.write_symbol_with_cdf_key(name, cdf_name, usize::from(skip_ctx), 0, &mut cdf, 2, false);
 }
 
 fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
@@ -6555,38 +6600,52 @@ fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 V TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol(name, 0, &mut cdf, 2, false);
+    writer.write_symbol_with_cdf_key(
+        name,
+        "tile.coeff.v.txb_skip_tx4x4",
+        usize::from(skip_ctx),
+        0,
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
-    let (name, mut cdf) = match skip_ctx {
+    let (name, cdf_name, mut cdf) = match skip_ctx {
         6 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx6",
+            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF,
         ),
         6 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx6",
+            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF,
         ),
         7 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx7",
+            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF,
         ),
         7 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx7",
+            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF,
         ),
         8 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx8",
+            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
         ),
         8 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx8",
+            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
         ),
         _ => panic!("unsupported AV2 U TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol(name, 1, &mut cdf, 2, false);
+    writer.write_symbol_with_cdf_key(name, cdf_name, usize::from(skip_ctx), 1, &mut cdf, 2, false);
 }
 
 fn write_v_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
@@ -6641,7 +6700,15 @@ fn write_v_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 V TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol(name, 1, &mut cdf, 2, false);
+    writer.write_symbol_with_cdf_key(
+        name,
+        "tile.coeff.v.txb_skip_tx4x4",
+        usize::from(skip_ctx),
+        1,
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_eob_one_y(writer: &mut Av2EntropyWriter) {

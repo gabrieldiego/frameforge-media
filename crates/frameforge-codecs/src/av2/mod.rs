@@ -127,11 +127,9 @@ impl Av2Black444MvpProfile {
             enable_idtx_intra: true,
             enable_chroma_dctonly: false,
             enable_cctx: false,
-            // AV2 v1.0.0 tile_group_obu() calls init_symbol(tileSize) before
-            // decode_tile(). Disabling CDF updates keeps this first generated
-            // stream independent from traversal history while block syntax is
-            // being ported.
-            disable_cdf_update: true,
+            // AV2 v1.0.0 tile_group_obu() updates CDFs while decode_tile()
+            // parses symbols unless this header flag disables adaptation.
+            disable_cdf_update: false,
         }
     }
 
@@ -1742,7 +1740,7 @@ mod tests {
     fn av2_fixed_black_444_closed_loop_key_labels_header_fields() {
         let payload = av2_black_444_closed_loop_key_header_payload();
 
-        assert_eq!(payload.bytes, vec![0xe6, 0x00, 0x00]);
+        assert_eq!(payload.bytes, vec![0xe2, 0x00, 0x00]);
         assert_has_field(
             &payload,
             "tile_group.first_tile_group_in_frame",
@@ -1766,7 +1764,7 @@ mod tests {
             height: 64,
         });
 
-        assert_eq!(&payload.bytes[..3], &[0xf3, 0x00, 0x00]);
+        assert_eq!(&payload.bytes[..3], &[0xf1, 0x00, 0x00]);
         assert!(payload.bytes.len() > 3);
         let entropy_field = payload
             .fields

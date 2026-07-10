@@ -63,6 +63,8 @@ pub struct Av2EntropyWriter {
     reverse_precarry: Vec<u16>,
     fields: Vec<Av2EntropyField>,
     symbol_bits: usize,
+    adaptive_cdf_updates: bool,
+    adaptive_cdfs: Vec<Av2AdaptiveCdf>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,8 +74,21 @@ struct Av2PrecarryForwardFinalizer {
     max_pending_words: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Av2AdaptiveCdf {
+    name: &'static str,
+    key: usize,
+    nsymbs: usize,
+    initial: Vec<u16>,
+    cdf: Vec<u16>,
+}
+
 impl Av2EntropyWriter {
     pub fn new() -> Self {
+        Self::with_cdf_updates(false)
+    }
+
+    pub fn with_cdf_updates(adaptive_cdf_updates: bool) -> Self {
         Self {
             low: 0,
             rng: 0x8000,
@@ -83,6 +98,8 @@ impl Av2EntropyWriter {
             reverse_precarry: Vec::new(),
             fields: Vec::new(),
             symbol_bits: 0,
+            adaptive_cdf_updates,
+            adaptive_cdfs: Vec::new(),
         }
     }
 
@@ -145,6 +162,31 @@ impl Av2EntropyWriter {
         nsymbs: usize,
         update_cdf: bool,
     ) {
+        self.write_symbol_with_cdf_key(name, name, 0, symbol, cdf, nsymbs, update_cdf);
+    }
+
+    pub fn write_symbol_with_key(
+        &mut self,
+        name: &'static str,
+        cdf_key: usize,
+        symbol: usize,
+        cdf: &mut [u16],
+        nsymbs: usize,
+        update_cdf: bool,
+    ) {
+        self.write_symbol_with_cdf_key(name, name, cdf_key, symbol, cdf, nsymbs, update_cdf);
+    }
+
+    pub fn write_symbol_with_cdf_key(
+        &mut self,
+        name: &'static str,
+        cdf_name: &'static str,
+        cdf_key: usize,
+        symbol: usize,
+        cdf: &mut [u16],
+        nsymbs: usize,
+        update_cdf: bool,
+    ) {
         assert!((2..=16).contains(&nsymbs), "AV2 CDF symbols must be 2..=16");
         assert!(symbol < nsymbs, "symbol out of CDF range");
         assert!(
@@ -154,12 +196,18 @@ impl Av2EntropyWriter {
         // AV2 v1.0.0 Sections 4.11.2 and 8.3: S() reads a symbol using the
         // active CDF selected by the syntax process. Encoder-side this mirrors
         // AVM avm_write_symbol().
+        let mut active_cdf = if self.adaptive_cdf_updates {
+            let index = self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs);
+            self.adaptive_cdfs[index].cdf.clone()
+        } else {
+            cdf.to_vec()
+        };
         let fl = if symbol > 0 {
-            cdf[symbol - 1] as u32
+            active_cdf[symbol - 1] as u32
         } else {
             CDF_PROB_TOP
         };
-        let fh = cdf[symbol] as u32;
+        let fh = active_cdf[symbol] as u32;
         let fl_inc = if fl < CDF_PROB_TOP {
             PROB_INC[nsymbs - 2][symbol.saturating_sub(1)]
         } else {
@@ -179,9 +227,15 @@ impl Av2EntropyWriter {
             fh_inc: Some(fh_inc),
         });
         self.symbol_bits += 1;
-        self.encode_cdf_q15(symbol, cdf, nsymbs);
-        if update_cdf {
-            update_cdf_counts(cdf, symbol, nsymbs);
+        self.encode_cdf_q15(symbol, &active_cdf, nsymbs);
+        if update_cdf || self.adaptive_cdf_updates {
+            update_cdf_counts(&mut active_cdf, symbol, nsymbs);
+            if self.adaptive_cdf_updates {
+                let index = self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs);
+                self.adaptive_cdfs[index].cdf = active_cdf;
+            } else {
+                cdf[..active_cdf.len()].copy_from_slice(&active_cdf);
+            }
         }
     }
 
@@ -233,6 +287,33 @@ impl Av2EntropyWriter {
         );
         let low = (self.low << bits) + (self.rng as u64 * value as u64);
         self.normalize(low, self.rng, bits as i32);
+    }
+
+    fn adaptive_cdf_index(
+        &mut self,
+        name: &'static str,
+        key: usize,
+        cdf: &[u16],
+        nsymbs: usize,
+    ) -> usize {
+        let initial = &cdf[..nsymbs + 4];
+        if let Some(index) = self.adaptive_cdfs.iter().position(|entry| {
+            entry.name == name
+                && entry.key == key
+                && entry.nsymbs == nsymbs
+                && entry.initial == initial
+        }) {
+            return index;
+        }
+
+        self.adaptive_cdfs.push(Av2AdaptiveCdf {
+            name,
+            key,
+            nsymbs,
+            initial: initial.to_vec(),
+            cdf: initial.to_vec(),
+        });
+        self.adaptive_cdfs.len() - 1
     }
 
     fn push_precarry(&mut self, word: u16) {
