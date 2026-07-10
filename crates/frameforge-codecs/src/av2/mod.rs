@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 
-use crate::picture::{Picture, PixelFormat};
+use crate::picture::{ChromaSampling, Picture, PixelFormat, SampleBitDepth};
 
 mod decision;
 pub mod entropy;
@@ -30,7 +30,9 @@ const AV2_SEQUENCE_PROFILE_CONFIGURABLE: u8 = 4;
 const AV2_SEQUENCE_LEVEL_2_0: u8 = 0;
 const AV2_CHROMA_FORMAT_420: u32 = 0;
 const AV2_CHROMA_FORMAT_444: u32 = 2;
+const AV2_BITDEPTH_INDEX_10BIT: u32 = 0;
 const AV2_BITDEPTH_INDEX_8BIT: u32 = 1;
+const AV2_BITDEPTH_INDEX_12BIT: u32 = 2;
 const AV2_DELTA_DCQUANT_MIN: i8 = -23;
 const AV2_MAX_MAX_IBC_DRL_BITS_MINUS_MIN_PLUS_ONE: u16 = 3;
 const AV2_MVP_SUPERBLOCK_SIZE: usize = 64;
@@ -53,14 +55,6 @@ pub(crate) enum Av2ChromaFormat {
 }
 
 impl Av2ChromaFormat {
-    fn from_pixel_format(format: PixelFormat) -> Option<Self> {
-        match format {
-            PixelFormat::Yuv420p8 => Some(Self::Yuv420),
-            PixelFormat::Yuv444p8 => Some(Self::Yuv444),
-            _ => None,
-        }
-    }
-
     fn sequence_header_idc(self) -> u32 {
         match self {
             // AV2 v1.0.0 av2/common/blockd.h: CHROMA_FORMAT_420 is coded as
@@ -71,10 +65,60 @@ impl Av2ChromaFormat {
         }
     }
 
-    fn pixel_format(self) -> PixelFormat {
+    fn chroma_sampling(self) -> ChromaSampling {
         match self {
-            Self::Yuv420 => PixelFormat::Yuv420p8,
-            Self::Yuv444 => PixelFormat::Yuv444p8,
+            Self::Yuv420 => ChromaSampling::Cs420,
+            Self::Yuv444 => ChromaSampling::Cs444,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2StreamFormat {
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+}
+
+impl Av2StreamFormat {
+    fn from_pixel_format(format: PixelFormat) -> Option<Self> {
+        let chroma_format = match format.chroma_sampling()? {
+            ChromaSampling::Cs420 => Av2ChromaFormat::Yuv420,
+            ChromaSampling::Cs444 => Av2ChromaFormat::Yuv444,
+            ChromaSampling::Cs422 | ChromaSampling::Monochrome => return None,
+        };
+        if format.bit_depth().bits() != 8 {
+            return None;
+        }
+        Some(Self {
+            chroma_format,
+            bit_depth: format.bit_depth(),
+        })
+    }
+
+    fn yuv420_8() -> Self {
+        Self {
+            chroma_format: Av2ChromaFormat::Yuv420,
+            bit_depth: SampleBitDepth::new(8).expect("8-bit depth is supported"),
+        }
+    }
+
+    fn yuv444_8() -> Self {
+        Self {
+            chroma_format: Av2ChromaFormat::Yuv444,
+            bit_depth: SampleBitDepth::new(8).expect("8-bit depth is supported"),
+        }
+    }
+
+    fn pixel_format(self) -> PixelFormat {
+        PixelFormat::planar_yuv(self.chroma_format.chroma_sampling(), self.bit_depth)
+    }
+
+    fn bitdepth_lut_index(self) -> u32 {
+        match self.bit_depth.bits() {
+            10 => AV2_BITDEPTH_INDEX_10BIT,
+            8 => AV2_BITDEPTH_INDEX_8BIT,
+            12 => AV2_BITDEPTH_INDEX_12BIT,
+            bits => unreachable!("unsupported AV2 bit depth {bits}"),
         }
     }
 }
@@ -429,8 +473,8 @@ pub fn av2_encode_fixed_black_444_with_frame_metrics(
 ) -> Result<(), String> {
     request.validate()?;
     let geometry = validate_mvp_request(request)?;
-    let chroma_format = Av2ChromaFormat::from_pixel_format(request.format)
-        .expect("validate_mvp_request accepts only supported AV2 chroma formats");
+    let stream_format = Av2StreamFormat::from_pixel_format(request.format)
+        .expect("validate_mvp_request accepts only supported AV2 stream formats");
 
     let expected_len = Picture::expected_len(geometry.width, geometry.height, request.format);
     for frame_index in 0..request.params.frames {
@@ -446,7 +490,7 @@ pub fn av2_encode_fixed_black_444_with_frame_metrics(
         // Concatenating one single-picture OBU sequence per frame avoids
         // hidden single-frame tooling assumptions while inter-frame AV2 syntax
         // is still being built out.
-        if chroma_format == Av2ChromaFormat::Yuv420 {
+        if stream_format.chroma_format == Av2ChromaFormat::Yuv420 {
             // 4:2:0 is a lossy residual path. Even visually black inputs must
             // use the closed-loop model because the signaled chroma predictor
             // can reconstruct edge samples differently from the source.
@@ -499,13 +543,13 @@ pub fn av2_encode_fixed_black_444_with_frame_metrics(
 
 #[cfg(test)]
 fn av2_black_444_bitstream_for_geometry(geometry: Av2VideoGeometry) -> Vec<u8> {
-    av2_black_bitstream_for_geometry(geometry, Av2ChromaFormat::Yuv444)
+    av2_black_bitstream_for_geometry(geometry, Av2StreamFormat::yuv444_8())
 }
 
 #[cfg(test)]
 fn av2_black_bitstream_for_geometry(
     geometry: Av2VideoGeometry,
-    chroma_format: Av2ChromaFormat,
+    stream_format: Av2StreamFormat,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     let profile = Av2Black444MvpProfile::current();
@@ -517,12 +561,12 @@ fn av2_black_bitstream_for_geometry(
     append_obu(
         &mut out,
         Av2ObuType::SequenceHeader,
-        &av2_mvp_sequence_header_payload(geometry, profile, chroma_format),
+        &av2_mvp_sequence_header_payload(geometry, profile, stream_format),
     );
     append_obu(
         &mut out,
         Av2ObuType::ClosedLoopKey,
-        &av2_black_closed_loop_key_payload(geometry, chroma_format),
+        &av2_black_closed_loop_key_payload(geometry, stream_format.chroma_format),
     );
     out
 }
@@ -551,7 +595,7 @@ fn av2_lossy_420_bitstream_and_reconstruction_for_frame(
         &av2_mvp_sequence_header_payload(
             geometry,
             Av2Black444MvpProfile::current(),
-            Av2ChromaFormat::Yuv420,
+            Av2StreamFormat::yuv420_8(),
         ),
     );
     append_obu(
@@ -591,14 +635,14 @@ pub fn av2_mvp_444_trace_jsonl_for_frame(
 ) -> Result<String, String> {
     request.validate()?;
     let geometry = validate_mvp_request(request)?;
-    let chroma_format = Av2ChromaFormat::from_pixel_format(request.format)
-        .expect("validate_mvp_request accepts only supported AV2 chroma formats");
-    if chroma_format == Av2ChromaFormat::Yuv420 {
-        let black = av2_black_reconstruction_for_geometry(geometry, chroma_format);
+    let stream_format = Av2StreamFormat::from_pixel_format(request.format)
+        .expect("validate_mvp_request accepts only supported AV2 stream formats");
+    if stream_format.chroma_format == Av2ChromaFormat::Yuv420 {
+        let black = av2_black_reconstruction_for_geometry(geometry, stream_format);
         if frame != black {
             return av2_lossy_420_trace_jsonl_for_frame(geometry, frame);
         }
-        return av2_black_trace_jsonl_for_chroma_format(geometry, chroma_format);
+        return av2_black_trace_jsonl_for_format(geometry, stream_format);
     }
     let frame_mode = Av2Mvp444FrameMode::from_frame(frame, geometry)?;
     av2_mvp_444_trace_jsonl_for_mode(geometry, &frame_mode)
@@ -610,9 +654,9 @@ pub fn av2_mvp_444_ibc_stats_json_for_frame(
 ) -> Result<String, String> {
     request.validate()?;
     let geometry = validate_mvp_request(request)?;
-    let chroma_format = Av2ChromaFormat::from_pixel_format(request.format)
-        .expect("validate_mvp_request accepts only supported AV2 chroma formats");
-    if chroma_format != Av2ChromaFormat::Yuv444 {
+    let stream_format = Av2StreamFormat::from_pixel_format(request.format)
+        .expect("validate_mvp_request accepts only supported AV2 stream formats");
+    if stream_format.chroma_format != Av2ChromaFormat::Yuv444 {
         return Err(format!(
             "AV2 IBC stats expect yuv444p8 input; got {}",
             request.format
@@ -743,18 +787,20 @@ fn av2_mvp_444_trace_jsonl_for_mode(
     Ok(lines)
 }
 
-fn av2_black_trace_jsonl_for_chroma_format(
+fn av2_black_trace_jsonl_for_format(
     geometry: Av2VideoGeometry,
-    chroma_format: Av2ChromaFormat,
+    stream_format: Av2StreamFormat,
 ) -> Result<String, String> {
     let tile_layout = Av2TileLayout::for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
-    let sequence = av2_mvp_sequence_header_payload(geometry, profile, chroma_format);
+    let sequence = av2_mvp_sequence_header_payload(geometry, profile, stream_format);
     let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
     let entropy: Vec<_> = tile_layout
         .regions
         .iter()
-        .map(|&region| av2_black_tile_entropy_payload_for_region(region, profile, chroma_format))
+        .map(|&region| {
+            av2_black_tile_entropy_payload_for_region(region, profile, stream_format.chroma_format)
+        })
         .collect();
     let mut lines = String::new();
 
@@ -820,7 +866,7 @@ fn av2_lossy_420_trace_jsonl_for_frame(
     }
     let tile_layout = Av2TileLayout::for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
-    let sequence = av2_mvp_sequence_header_payload(geometry, profile, Av2ChromaFormat::Yuv420);
+    let sequence = av2_mvp_sequence_header_payload(geometry, profile, Av2StreamFormat::yuv420_8());
     let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
     let mut reconstruction = vec![0; expected_len];
     let entropy: Vec<_> = tile_layout
@@ -898,19 +944,19 @@ pub fn av2_black_444_reconstruction(geometry: Av2VideoGeometry) -> Option<Vec<u8
 }
 
 fn av2_black_444_reconstruction_for_geometry(geometry: Av2VideoGeometry) -> Vec<u8> {
-    av2_black_reconstruction_for_geometry(geometry, Av2ChromaFormat::Yuv444)
+    av2_black_reconstruction_for_geometry(geometry, Av2StreamFormat::yuv444_8())
 }
 
 fn av2_black_reconstruction_for_geometry(
     geometry: Av2VideoGeometry,
-    chroma_format: Av2ChromaFormat,
+    stream_format: Av2StreamFormat,
 ) -> Vec<u8> {
     vec![
         0;
         Picture::expected_len(
             geometry.width,
             geometry.height,
-            chroma_format.pixel_format(),
+            stream_format.pixel_format(),
         )
     ]
 }
@@ -929,7 +975,7 @@ fn validate_mvp_444_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometr
 }
 
 fn validate_mvp_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometry, String> {
-    if Av2ChromaFormat::from_pixel_format(request.format).is_none() {
+    if Av2StreamFormat::from_pixel_format(request.format).is_none() {
         return Err(
             "AV2 MVP encoder only supports yuv420p8 or yuv444p8 streams at 8-pixel geometry"
                 .to_string(),
@@ -956,13 +1002,13 @@ fn av2_mvp_444_sequence_header_payload(
     geometry: Av2VideoGeometry,
     profile: Av2Black444MvpProfile,
 ) -> Av2SyntaxPayload {
-    av2_mvp_sequence_header_payload(geometry, profile, Av2ChromaFormat::Yuv444)
+    av2_mvp_sequence_header_payload(geometry, profile, Av2StreamFormat::yuv444_8())
 }
 
 fn av2_mvp_sequence_header_payload(
     geometry: Av2VideoGeometry,
     profile: Av2Black444MvpProfile,
-    chroma_format: Av2ChromaFormat,
+    stream_format: Av2StreamFormat,
 ) -> Av2SyntaxPayload {
     let mut writer = Av2SyntaxWriter::new();
     let width_bits = av2_frame_dimension_bits(geometry.width);
@@ -984,9 +1030,12 @@ fn av2_mvp_sequence_header_payload(
     );
     writer.write_uvlc(
         "sequence_header.seq_chroma_format_idc",
-        chroma_format.sequence_header_idc(),
+        stream_format.chroma_format.sequence_header_idc(),
     );
-    writer.write_uvlc("sequence_header.bitdepth_lut_idx", AV2_BITDEPTH_INDEX_8BIT);
+    writer.write_uvlc(
+        "sequence_header.bitdepth_lut_idx",
+        stream_format.bitdepth_lut_index(),
+    );
     writer.write_literal(
         "sequence_header.num_bits_width_minus_1",
         (width_bits - 1) as u64,
@@ -1673,14 +1722,14 @@ mod tests {
         assert_ne!(output, input);
         assert_ne!(
             output,
-            av2_black_bitstream_for_geometry(geometry, Av2ChromaFormat::Yuv420)
+            av2_black_bitstream_for_geometry(geometry, Av2StreamFormat::yuv420_8())
         );
         assert_ne!(recon, input);
         assert_eq!(recon.len(), input.len());
         let sequence = av2_mvp_sequence_header_payload(
             geometry,
             Av2Black444MvpProfile::current(),
-            Av2ChromaFormat::Yuv420,
+            Av2StreamFormat::yuv420_8(),
         );
         assert_has_field(
             &sequence,
@@ -1716,7 +1765,7 @@ mod tests {
 
         assert_ne!(
             output,
-            av2_black_bitstream_for_geometry(geometry, Av2ChromaFormat::Yuv420)
+            av2_black_bitstream_for_geometry(geometry, Av2StreamFormat::yuv420_8())
         );
         assert_ne!(recon, input);
         assert_eq!(recon.len(), input.len());
