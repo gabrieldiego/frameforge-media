@@ -1,5 +1,9 @@
-use super::Av2VideoGeometry;
-use crate::picture::{Picture, PixelFormat};
+use super::{
+    av2_lossless_dc_predictor, av2_lossless_h_pred_left_edge, av2_lossless_v_pred_above_edge,
+    Av2Sample, Av2VideoGeometry,
+};
+use crate::picture::{Picture, PixelFormat, SampleBitDepth};
+use frameforge_core::read_planar_sample;
 use std::cmp::Reverse;
 
 pub(crate) const AV2_LUMA_PALETTE_MIN_COLORS: usize = 2;
@@ -14,9 +18,6 @@ const AV2_LUMA_DPCM_PALETTE_SYNTAX_BONUS: usize = 3072;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 124;
 const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 20000;
 const AV2_ENABLE_LUMA_DPCM_444: bool = true;
-const LOSSLESS_DC_PREDICTOR: u8 = 128;
-const LOSSLESS_H_PRED_LEFT_EDGE: u8 = 129;
-const LOSSLESS_V_PRED_ABOVE_EDGE: u8 = 127;
 const AV2_LUMA_JOINT_MODE_V: usize = 22;
 const AV2_LUMA_JOINT_MODE_H: usize = 50;
 const AV2_LUMA_PALETTE_BLOCK_SAMPLES: usize =
@@ -84,7 +85,7 @@ impl Av2LumaIntraMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av2LumaPaletteBlock444 {
-    colors: Vec<u8>,
+    colors: Vec<Av2Sample>,
     indices: [u8; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
 }
 
@@ -95,10 +96,11 @@ pub(crate) struct Av2LumaPalette444 {
     luma_bdpcm_horz: Vec<Option<bool>>,
     chroma_use_bdpcm: Vec<bool>,
     chroma_intra_modes: Vec<Av2ChromaIntraMode>,
-    y_plane: Vec<u8>,
-    luma_prediction: Vec<u8>,
-    u_plane: Vec<u8>,
-    v_plane: Vec<u8>,
+    bit_depth: SampleBitDepth,
+    y_plane: Vec<Av2Sample>,
+    luma_prediction: Vec<Av2Sample>,
+    u_plane: Vec<Av2Sample>,
+    v_plane: Vec<Av2Sample>,
     reconstruction: Vec<u8>,
     width: usize,
     height: usize,
@@ -107,7 +109,11 @@ pub(crate) struct Av2LumaPalette444 {
 }
 
 impl Av2LumaPalette444 {
-    pub(crate) fn colors_for_block(&self, x0: usize, y0: usize) -> &[u8] {
+    pub(crate) fn bit_depth(&self) -> SampleBitDepth {
+        self.bit_depth
+    }
+
+    pub(crate) fn colors_for_block(&self, x0: usize, y0: usize) -> &[Av2Sample] {
         &self.block_for_origin(x0, y0).colors
     }
 
@@ -526,13 +532,13 @@ impl Av2LumaPalette444 {
         local_y: usize,
         tile_origin_x: usize,
         tile_origin_y: usize,
-    ) -> u8 {
+    ) -> Av2Sample {
         if x0 > tile_origin_x {
             self.y_sample(x0 - 1, y0 + local_y)
         } else if y0 > tile_origin_y {
             self.y_sample(x0, y0 - 1)
         } else {
-            LOSSLESS_H_PRED_LEFT_EDGE
+            self.h_pred_left_edge()
         }
     }
 
@@ -543,13 +549,13 @@ impl Av2LumaPalette444 {
         local_x: usize,
         tile_origin_x: usize,
         tile_origin_y: usize,
-    ) -> u8 {
+    ) -> Av2Sample {
         if y0 > tile_origin_y {
             self.y_sample(x0 + local_x, y0 - 1)
         } else if x0 > tile_origin_x {
             self.y_sample(x0 - 1, y0)
         } else {
-            LOSSLESS_V_PRED_ABOVE_EDGE
+            self.v_pred_above_edge()
         }
     }
 
@@ -564,11 +570,11 @@ impl Av2LumaPalette444 {
         block.indices[local_y * AV2_LUMA_PALETTE_BLOCK_SIZE + local_x]
     }
 
-    pub(crate) fn y_sample(&self, x: usize, y: usize) -> u8 {
+    pub(crate) fn y_sample(&self, x: usize, y: usize) -> Av2Sample {
         self.luma_sample(&self.y_plane, x, y)
     }
 
-    pub(crate) fn luma_prediction_sample(&self, x: usize, y: usize) -> u8 {
+    pub(crate) fn luma_prediction_sample(&self, x: usize, y: usize) -> Av2Sample {
         self.luma_sample(&self.luma_prediction, x, y)
     }
 
@@ -584,25 +590,43 @@ impl Av2LumaPalette444 {
         self.height
     }
 
-    pub(crate) fn u_sample(&self, x: usize, y: usize) -> u8 {
+    pub(crate) fn u_sample(&self, x: usize, y: usize) -> Av2Sample {
         self.chroma_sample(&self.u_plane, x, y)
     }
 
-    pub(crate) fn v_sample(&self, x: usize, y: usize) -> u8 {
+    pub(crate) fn v_sample(&self, x: usize, y: usize) -> Av2Sample {
         self.chroma_sample(&self.v_plane, x, y)
     }
 
-    fn luma_sample(&self, plane: &[u8], x: usize, y: usize) -> u8 {
+    fn luma_sample(&self, plane: &[Av2Sample], x: usize, y: usize) -> Av2Sample {
         assert!(x < self.width && y < self.height);
         plane[y * self.width + x]
     }
 
-    fn chroma_sample(&self, plane: &[u8], x: usize, y: usize) -> u8 {
+    fn chroma_sample(&self, plane: &[Av2Sample], x: usize, y: usize) -> Av2Sample {
         assert!(x < self.width && y < self.height);
         plane[y * self.width + x]
     }
 
-    fn chroma_bdpcm_residuals(&self, plane: &[u8], x0: usize, y0: usize, horz: bool) -> [i32; 16] {
+    fn dc_predictor(&self) -> Av2Sample {
+        av2_lossless_dc_predictor(self.bit_depth)
+    }
+
+    fn h_pred_left_edge(&self) -> Av2Sample {
+        av2_lossless_h_pred_left_edge(self.bit_depth)
+    }
+
+    fn v_pred_above_edge(&self) -> Av2Sample {
+        av2_lossless_v_pred_above_edge(self.bit_depth)
+    }
+
+    fn chroma_bdpcm_residuals(
+        &self,
+        plane: &[Av2Sample],
+        x0: usize,
+        y0: usize,
+        horz: bool,
+    ) -> [i32; 16] {
         let tile_x0 = 0;
         let tile_y0 = 0;
         let mut residual = [0i32; 16];
@@ -619,7 +643,7 @@ impl Av2LumaPalette444 {
                     } else if y0 != tile_y0 {
                         self.chroma_sample(plane, x0, y0 - 1)
                     } else {
-                        LOSSLESS_H_PRED_LEFT_EDGE
+                        self.h_pred_left_edge()
                     }
                 } else if local_y != 0 {
                     self.chroma_sample(plane, x, y - 1)
@@ -628,7 +652,7 @@ impl Av2LumaPalette444 {
                 } else if x0 != tile_x0 {
                     self.chroma_sample(plane, x0 - 1, y0)
                 } else {
-                    LOSSLESS_V_PRED_ABOVE_EDGE
+                    self.v_pred_above_edge()
                 };
                 residual[local_y * 4 + local_x] = sample - i32::from(predictor);
             }
@@ -638,7 +662,7 @@ impl Av2LumaPalette444 {
 
     fn chroma_intra_residuals(
         &self,
-        plane: &[u8],
+        plane: &[Av2Sample],
         txb_x0: usize,
         txb_y0: usize,
         leaf_x0: usize,
@@ -682,7 +706,7 @@ impl Av2LumaPalette444 {
                         } else if txb_y0 != tile_y0 {
                             self.chroma_sample(plane, txb_x0, txb_y0 - 1)
                         } else {
-                            LOSSLESS_H_PRED_LEFT_EDGE
+                            self.h_pred_left_edge()
                         }
                     }
                     Av2ChromaIntraMode::Vertical => {
@@ -691,7 +715,7 @@ impl Av2LumaPalette444 {
                         } else if txb_x0 != tile_x0 {
                             self.chroma_sample(plane, txb_x0 - 1, txb_y0)
                         } else {
-                            LOSSLESS_V_PRED_ABOVE_EDGE
+                            self.v_pred_above_edge()
                         }
                     }
                     Av2ChromaIntraMode::Directional45 => {
@@ -743,7 +767,14 @@ impl Av2LumaPalette444 {
                     | Av2ChromaIntraMode::SmoothHorizontal => {
                         let (above, left) =
                             smooth_edges.expect("smooth predictor edges are precomputed");
-                        av2_highbd_smooth_intra_predictor(mode, above, left, local_x, local_y)
+                        av2_highbd_smooth_intra_predictor(
+                            mode,
+                            above,
+                            left,
+                            local_x,
+                            local_y,
+                            self.bit_depth,
+                        )
                     }
                     Av2ChromaIntraMode::Paeth => {
                         let have_left = txb_x0 != tile_x0;
@@ -753,14 +784,14 @@ impl Av2LumaPalette444 {
                         } else if have_top {
                             self.chroma_sample(plane, txb_x0, txb_y0 - 1)
                         } else {
-                            LOSSLESS_H_PRED_LEFT_EDGE
+                            self.h_pred_left_edge()
                         };
                         let above = if have_top {
                             self.chroma_sample(plane, x, txb_y0 - 1)
                         } else if have_left {
                             self.chroma_sample(plane, txb_x0 - 1, txb_y0)
                         } else {
-                            LOSSLESS_V_PRED_ABOVE_EDGE
+                            self.v_pred_above_edge()
                         };
                         let above_left = if have_left && have_top {
                             self.chroma_sample(plane, txb_x0 - 1, txb_y0 - 1)
@@ -769,7 +800,7 @@ impl Av2LumaPalette444 {
                         } else if have_left {
                             self.chroma_sample(plane, txb_x0 - 1, txb_y0)
                         } else {
-                            LOSSLESS_DC_PREDICTOR
+                            self.dc_predictor()
                         };
                         paeth_predictor(left, above, above_left)
                     }
@@ -782,19 +813,19 @@ impl Av2LumaPalette444 {
 
     fn chroma_d45_above_edge(
         &self,
-        plane: &[u8],
+        plane: &[Av2Sample],
         txb_x0: usize,
         txb_y0: usize,
         leaf_x0: usize,
         leaf_y0: usize,
         leaf_width: usize,
-    ) -> [u8; 8] {
+    ) -> [Av2Sample; 8] {
         let tile_x0 = 0;
         let tile_y0 = 0;
         let tile_right = self.width;
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
-        let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 8];
+        let mut above = [self.v_pred_above_edge(); 8];
         if have_top {
             for index in 0..above.len() {
                 let x = txb_x0 + index;
@@ -812,7 +843,7 @@ impl Av2LumaPalette444 {
 
     fn chroma_d135_edges(
         &self,
-        plane: &[u8],
+        plane: &[Av2Sample],
         txb_x0: usize,
         txb_y0: usize,
         tile_x0: usize,
@@ -820,8 +851,8 @@ impl Av2LumaPalette444 {
     ) -> ChromaD135Edges {
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
-        let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 4];
-        let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 4];
+        let mut above = [self.v_pred_above_edge(); 4];
+        let mut left = [self.h_pred_left_edge(); 4];
         if have_top {
             for local_x in 0..4 {
                 above[local_x] = self.chroma_sample(plane, txb_x0 + local_x, txb_y0 - 1);
@@ -843,7 +874,7 @@ impl Av2LumaPalette444 {
         } else if have_left {
             left[0]
         } else {
-            LOSSLESS_DC_PREDICTOR
+            self.dc_predictor()
         };
         ChromaD135Edges {
             above_left,
@@ -854,19 +885,19 @@ impl Av2LumaPalette444 {
 
     fn chroma_d203_left_edge(
         &self,
-        plane: &[u8],
+        plane: &[Av2Sample],
         txb_x0: usize,
         txb_y0: usize,
         leaf_x0: usize,
         leaf_y0: usize,
         leaf_height: usize,
-    ) -> [u8; 8] {
+    ) -> [Av2Sample; 8] {
         let tile_x0 = 0;
         let tile_y0 = 0;
         let tile_bottom = self.height;
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
-        let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 8];
+        let mut left = [self.h_pred_left_edge(); 8];
         if have_left {
             for index in 0..left.len() {
                 let y = txb_y0 + index;
@@ -888,14 +919,14 @@ impl Av2LumaPalette444 {
 
     fn chroma_smooth_edges(
         &self,
-        plane: &[u8],
+        plane: &[Av2Sample],
         txb_x0: usize,
         txb_y0: usize,
         leaf_x0: usize,
         leaf_y0: usize,
         leaf_width: usize,
         leaf_height: usize,
-    ) -> ([u8; 5], [u8; 5]) {
+    ) -> ([Av2Sample; 5], [Av2Sample; 5]) {
         debug_assert!(txb_x0 >= leaf_x0 && txb_y0 >= leaf_y0);
         debug_assert!(txb_x0 + 4 <= leaf_x0 + leaf_width);
         debug_assert!(txb_y0 + 4 <= leaf_y0 + leaf_height);
@@ -903,8 +934,8 @@ impl Av2LumaPalette444 {
         let tile_y0 = 0;
         let have_top = txb_y0 > tile_y0;
         let have_left = txb_x0 > tile_x0;
-        let mut above = [LOSSLESS_V_PRED_ABOVE_EDGE; 5];
-        let mut left = [LOSSLESS_H_PRED_LEFT_EDGE; 5];
+        let mut above = [self.v_pred_above_edge(); 5];
+        let mut left = [self.h_pred_left_edge(); 5];
 
         if have_top {
             for local_x in 0..4 {
@@ -944,13 +975,13 @@ impl Av2LumaPalette444 {
         (above, left)
     }
 
-    fn chroma_dc_predictor(&self, plane: &[u8], x0: usize, y0: usize) -> u8 {
+    fn chroma_dc_predictor(&self, plane: &[Av2Sample], x0: usize, y0: usize) -> Av2Sample {
         let tile_x0 = 0;
         let tile_y0 = 0;
         let have_left = x0 != tile_x0;
         let have_top = y0 != tile_y0;
         if !have_left && !have_top {
-            return LOSSLESS_DC_PREDICTOR;
+            return self.dc_predictor();
         }
 
         let mut sum = 0u32;
@@ -967,7 +998,7 @@ impl Av2LumaPalette444 {
                 count += 1;
             }
         }
-        ((sum + count / 2) / count) as u8
+        ((sum + count / 2) / count) as Av2Sample
     }
 
     fn block_for_origin(&self, x0: usize, y0: usize) -> &Av2LumaPaletteBlock444 {
@@ -985,7 +1016,7 @@ impl Av2LumaPalette444 {
     }
 }
 
-fn paeth_predictor(left: u8, above: u8, above_left: u8) -> u8 {
+fn paeth_predictor(left: Av2Sample, above: Av2Sample, above_left: Av2Sample) -> Av2Sample {
     let left = i32::from(left);
     let above = i32::from(above);
     let above_left = i32::from(above_left);
@@ -994,29 +1025,30 @@ fn paeth_predictor(left: u8, above: u8, above_left: u8) -> u8 {
     let p_above = (base - above).abs();
     let p_above_left = (base - above_left).abs();
     if p_left <= p_above && p_left <= p_above_left {
-        left as u8
+        left as Av2Sample
     } else if p_above <= p_above_left {
-        above as u8
+        above as Av2Sample
     } else {
-        above_left as u8
+        above_left as Av2Sample
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ChromaD135Edges {
-    above_left: u8,
-    above: [u8; 4],
-    left: [u8; 4],
+    above_left: Av2Sample,
+    above: [Av2Sample; 4],
+    left: [Av2Sample; 4],
 }
 
-fn directional_interpolate(edge: [u8; 8], along: usize, across: usize) -> u8 {
+fn directional_interpolate(edge: [Av2Sample; 8], along: usize, across: usize) -> Av2Sample {
     // AVM dr_intra_derivative[67], used by both D67 and D203.
     const DERIVATIVE_67_203: usize = 24;
     let projected = DERIVATIVE_67_203 * (across + 1);
     let base = (projected >> 6) + along;
     let shift = (projected & 0x3f) >> 1;
-    let value = usize::from(edge[base]) * (32 - shift) + usize::from(edge[base + 1]) * shift;
-    ((value + 16) >> 5) as u8
+    let value =
+        u32::from(edge[base]) * (32 - shift) as u32 + u32::from(edge[base + 1]) * shift as u32;
+    ((value + 16) >> 5) as Av2Sample
 }
 
 fn zone2_directional_predictor(
@@ -1025,7 +1057,7 @@ fn zone2_directional_predictor(
     dy: i32,
     local_x: usize,
     local_y: usize,
-) -> u8 {
+) -> Av2Sample {
     let projected_x = ((local_x as i32) << 6) - ((local_y as i32 + 1) * dx);
     let base_x = projected_x >> 6;
     if base_x >= -1 {
@@ -1048,7 +1080,7 @@ fn zone2_directional_predictor(
     )
 }
 
-fn zone2_above_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
+fn zone2_above_sample(edges: ChromaD135Edges, offset: i32) -> Av2Sample {
     if offset < 0 {
         edges.above_left
     } else {
@@ -1056,7 +1088,7 @@ fn zone2_above_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
     }
 }
 
-fn zone2_left_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
+fn zone2_left_sample(edges: ChromaD135Edges, offset: i32) -> Av2Sample {
     if offset < 0 {
         edges.above_left
     } else {
@@ -1064,18 +1096,19 @@ fn zone2_left_sample(edges: ChromaD135Edges, offset: i32) -> u8 {
     }
 }
 
-fn directional_weighted_sample(first: u8, second: u8, shift: usize) -> u8 {
-    let value = usize::from(first) * (32 - shift) + usize::from(second) * shift;
-    ((value + 16) >> 5) as u8
+fn directional_weighted_sample(first: Av2Sample, second: Av2Sample, shift: usize) -> Av2Sample {
+    let value = u32::from(first) * (32 - shift) as u32 + u32::from(second) * shift as u32;
+    ((value + 16) >> 5) as Av2Sample
 }
 
 pub(crate) fn av2_highbd_smooth_intra_predictor(
     mode: Av2ChromaIntraMode,
-    above: [u8; 5],
-    left: [u8; 5],
+    above: [Av2Sample; 5],
+    left: [Av2Sample; 5],
     local_x: usize,
     local_y: usize,
-) -> u8 {
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
     debug_assert!(local_x < 4 && local_y < 4);
     const BLEND_WEIGHT_MAX: i32 = 32;
     const BLEND_MAX_LOG2: u8 = 5;
@@ -1102,7 +1135,7 @@ pub(crate) fn av2_highbd_smooth_intra_predictor(
         Av2ChromaIntraMode::SmoothHorizontal => pred_h,
         _ => unreachable!("smooth predictor only supports smooth chroma modes"),
     };
-    prediction.clamp(0, 255) as u8
+    prediction.clamp(0, i32::from(bit_depth.max_sample())) as Av2Sample
 }
 
 fn chroma_idtx_coeff_score(residual: &[i32; 16]) -> usize {
@@ -1182,12 +1215,15 @@ fn av2_fwht4x4_for_score(input: &[i32; 16]) -> [i32; 16] {
 pub(crate) fn build_luma_palette_444(
     frame: &[u8],
     geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
 ) -> Result<Av2LumaPalette444, String> {
-    let expected_len =
-        Picture::expected_len(geometry.width, geometry.height, PixelFormat::Yuv444p8);
+    let format = PixelFormat::yuv444(bit_depth.bits())
+        .expect("validated AV2 bit depth must map to a YUV444 pixel format");
+    let expected_len = Picture::expected_len(geometry.width, geometry.height, format);
     if frame.len() != expected_len {
         return Err(format!(
-            "AV2 yuv444p8 input length mismatch: expected {expected_len} byte(s), got {}",
+            "AV2 yuv444p{} input length mismatch: expected {expected_len} byte(s), got {}",
+            bit_depth.bits(),
             frame.len()
         ));
     }
@@ -1201,9 +1237,9 @@ pub(crate) fn build_luma_palette_444(
     }
 
     let plane_len = geometry.width * geometry.height;
-    let y_plane = &frame[..plane_len];
-    let u_plane = &frame[plane_len..2 * plane_len];
-    let v_plane = &frame[2 * plane_len..3 * plane_len];
+    let y_plane = decode_planar_samples(frame, 0, plane_len, bit_depth)?;
+    let u_plane = decode_planar_samples(frame, plane_len, plane_len, bit_depth)?;
+    let v_plane = decode_planar_samples(frame, 2 * plane_len, plane_len, bit_depth)?;
     let blocks_wide = geometry.width / AV2_LUMA_PALETTE_BLOCK_SIZE;
     let blocks_high = geometry.height / AV2_LUMA_PALETTE_BLOCK_SIZE;
     let mut blocks = Vec::with_capacity(blocks_wide * blocks_high);
@@ -1214,7 +1250,7 @@ pub(crate) fn build_luma_palette_444(
         for block_x in 0..blocks_wide {
             let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
             let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
-            let mut samples = [0u8; AV2_LUMA_PALETTE_BLOCK_SAMPLES];
+            let mut samples = [0; AV2_LUMA_PALETTE_BLOCK_SAMPLES];
             for local_y in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
                 for local_x in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
                     let src_index = (y0 + local_y) * geometry.width + x0 + local_x;
@@ -1222,9 +1258,9 @@ pub(crate) fn build_luma_palette_444(
                 }
             }
 
-            let block = build_luma_palette_block(&samples);
+            let block = build_luma_palette_block(&samples, bit_depth);
             let mode = choose_luma_intra_mode(
-                y_plane,
+                &y_plane,
                 geometry.width,
                 x0,
                 y0,
@@ -1239,7 +1275,7 @@ pub(crate) fn build_luma_palette_444(
                 for local_x in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
                     let dst_index = (y0 + local_y) * geometry.width + x0 + local_x;
                     luma_prediction[dst_index] = luma_intra_prediction_sample(
-                        y_plane,
+                        &y_plane,
                         geometry.width,
                         x0,
                         y0,
@@ -1268,10 +1304,11 @@ pub(crate) fn build_luma_palette_444(
         luma_bdpcm_horz: vec![None; block_count],
         chroma_use_bdpcm: vec![true; block_count],
         chroma_intra_modes: vec![Av2ChromaIntraMode::Horizontal; block_count],
-        y_plane: y_plane.to_vec(),
+        bit_depth,
+        y_plane,
         luma_prediction,
-        u_plane: u_plane.to_vec(),
-        v_plane: v_plane.to_vec(),
+        u_plane,
+        v_plane,
         reconstruction,
         width: geometry.width,
         height: geometry.height,
@@ -1311,8 +1348,28 @@ pub(crate) fn build_luma_palette_444(
     Ok(palette)
 }
 
+fn decode_planar_samples(
+    frame: &[u8],
+    sample_start: usize,
+    sample_count: usize,
+    bit_depth: SampleBitDepth,
+) -> Result<Vec<Av2Sample>, String> {
+    let mut samples = Vec::with_capacity(sample_count);
+    for sample_index in sample_start..sample_start + sample_count {
+        let sample = read_planar_sample(frame, sample_index, bit_depth).ok_or_else(|| {
+            format!(
+                "AV2 yuv444p{} frame ended while reading sample {}",
+                bit_depth.bits(),
+                sample_index
+            )
+        })?;
+        samples.push(sample.min(bit_depth.max_sample()));
+    }
+    Ok(samples)
+}
+
 fn choose_luma_intra_mode(
-    y_plane: &[u8],
+    y_plane: &[Av2Sample],
     width: usize,
     x0: usize,
     y0: usize,
@@ -1404,7 +1461,7 @@ pub(crate) fn av2_luma_mode_syntax_for_block(
 }
 
 fn luma_prediction_sad(
-    y_plane: &[u8],
+    y_plane: &[Av2Sample],
     width: usize,
     x0: usize,
     y0: usize,
@@ -1424,7 +1481,7 @@ fn luma_prediction_sad(
 }
 
 fn luma_intra_prediction_sample(
-    y_plane: &[u8],
+    y_plane: &[Av2Sample],
     width: usize,
     x0: usize,
     y0: usize,
@@ -1432,7 +1489,7 @@ fn luma_intra_prediction_sample(
     local_y: usize,
     block: &Av2LumaPaletteBlock444,
     mode: Av2LumaIntraMode,
-) -> u8 {
+) -> Av2Sample {
     match mode {
         Av2LumaIntraMode::Dc => {
             let local_index = local_y * AV2_LUMA_PALETTE_BLOCK_SIZE + local_x;
@@ -1454,11 +1511,13 @@ fn luma_intra_prediction_sample(
 }
 
 fn build_luma_palette_block(
-    samples: &[u8; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+    samples: &[Av2Sample; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+    bit_depth: SampleBitDepth,
 ) -> Av2LumaPaletteBlock444 {
     let mut collected = Vec::with_capacity(AV2_LUMA_PALETTE_MAX_COLORS);
-    let mut counts = [0usize; 256];
-    let mut first_positions = [usize::MAX; 256];
+    let value_count = usize::from(bit_depth.max_sample()) + 1;
+    let mut counts = vec![0usize; value_count];
+    let mut first_positions = vec![usize::MAX; value_count];
     for (sample_index, &sample) in samples.iter().enumerate() {
         let sample_index_by_value = usize::from(sample);
         counts[sample_index_by_value] += 1;
@@ -1484,9 +1543,9 @@ fn build_luma_palette_block(
     } else {
         collected
     };
-    let mut candidate = 0u16;
+    let mut candidate = 0;
     while colors.len() < target_colors {
-        let sample = candidate as u8;
+        let sample = candidate as Av2Sample;
         if !colors.contains(&sample) {
             colors.push(sample);
         }
@@ -1504,8 +1563,8 @@ fn build_luma_palette_block(
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, &color)| {
-                        let delta = i16::from(sample) - i16::from(color);
-                        delta.abs()
+                        let delta = i32::from(sample) - i32::from(color);
+                        delta.unsigned_abs()
                     })
                     .map(|(index, _)| index)
                     .expect("AV2 palette always has at least one color")
@@ -1517,13 +1576,13 @@ fn build_luma_palette_block(
 }
 
 fn quantized_luma_palette_values(
-    counts: &[usize; 256],
-    first_positions: &[usize; 256],
+    counts: &[usize],
+    first_positions: &[usize],
     target_colors: usize,
-) -> Vec<u8> {
-    let values: Vec<u8> = (0u16..=255)
+) -> Vec<Av2Sample> {
+    let values: Vec<Av2Sample> = (0..counts.len())
         .filter(|&value| counts[value as usize] != 0)
-        .map(|value| value as u8)
+        .map(|value| value as Av2Sample)
         .collect();
     if values.len() <= target_colors {
         return values;
@@ -1533,7 +1592,7 @@ fn quantized_luma_palette_values(
     // Minimize weighted absolute luma prediction error over sorted value
     // buckets. Residual coefficients still make reconstruction lossless.
     let mut segment_cost = vec![vec![0usize; n]; n];
-    let mut segment_value = vec![vec![0u8; n]; n];
+    let mut segment_value = vec![vec![0; n]; n];
     for start in 0..n {
         for end in start..n {
             let total_count: usize = values[start..=end]
@@ -1588,7 +1647,7 @@ fn quantized_luma_palette_values(
     colors.dedup();
 
     if colors.len() < target_colors {
-        let mut frequent: Vec<u8> = values;
+        let mut frequent: Vec<Av2Sample> = values;
         frequent.sort_by_key(|&value| {
             let value_index = usize::from(value);
             (

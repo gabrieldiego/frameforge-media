@@ -4,7 +4,9 @@ use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use frameforge_core::{convert_planar_frame_bit_depth, PixelFormat, SampleBitDepth, VERSION};
+use frameforge_core::{
+    convert_planar_frame_bit_depth, ChromaSampling, PixelFormat, SampleBitDepth, VERSION,
+};
 
 use crate::args::{self, Command, EncodeArgs};
 use crate::catalog::{
@@ -659,7 +661,11 @@ fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
 
 fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
     match codec {
-        "av2" => format == PixelFormat::Yuv420p8 || format == PixelFormat::Yuv444p8,
+        "av2" => {
+            format == PixelFormat::Yuv420p8
+                || (format.chroma_sampling() == Some(ChromaSampling::Cs444)
+                    && matches!(format.bit_depth().bits(), 8 | 10 | 12))
+        }
         "vvc" => format.is_yuv() && format.bit_depth().bits() == 8,
         _ => false,
     }
@@ -1060,6 +1066,45 @@ mod tests {
         assert_eq!(converted[0], 0);
         assert_eq!(converted[1], 255);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_preserves_high_bit_depth_yuv444_for_av2_path() {
+        for bits in [10, 12] {
+            let format_name = format!("yuv444p{bits}le");
+            let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
+            let format = PixelFormat::yuv444(bits).unwrap();
+            let input = vec![0xAA; format.frame_len(8, 8).unwrap()];
+            let mut file = File::create(&path).expect("create temp yuv");
+            file.write_all(&input).expect("write temp yuv");
+            drop(file);
+
+            let args = EncodeArgs {
+                input: Some(path.to_string_lossy().to_string()),
+                output: Some("out.obu".to_string()),
+                codec: Some("av2".to_string()),
+                video: Some(args::VideoSpec {
+                    width: 8,
+                    height: 8,
+                    pixel_format: Some(format_name),
+                }),
+                frames: None,
+                ..EncodeArgs::default()
+            };
+
+            let job = encode_job(&args).expect("build encode job");
+            assert_eq!(job.frames, 1);
+            assert_eq!(job.source_format, format);
+            assert_eq!(job.format, format);
+
+            let mut reader = open_job_reader(&job).expect("open reader");
+            let mut forwarded = Vec::new();
+            reader
+                .read_to_end(&mut forwarded)
+                .expect("read forwarded frame");
+            assert_eq!(forwarded, input);
+            let _ = fs::remove_file(path);
+        }
     }
 
     #[test]

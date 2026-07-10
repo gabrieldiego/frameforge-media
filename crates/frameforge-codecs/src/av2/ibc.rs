@@ -3,7 +3,7 @@ use super::tile::{
     av2_luma_palette_leaf_order_for_region, av2_mvp_8x8_leaf_order_for_region, Av2MvpLeafRegion,
 };
 use super::Av2VideoGeometry;
-use crate::picture::{Picture, PixelFormat};
+use crate::picture::{Picture, PixelFormat, SampleBitDepth};
 
 pub(crate) const AV2_IBC_HASH_BLOCK_SIZE: usize = 8;
 const AV2_IBC_TILE_SIZE: usize = 64;
@@ -153,8 +153,12 @@ fn build_local_ibc_444_with_palette(
     geometry: Av2VideoGeometry,
     palette: Option<&Av2LumaPalette444>,
 ) -> Result<Av2LocalIbc444, String> {
-    let expected_len =
-        Picture::expected_len(geometry.width, geometry.height, PixelFormat::Yuv444p8);
+    let bit_depth = palette
+        .map(Av2LumaPalette444::bit_depth)
+        .unwrap_or_else(|| SampleBitDepth::new(8).expect("8-bit depth is supported"));
+    let format = PixelFormat::yuv444(bit_depth.bits())
+        .expect("validated AV2 bit depth must map to a YUV444 pixel format");
+    let expected_len = Picture::expected_len(geometry.width, geometry.height, format);
     if frame.len() != expected_len {
         return Err(format!(
             "AV2 IBC input length mismatch: expected {expected_len} byte(s), got {}",
@@ -184,7 +188,8 @@ fn build_local_ibc_444_with_palette(
         for block_x in 0..blocks_wide {
             let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
             let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
-            blocks[block_y * blocks_wide + block_x].hash = hash_yuv444_8x8(frame, geometry, x0, y0);
+            blocks[block_y * blocks_wide + block_x].hash =
+                hash_yuv444_8x8(frame, geometry, bit_depth, x0, y0);
         }
     }
 
@@ -531,23 +536,37 @@ fn mark_local_ibc_intra_leaf(
     }
 }
 
-fn hash_yuv444_8x8(frame: &[u8], geometry: Av2VideoGeometry, x0: usize, y0: usize) -> u32 {
+fn hash_yuv444_8x8(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
+    x0: usize,
+    y0: usize,
+) -> u32 {
     let plane_len = geometry.width * geometry.height;
+    let bytes_per_sample = bit_depth.bytes_per_sample();
+    let plane_bytes = plane_len * bytes_per_sample;
     let mut hash = AV2_IBC_HASH_OFFSET;
     for plane in 0..3 {
-        let base = plane * plane_len;
+        let base = plane * plane_bytes;
         for local_y in 0..AV2_IBC_HASH_BLOCK_SIZE {
             let row = y0 + local_y;
-            let row_start = base + row * geometry.width + x0;
-            // Keep the hash mixer multiplier-free and packet-shaped so the
-            // AV2 RTL can hash one 8-sample ingress packet with a shallow XOR
-            // network instead of eight serial xorshift rounds.
-            hash = mix_ibc_hash_packet(
-                hash,
-                &frame[row_start..row_start + 8],
-                plane as u32,
-                (local_y * 8) as u32,
-            );
+            let row_start = base + (row * geometry.width + x0) * bytes_per_sample;
+            let row_bytes = AV2_IBC_HASH_BLOCK_SIZE * bytes_per_sample;
+            for (chunk_index, packet) in frame[row_start..row_start + row_bytes]
+                .chunks(8)
+                .enumerate()
+            {
+                // Keep the hash mixer multiplier-free and packet-shaped so
+                // the AV2 RTL can hash one ingress packet with a shallow XOR
+                // network instead of serial xorshift rounds.
+                hash = mix_ibc_hash_packet(
+                    hash,
+                    packet,
+                    plane as u32,
+                    (local_y * row_bytes + chunk_index * 8) as u32,
+                );
+            }
         }
     }
     hash
