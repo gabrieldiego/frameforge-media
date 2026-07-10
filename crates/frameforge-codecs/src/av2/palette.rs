@@ -46,13 +46,6 @@ impl Av2ChromaIntraMode {
     pub(crate) fn is_horizontal(self) -> bool {
         matches!(self, Self::Horizontal)
     }
-
-    fn is_smooth(self) -> bool {
-        matches!(
-            self,
-            Self::Smooth | Self::SmoothVertical | Self::SmoothHorizontal
-        )
-    }
 }
 
 impl Av2LumaIntraMode {
@@ -150,7 +143,9 @@ impl Av2LumaPalette444 {
         let mut intra_smooth_v_score = 0usize;
         let mut intra_smooth_h_score = 0usize;
         let mut intra_paeth_score = 0usize;
-        let directional_allowed = self.chroma_directional_modes_are_unfiltered(x0, y0);
+        // Directional chroma predictors are legal here even after neighboring
+        // smooth modes; suppressing them only narrows the lossless mode search.
+        let directional_allowed = true;
         for plane in [&self.u_plane, &self.v_plane] {
             for txb_y in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
                 for txb_x in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
@@ -650,18 +645,6 @@ impl Av2LumaPalette444 {
             }
         }
         residual
-    }
-
-    fn chroma_directional_modes_are_unfiltered(&self, x0: usize, y0: usize) -> bool {
-        let tile_x0 = (x0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let tile_y0 = (y0 / AV2_LUMA_INTRA_TILE_SIZE) * AV2_LUMA_INTRA_TILE_SIZE;
-        let above_smooth = (y0 != tile_y0)
-            .then(|| self.chroma_intra_mode_for_block(x0, y0 - AV2_LUMA_PALETTE_BLOCK_SIZE))
-            .is_some_and(Av2ChromaIntraMode::is_smooth);
-        let left_smooth = (x0 != tile_x0)
-            .then(|| self.chroma_intra_mode_for_block(x0 - AV2_LUMA_PALETTE_BLOCK_SIZE, y0))
-            .is_some_and(Av2ChromaIntraMode::is_smooth);
-        !above_smooth && !left_smooth
     }
 
     fn chroma_d45_above_edge(
