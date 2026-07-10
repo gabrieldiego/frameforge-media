@@ -1485,11 +1485,8 @@ fn vvc_input_path_accepts_wider_yuv420p_formats() {
         VvcEncodeParams { frames: 1 },
     )
     .unwrap();
-    for (format, bit_depth) in [
-        (PixelFormat::Yuv420p10, 10),
-        (PixelFormat::Yuv420p12, 12),
-        (PixelFormat::Yuv420p16, 16),
-    ] {
+    for bit_depth in 9..=16 {
+        let format = PixelFormat::yuv420(bit_depth).unwrap();
         let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
         assert_eq!(
             vvc_yuv420p_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format).unwrap(),
@@ -1774,7 +1771,7 @@ fn vvc_palette_444_cu_syntax_carries_palette_indices_for_lossless_8x8() {
         geometry,
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs444,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: luma.clone(),
         cb: cb.clone(),
@@ -1822,7 +1819,7 @@ fn vvc_palette_444_cu_syntax_uses_escape_values_after_31_entries() {
         geometry,
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs444,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: luma.clone(),
         cb: cb.clone(),
@@ -1878,7 +1875,7 @@ fn vvc_palette_444_uses_ibc_for_repeated_8x8_block() {
         geometry,
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs444,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: luma.clone(),
         cb: cb.clone(),
@@ -1932,7 +1929,7 @@ fn vvc_palette_444_uses_transform_skip_residual_for_left_ibc_delta() {
         geometry,
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs444,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: luma.clone(),
         cb: cb.clone(),
@@ -1995,7 +1992,7 @@ fn vvc_palette_444_uses_horizontal_bdpcm_for_left_predicted_rows() {
         geometry,
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs444,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: luma.clone(),
         cb: cb.clone(),

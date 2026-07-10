@@ -104,7 +104,7 @@ fn vvc_frame_quantization_uses_leaf_samples_for_coefficients() {
         },
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: luma.to_vec(),
         cb: vec![9; 16],
@@ -127,7 +127,7 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
         },
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: vec![64; 64 * 64],
         cb: vec![128; 32 * 32],
@@ -149,7 +149,7 @@ fn vvc_420_chroma_dc_residual_preserves_decoder_visible_color() {
         },
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: vec![128; 16 * 16],
         cb: vec![64; 8 * 8],
@@ -182,7 +182,7 @@ fn vvc_420_chroma_dc_residual_predicts_from_prior_chroma_leaves() {
         },
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: vec![128; 64 * 48],
         cb: vec![64; 32 * 24],
@@ -222,7 +222,7 @@ fn vvc_420_chroma_ac_residual_preserves_visible_chroma_variation() {
         },
         format: VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
         luma: vec![128; 16 * 16],
         cb,

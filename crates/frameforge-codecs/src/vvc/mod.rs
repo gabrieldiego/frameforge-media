@@ -417,7 +417,7 @@ impl VvcSampledFrame {
             },
             format: VvcPictureFormat {
                 chroma_sampling: ChromaSampling::Cs420,
-                bit_depth: SampleBitDepth::Eight,
+                bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
             },
             luma: vec![color.y; 64],
             cb: vec![color.u; 16],
@@ -438,7 +438,7 @@ impl VvcSampledFrame {
         let chroma_len = self.geometry.luma_samples() / 4;
         let format = VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         };
         if self.format.chroma_sampling == ChromaSampling::Cs420 {
             return Self {
@@ -759,7 +759,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                     geometry,
                     VvcPictureFormat {
                         chroma_sampling: ChromaSampling::Cs420,
-                        bit_depth: SampleBitDepth::Eight,
+                        bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
                     },
                 );
                 for region in vvc_ctu_regions(geometry) {
@@ -1166,7 +1166,7 @@ fn vvc_annex_b(params: VvcEncodeParams, frame: VvcSampledFrame) -> Result<Vec<u8
         quantized,
         VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: SampleBitDepth::Eight,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
         },
     )
 }

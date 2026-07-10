@@ -5,19 +5,10 @@ pub type Result<T> = std::result::Result<T, MediaError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaError {
-    InvalidDimensions {
-        width: usize,
-        height: usize,
-    },
-    IncompatibleFormat {
-        format: &'static str,
-        reason: String,
-    },
+    InvalidDimensions { width: usize, height: usize },
+    IncompatibleFormat { format: String, reason: String },
     LengthOverflow,
-    BufferLength {
-        expected: usize,
-        actual: usize,
-    },
+    BufferLength { expected: usize, actual: usize },
     Message(String),
 }
 

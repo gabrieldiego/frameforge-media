@@ -167,9 +167,14 @@ inferred from the input filename or needs to be overridden. File names imply
 metadata with `*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
 `input_640x360_30_1f_yuv444p8.yuv`. Short 8-bit aliases such as `yuv444p` and
 `yuv420p` are accepted and normalized to `yuv444p8` and `yuv420p8` internally.
+Planar YUV and gray input formats accept checked numeric bit depths from 8
+through 16, for example `yuv420p9le`, `yuv444p12le`, and `gray16le`.
 If a `.yuv` filename has dimensions but no pixel-format token, the CLI assumes
 `yuv420p8`. Encode endpoints must name the codec and output path together, such
 as `--encode av2:output.obu`.
+
+The raw input CLI/API contract is documented in
+[`docs/raw-input-formats.md`](docs/raw-input-formats.md).
 
 ## Repository Layout
 

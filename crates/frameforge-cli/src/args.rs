@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use frameforge_core::PixelFormat;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
@@ -415,45 +417,40 @@ fn find_dimensions(text: &str) -> Result<Option<(u32, u32)>, String> {
 }
 
 fn find_pixel_format(text: &str) -> Result<Option<String>, String> {
-    const TOKENS: &[&str] = &[
-        "yuv420p16le",
-        "yuv420p16",
-        "yuv420p12le",
-        "yuv420p12",
-        "yuv420p10le",
-        "yuv420p10",
-        "yuv420p8",
-        "yuv420p",
-        "yuv422p16le",
-        "yuv422p16",
-        "yuv422p12le",
-        "yuv422p12",
-        "yuv422p10le",
-        "yuv422p10",
-        "yuv422p8",
-        "yuv422p",
-        "yuv444p16le",
-        "yuv444p16",
-        "yuv444p12le",
-        "yuv444p12",
-        "yuv444p10le",
-        "yuv444p10",
-        "yuv444p8",
-        "yuv444p",
-        "rgb24",
-        "i420",
-        "i422",
-        "i444",
-    ];
-    for token in TOKENS {
-        if text.contains(token) {
-            return Ok(Some(normalize_pixel_format(token)?));
+    for token in pixel_format_filename_candidates() {
+        if text.contains(&token) {
+            return Ok(Some(normalize_pixel_format(&token)?));
         }
     }
     if text.ends_with(".yuv") {
         return Ok(Some("yuv420p8".to_string()));
     }
     Ok(None)
+}
+
+fn pixel_format_filename_candidates() -> Vec<String> {
+    let mut tokens = Vec::new();
+    for family in ["yuv420p", "yuv422p", "yuv444p", "gray"] {
+        for bit_depth in (9..=16).rev() {
+            tokens.push(format!("{family}{bit_depth}le"));
+            tokens.push(format!("{family}{bit_depth}"));
+        }
+        tokens.push(format!("{family}8"));
+        if family != "gray" {
+            tokens.push(family.to_string());
+        }
+    }
+    tokens.extend(
+        ["rgb24", "i420", "i422", "i444"]
+            .into_iter()
+            .map(str::to_string),
+    );
+    for chroma_digit in ["0", "2", "4"] {
+        for bit_depth in (9..=16).rev() {
+            tokens.push(format!("i{chroma_digit}{bit_depth:02}"));
+        }
+    }
+    tokens
 }
 
 fn find_frame_count(text: &str) -> Result<Option<u32>, String> {
@@ -559,16 +556,10 @@ fn find_dimensions_span(text: &str) -> Option<(usize, usize)> {
 
 fn normalize_pixel_format(value: &str) -> Result<String, String> {
     let pixel_format = value.trim().to_ascii_lowercase();
-    match pixel_format.as_str() {
-        "" => Err("pixel format must not be empty".to_string()),
-        "i420" => Ok("yuv420p8".to_string()),
-        "i422" => Ok("yuv422p8".to_string()),
-        "i444" => Ok("yuv444p8".to_string()),
-        "yuv420p" => Ok("yuv420p8".to_string()),
-        "yuv422p" => Ok("yuv422p8".to_string()),
-        "yuv444p" => Ok("yuv444p8".to_string()),
-        other => Ok(other.to_string()),
+    if pixel_format.is_empty() {
+        return Err("pixel format must not be empty".to_string());
     }
+    Ok(pixel_format.parse::<PixelFormat>()?.name())
 }
 
 fn stage_name(spec: &str) -> &str {
@@ -682,6 +673,31 @@ mod tests {
         );
         assert_eq!(args.frames, Some(1));
         assert_eq!(args.fps, None);
+    }
+
+    #[test]
+    fn infers_high_bit_depth_format_from_input_filename() {
+        let command = parse_words(&[
+            "ff",
+            "encode",
+            "screen_640x360_1f_yuv444p14le.yuv",
+            "--encode",
+            "av2:out.obu",
+        ])
+        .unwrap();
+
+        let Command::Encode(args) = command else {
+            panic!("expected encode command");
+        };
+        assert_eq!(
+            args.video,
+            Some(VideoSpec {
+                width: 640,
+                height: 360,
+                pixel_format: Some("yuv444p14le".to_string())
+            })
+        );
+        assert_eq!(args.frames, Some(1));
     }
 
     #[test]
@@ -850,6 +866,32 @@ mod tests {
         assert_eq!(args.frames, Some(1));
         assert_eq!(args.codec.as_deref(), Some("av2"));
         assert_eq!(args.output.as_deref(), Some("out.obu"));
+    }
+
+    #[test]
+    fn accepts_numeric_planar_bit_depths_in_video_spec() {
+        let command = parse_words(&[
+            "ff",
+            "encode",
+            "in.yuv",
+            "--video",
+            "16x16:yuv420p9le",
+            "--encode",
+            "av2:out.obu",
+        ])
+        .unwrap();
+
+        let Command::Encode(args) = command else {
+            panic!("expected encode command");
+        };
+        assert_eq!(
+            args.video,
+            Some(VideoSpec {
+                width: 16,
+                height: 16,
+                pixel_format: Some("yuv420p9le".to_string())
+            })
+        );
     }
 
     #[test]

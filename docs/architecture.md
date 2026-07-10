@@ -60,6 +60,14 @@ frames available instead of surfacing an EOF read error from the codec model.
 Source filters must still provide `--frames` because they generate frames
 rather than ending at a file EOF.
 
+Raw planar YUV and gray inputs carry bit depth as checked numeric data rather
+than as one enum variant per depth. The public API shape is documented in
+[`raw-input-formats.md`](raw-input-formats.md): use constructors such as
+`PixelFormat::yuv420(10)` and `PixelFormat::gray(16)`. The CLI currently uses a
+shared bit-depth converter when an input is higher-bit-depth but the selected
+codec path only accepts the same planar layout at 8-bit; this converter does
+not change chroma sampling or color family.
+
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.
 Bare keys imply `true`, for example `--set lossless`. Shared settings such as

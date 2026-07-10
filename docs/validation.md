@@ -41,6 +41,11 @@ reconstruction through `--recon`, checks that non-empty bitstream and
 reconstruction outputs were produced, and prints a markdown summary with output
 size, SHA-256 checksums, reason, and log path.
 
+Manifest `format` values use the same raw input names accepted by the CLI.
+Planar YUV and gray bit depths from 8 through 16 are described in
+[`raw-input-formats.md`](raw-input-formats.md), including the current 8-bit
+fallback used by codec paths that do not yet encode a higher depth natively.
+
 Reference tools are declared by JSON manifests under:
 
 ```text

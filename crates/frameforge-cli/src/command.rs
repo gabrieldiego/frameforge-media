@@ -4,7 +4,7 @@ use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use frameforge_core::{PixelFormat, VERSION};
+use frameforge_core::{convert_planar_frame_bit_depth, PixelFormat, SampleBitDepth, VERSION};
 
 use crate::args::{self, Command, EncodeArgs};
 use crate::catalog::{
@@ -333,9 +333,12 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
         EncodeInput::Path(path) => {
             let file = File::open(path)
                 .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
-            Ok(Box::new(
-                BufReader::new(file).take(selected_input_byte_len(job)?),
-            ))
+            let reader = BufReader::new(file).take(selected_input_byte_len(job)?);
+            if job.source_format == job.format {
+                Ok(Box::new(reader))
+            } else {
+                Ok(Box::new(BitDepthConvertingReader::new(reader, job)?))
+            }
         }
         EncodeInput::Pattern(source) => {
             Ok(Box::new(Cursor::new(generated_pattern_input(job, source)?)))
@@ -344,16 +347,91 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
 }
 
 fn selected_input_byte_len(job: &EncodeJob) -> Result<u64, String> {
-    let frame_len = job.format.frame_len(job.width, job.height).ok_or_else(|| {
-        format!(
-            "frame length overflow for {}x{}:{}",
-            job.width, job.height, job.format
-        )
-    })?;
+    let frame_len = job
+        .source_format
+        .frame_len(job.width, job.height)
+        .ok_or_else(|| {
+            format!(
+                "frame length overflow for {}x{}:{}",
+                job.width, job.height, job.source_format
+            )
+        })?;
     let byte_len = frame_len
         .checked_mul(job.frames)
         .ok_or_else(|| "selected input byte length overflow".to_string())?;
     u64::try_from(byte_len).map_err(|_| "selected input byte length overflows u64".to_string())
+}
+
+struct BitDepthConvertingReader<R> {
+    inner: R,
+    width: usize,
+    height: usize,
+    source_format: PixelFormat,
+    target_format: PixelFormat,
+    source_frame: Vec<u8>,
+    converted_frame: Vec<u8>,
+    converted_offset: usize,
+    frames_remaining: usize,
+}
+
+impl<R: Read> BitDepthConvertingReader<R> {
+    fn new(inner: R, job: &EncodeJob) -> Result<Self, String> {
+        let source_frame_len = job
+            .source_format
+            .frame_len(job.width, job.height)
+            .ok_or_else(|| {
+                format!(
+                    "frame length overflow for {}x{}:{}",
+                    job.width, job.height, job.source_format
+                )
+            })?;
+        Ok(Self {
+            inner,
+            width: job.width,
+            height: job.height,
+            source_format: job.source_format,
+            target_format: job.format,
+            source_frame: vec![0; source_frame_len],
+            converted_frame: Vec::new(),
+            converted_offset: 0,
+            frames_remaining: job.frames,
+        })
+    }
+
+    fn fill_converted_frame(&mut self) -> std::io::Result<bool> {
+        if self.frames_remaining == 0 {
+            return Ok(false);
+        }
+        self.inner.read_exact(&mut self.source_frame)?;
+        self.converted_frame = convert_planar_frame_bit_depth(
+            &self.source_frame,
+            self.width,
+            self.height,
+            self.source_format,
+            self.target_format,
+        )
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+        self.converted_offset = 0;
+        self.frames_remaining -= 1;
+        Ok(true)
+    }
+}
+
+impl<R: Read> Read for BitDepthConvertingReader<R> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.converted_offset >= self.converted_frame.len() && !self.fill_converted_frame()? {
+            return Ok(0);
+        }
+
+        let remaining = &self.converted_frame[self.converted_offset..];
+        let count = remaining.len().min(output.len());
+        output[..count].copy_from_slice(&remaining[..count]);
+        self.converted_offset += count;
+        Ok(count)
+    }
 }
 
 fn input_label(input: &EncodeInput) -> String {
@@ -476,6 +554,7 @@ struct EncodeJob {
     frames: usize,
     width: usize,
     height: usize,
+    source_format: PixelFormat,
     format: PixelFormat,
 }
 
@@ -490,10 +569,16 @@ fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
         input_label(&job.input),
         job.width,
         job.height,
-        job.format,
+        job.source_format,
         job.frames,
         args.fps.as_deref().unwrap_or("unspecified")
     );
+    if job.source_format != job.format {
+        eprintln!(
+            "input-convert: bit_depth {} -> {}",
+            job.source_format, job.format
+        );
+    }
     for filter in &args.filters {
         eprintln!("filter: {filter}");
     }
@@ -529,7 +614,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         .video
         .as_ref()
         .ok_or_else(|| "encode requires --video WxH:pixfmt or filename metadata".to_string())?;
-    let format = video
+    let source_format = video
         .pixel_format
         .as_deref()
         .ok_or_else(|| {
@@ -538,7 +623,11 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         .parse::<PixelFormat>()?;
     let width = video.width as usize;
     let height = video.height as usize;
-    let frames = resolve_frame_count(args, &input, format, width, height)?;
+    let frames = resolve_frame_count(args, &input, source_format, width, height)?;
+    let format = codec_input_format(
+        args.codec.as_deref().expect("parser requires codec"),
+        source_format,
+    );
     Ok(EncodeJob {
         input,
         output,
@@ -546,8 +635,34 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         frames,
         width,
         height,
+        source_format,
         format,
     })
+}
+
+fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
+    if codec_accepts_format(codec, source_format) {
+        return source_format;
+    }
+    let Some(target_depth) = SampleBitDepth::new(8) else {
+        return source_format;
+    };
+    let Some(target_format) = source_format.with_bit_depth(target_depth) else {
+        return source_format;
+    };
+    if source_format.bit_depth().bits() != 8 && codec_accepts_format(codec, target_format) {
+        target_format
+    } else {
+        source_format
+    }
+}
+
+fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
+    match codec {
+        "av2" => format == PixelFormat::Yuv420p8 || format == PixelFormat::Yuv444p8,
+        "vvc" => format.is_yuv() && format.bit_depth().bits() == 8,
+        _ => false,
+    }
 }
 
 fn resolve_frame_count(
@@ -901,6 +1016,52 @@ mod tests {
     }
 
     #[test]
+    fn encode_job_converts_high_bit_depth_planar_input_for_current_av2_path() {
+        let path = temp_yuv_path("one_frame_8x8_yuv420p10le");
+        let samples = PixelFormat::Yuv420p10.frame_len(8, 8).unwrap() / 2;
+        let input = (0..samples)
+            .flat_map(|idx| {
+                let sample = if idx % 2 == 0 { 0u16 } else { 1023u16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p10le".to_string()),
+            }),
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("build encode job");
+        assert_eq!(job.frames, 1);
+        assert_eq!(job.source_format, PixelFormat::Yuv420p10);
+        assert_eq!(job.format, PixelFormat::Yuv420p8);
+
+        let mut reader = open_job_reader(&job).expect("open converting reader");
+        let mut converted = Vec::new();
+        reader
+            .read_to_end(&mut converted)
+            .expect("read converted frame");
+        assert_eq!(
+            converted.len(),
+            PixelFormat::Yuv420p8.frame_len(8, 8).unwrap()
+        );
+        assert_eq!(converted[0], 0);
+        assert_eq!(converted[1], 255);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn open_job_reader_hides_unselected_file_suffix() {
         let path = temp_yuv_path("reader_prefix_8x8");
         let mut file = File::create(&path).expect("create temp yuv");
@@ -915,6 +1076,7 @@ mod tests {
             frames: 1,
             width: 8,
             height: 8,
+            source_format: PixelFormat::Yuv420p8,
             format: PixelFormat::Yuv420p8,
         };
         let mut reader = open_job_reader(&job).expect("open reader");

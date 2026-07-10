@@ -23,6 +23,11 @@ from the Y4M header and strips the Y4M container markers when writing raw
 generated fixtures. Source-file generation currently supports `yuv420p8`,
 `yuv420p10le`, and `yuv444p8`.
 
+Manifest `format` values follow the CLI raw input contract. Planar YUV and gray
+formats use checked numeric bit depths from 8 through 16, such as
+`yuv420p9le`, `yuv444p12le`, and `gray16le`; see
+`docs/raw-input-formats.md` for the CLI and Rust API details.
+
 Supported generated formats:
 
 - `yuv420p8`
