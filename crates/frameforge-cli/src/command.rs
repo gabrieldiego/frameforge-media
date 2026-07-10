@@ -662,9 +662,10 @@ fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
 fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
     match codec {
         "av2" => {
-            format == PixelFormat::Yuv420p8
-                || (format.chroma_sampling() == Some(ChromaSampling::Cs444)
-                    && matches!(format.bit_depth().bits(), 8 | 10 | 12))
+            matches!(
+                format.chroma_sampling(),
+                Some(ChromaSampling::Cs420 | ChromaSampling::Cs444)
+            ) && matches!(format.bit_depth().bits(), 8 | 10)
         }
         "vvc" => format.is_yuv() && format.bit_depth().bits() == 8,
         _ => false,
@@ -1022,55 +1023,54 @@ mod tests {
     }
 
     #[test]
-    fn encode_job_converts_high_bit_depth_planar_input_for_current_av2_path() {
-        let path = temp_yuv_path("one_frame_8x8_yuv420p10le");
-        let yuv420p10 = PixelFormat::yuv420(10).unwrap();
-        let samples = yuv420p10.frame_len(8, 8).unwrap() / 2;
-        let input = (0..samples)
-            .flat_map(|idx| {
-                let sample = if idx % 2 == 0 { 0u16 } else { 1023u16 };
-                sample.to_le_bytes()
-            })
-            .collect::<Vec<_>>();
-        let mut file = File::create(&path).expect("create temp yuv");
-        file.write_all(&input).expect("write temp yuv");
-        drop(file);
+    fn encode_job_preserves_high_bit_depth_yuv420_for_av2_path() {
+        for bits in [10] {
+            let format_name = format!("yuv420p{bits}le");
+            let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
+            let format = PixelFormat::yuv420(bits).unwrap();
+            let samples = format.frame_len(8, 8).unwrap() / format.bytes_per_sample();
+            let max_sample = format.bit_depth().max_sample();
+            let input = (0..samples)
+                .flat_map(|idx| {
+                    let sample = if idx % 2 == 0 { 0u16 } else { max_sample };
+                    sample.to_le_bytes()
+                })
+                .collect::<Vec<_>>();
+            let mut file = File::create(&path).expect("create temp yuv");
+            file.write_all(&input).expect("write temp yuv");
+            drop(file);
 
-        let args = EncodeArgs {
-            input: Some(path.to_string_lossy().to_string()),
-            output: Some("out.obu".to_string()),
-            codec: Some("av2".to_string()),
-            video: Some(args::VideoSpec {
-                width: 8,
-                height: 8,
-                pixel_format: Some("yuv420p10le".to_string()),
-            }),
-            frames: None,
-            ..EncodeArgs::default()
-        };
+            let args = EncodeArgs {
+                input: Some(path.to_string_lossy().to_string()),
+                output: Some("out.obu".to_string()),
+                codec: Some("av2".to_string()),
+                video: Some(args::VideoSpec {
+                    width: 8,
+                    height: 8,
+                    pixel_format: Some(format_name),
+                }),
+                frames: None,
+                ..EncodeArgs::default()
+            };
 
-        let job = encode_job(&args).expect("build encode job");
-        assert_eq!(job.frames, 1);
-        assert_eq!(job.source_format, yuv420p10);
-        assert_eq!(job.format, PixelFormat::Yuv420p8);
+            let job = encode_job(&args).expect("build encode job");
+            assert_eq!(job.frames, 1);
+            assert_eq!(job.source_format, format);
+            assert_eq!(job.format, format);
 
-        let mut reader = open_job_reader(&job).expect("open converting reader");
-        let mut converted = Vec::new();
-        reader
-            .read_to_end(&mut converted)
-            .expect("read converted frame");
-        assert_eq!(
-            converted.len(),
-            PixelFormat::Yuv420p8.frame_len(8, 8).unwrap()
-        );
-        assert_eq!(converted[0], 0);
-        assert_eq!(converted[1], 255);
-        let _ = fs::remove_file(path);
+            let mut reader = open_job_reader(&job).expect("open reader");
+            let mut forwarded = Vec::new();
+            reader
+                .read_to_end(&mut forwarded)
+                .expect("read forwarded frame");
+            assert_eq!(forwarded, input);
+            let _ = fs::remove_file(path);
+        }
     }
 
     #[test]
     fn encode_job_preserves_high_bit_depth_yuv444_for_av2_path() {
-        for bits in [10, 12] {
+        for bits in [10] {
             let format_name = format!("yuv444p{bits}le");
             let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
             let format = PixelFormat::yuv444(bits).unwrap();

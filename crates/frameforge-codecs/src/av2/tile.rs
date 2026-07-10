@@ -11,6 +11,7 @@ use crate::av2::palette::{
     AV2_LUMA_PALETTE_MAX_COLORS, AV2_LUMA_PALETTE_MIN_COLORS,
 };
 use crate::picture::SampleBitDepth;
+use frameforge_core::{read_planar_sample, write_planar_sample};
 
 const MVP_SUPERBLOCK_SIZE: usize = 64;
 const MVP_LEAF_BLOCK_SIZE: usize = AV2_LUMA_PALETTE_BLOCK_SIZE;
@@ -21,7 +22,6 @@ const TX4X4_SAMPLES: usize = TX4X4_SIZE * TX4X4_SIZE;
 const TX4X4_SCAN: [usize; TX4X4_SAMPLES] = [0, 4, 1, 8, 5, 2, 12, 9, 6, 3, 13, 10, 7, 14, 11, 15];
 const AVM_CDF_PROB_TOP: u16 = 32768;
 const LOSSLESS_DC_PREDICTOR: u8 = 128;
-const LOSSLESS_H_PRED_LEFT_EDGE: u8 = 129;
 const BLACK_LOSSLESS_DC_LEVEL: u16 = 512;
 const NONZERO_NEGATIVE_DC_ENTROPY_CONTEXT: u8 = 15;
 const NONZERO_POSITIVE_DC_ENTROPY_CONTEXT: u8 = 23;
@@ -1688,6 +1688,7 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
     source: &[u8],
     recon: &mut [u8],
 ) -> Av2EntropyPayload {
@@ -1701,7 +1702,7 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
         None,
     );
     let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
-    let mut lossy = Av2Lossy420TileState::new(geometry, region, source, recon);
+    let mut lossy = Av2Lossy420TileState::new(geometry, region, bit_depth, source, recon);
     plan.write_lossy_420_entropy(&mut writer, &mut lossy);
     writer.finish()
 }
@@ -4009,6 +4010,7 @@ fn chroma_tx4x4_span(
 struct Av2Lossy420TileState<'a> {
     geometry: Av2VideoGeometry,
     region: Av2TileRegion,
+    bit_depth: SampleBitDepth,
     source: &'a [u8],
     recon: &'a mut [u8],
     y_len: usize,
@@ -4021,6 +4023,7 @@ impl<'a> Av2Lossy420TileState<'a> {
     fn new(
         geometry: Av2VideoGeometry,
         region: Av2TileRegion,
+        bit_depth: SampleBitDepth,
         source: &'a [u8],
         recon: &'a mut [u8],
     ) -> Self {
@@ -4028,9 +4031,10 @@ impl<'a> Av2Lossy420TileState<'a> {
         let c_width = geometry.width / 2;
         let c_height = geometry.height / 2;
         let c_len = c_width * c_height;
+        let expected_len = (y_len + 2 * c_len) * bit_depth.bytes_per_sample();
         assert_eq!(
             source.len(),
-            y_len + 2 * c_len,
+            expected_len,
             "AV2 4:2:0 residual source length must match geometry"
         );
         assert_eq!(
@@ -4041,6 +4045,7 @@ impl<'a> Av2Lossy420TileState<'a> {
         Self {
             geometry,
             region,
+            bit_depth,
             source,
             recon,
             y_len,
@@ -4079,25 +4084,28 @@ impl<'a> Av2Lossy420TileState<'a> {
         }
     }
 
-    fn source_sample(&self, plane: Av2Lossy420Plane, x: usize, y: usize) -> u8 {
-        self.source[self.offset(plane, x, y)]
+    fn source_sample(&self, plane: Av2Lossy420Plane, x: usize, y: usize) -> Av2Sample {
+        read_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
+            .expect("validated AV2 4:2:0 source must contain every sample")
     }
 
-    fn recon_sample(&self, plane: Av2Lossy420Plane, x: usize, y: usize) -> u8 {
-        self.recon[self.offset(plane, x, y)]
+    fn recon_sample(&self, plane: Av2Lossy420Plane, x: usize, y: usize) -> Av2Sample {
+        read_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
+            .expect("validated AV2 4:2:0 reconstruction must contain every sample")
     }
 
-    fn set_recon_sample(&mut self, plane: Av2Lossy420Plane, x: usize, y: usize, sample: u8) {
+    fn set_recon_sample(&mut self, plane: Av2Lossy420Plane, x: usize, y: usize, sample: Av2Sample) {
         let offset = self.offset(plane, x, y);
-        self.recon[offset] = sample;
+        write_planar_sample(self.recon, offset, sample, self.bit_depth)
+            .expect("validated AV2 4:2:0 reconstruction must contain every sample");
     }
 
-    fn luma_dc_predictor(&self, plane: Av2Lossy420Plane, x0: usize, y0: usize) -> u8 {
+    fn luma_dc_predictor(&self, plane: Av2Lossy420Plane, x0: usize, y0: usize) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         let have_left = x0 > tile_origin_x;
         let have_top = y0 > tile_origin_y;
         if !have_left && !have_top {
-            return LOSSLESS_DC_PREDICTOR;
+            return av2_lossless_dc_predictor(self.bit_depth);
         }
 
         let mut sum = 0u32;
@@ -4114,10 +4122,10 @@ impl<'a> Av2Lossy420TileState<'a> {
                 count += 1;
             }
         }
-        ((sum + count / 2) / count) as u8
+        ((sum + count / 2) / count) as Av2Sample
     }
 
-    fn chroma_h_predictor(&self, plane: Av2Lossy420Plane, x0: usize, y0: usize) -> u8 {
+    fn chroma_h_predictor(&self, plane: Av2Lossy420Plane, x0: usize, y0: usize) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         // read_intra_uv_mode() currently emits the normal horizontal chroma
         // predictor for 4:2:0 leaves. AVM's H_PRED falls back to above[0] when
@@ -4127,11 +4135,11 @@ impl<'a> Av2Lossy420TileState<'a> {
         } else if y0 > tile_origin_y {
             self.recon_sample(plane, x0, y0 - 1)
         } else {
-            LOSSLESS_H_PRED_LEFT_EDGE
+            av2_lossless_h_pred_left_edge(self.bit_depth)
         }
     }
 
-    fn predictor(&self, plane: Av2Lossy420Plane, x0: usize, y0: usize) -> u8 {
+    fn predictor(&self, plane: Av2Lossy420Plane, x0: usize, y0: usize) -> Av2Sample {
         match plane {
             Av2Lossy420Plane::Y => self.luma_dc_predictor(plane, x0, y0),
             Av2Lossy420Plane::U | Av2Lossy420Plane::V => self.chroma_h_predictor(plane, x0, y0),
@@ -4147,12 +4155,14 @@ impl<'a> Av2Lossy420TileState<'a> {
             }
         }
         let average = round_div_i32(sum, TX4X4_SAMPLES as i32);
-        quantize_i32_to_step(average, AV2_LOSSY_420_DC_QUANT_STEP).clamp(-255, 255) as i16
+        let max_delta = i32::from(self.bit_depth.max_sample());
+        quantize_i32_to_step(average, self.quant_step()).clamp(-max_delta, max_delta) as i16
     }
 
     fn fill_recon_txb(&mut self, plane: Av2Lossy420Plane, x0: usize, y0: usize, delta: i16) {
-        let predictor = i16::from(self.predictor(plane, x0, y0));
-        let sample = (predictor + delta).clamp(0, 255) as u8;
+        let predictor = i32::from(self.predictor(plane, x0, y0));
+        let sample = (predictor + i32::from(delta)).clamp(0, i32::from(self.bit_depth.max_sample()))
+            as Av2Sample;
         let (plane_width, plane_height) = self.plane_geometry(plane);
         for local_y in 0..TX4X4_SIZE {
             let y = y0 + local_y;
@@ -4166,6 +4176,10 @@ impl<'a> Av2Lossy420TileState<'a> {
                 }
             }
         }
+    }
+
+    fn quant_step(&self) -> i32 {
+        AV2_LOSSY_420_DC_QUANT_STEP << u32::from(self.bit_depth.bits() - 8)
     }
 }
 

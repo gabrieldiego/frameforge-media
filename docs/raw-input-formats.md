@@ -90,11 +90,12 @@ shared bit-depth converter before calling the codec.
 
 Current behavior:
 
-- AV2 accepts `yuv420p8` for the current 4:2:0 path. Higher-bit-depth 4:2:0
-  inputs are scaled to `yuv420p8` before encoding.
-- AV2 accepts `yuv444p8`, `yuv444p10le`, and `yuv444p12le` natively for the
-  current 4:4:4 path. These exact formats are passed to the encoder without
-  bit-depth conversion.
+- AV2 accepts `yuv420p8` and `yuv420p10le` natively for the current 4:2:0 path.
+  Higher 4:2:0 depths are scaled to `yuv420p8` before encoding until a
+  reference-valid 12-bit profile path is added.
+- AV2 accepts `yuv444p8` and `yuv444p10le` natively for the current 4:4:4 path.
+  Higher 4:4:4 depths are scaled to `yuv444p8` before encoding until a
+  reference-valid 12-bit profile path is added.
 - VVC accepts 8-bit planar YUV layouts in the CLI path; higher-bit-depth planar
   YUV inputs are scaled to the same layout at 8-bit.
 - Unsupported chroma or color-family conversions still fail visibly. The

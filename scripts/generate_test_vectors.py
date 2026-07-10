@@ -355,8 +355,9 @@ def generate_yuv(vector: TestVector, sources: dict[str, TestVectorSource]) -> by
         return generate_source_crop(vector, sources)
     if vector.pattern == "source_file":
         return generate_source_file_clip(vector)
-    if vector.fmt == "yuv420p8":
-        return generate_yuv420p8(vector)
+    bit_depth = yuv420_bit_depth(vector.fmt)
+    if bit_depth is not None:
+        return generate_yuv420p(vector, bit_depth)
     bit_depth = yuv444_bit_depth(vector.fmt)
     if bit_depth is not None:
         return generate_yuv444p(vector, bit_depth)
@@ -366,7 +367,7 @@ def generate_yuv(vector: TestVector, sources: dict[str, TestVectorSource]) -> by
 def validate_vector(vector: TestVector) -> None:
     if vector.width <= 0 or vector.height <= 0:
         raise ValueError(f"{vector.name} has invalid geometry {vector.width}x{vector.height}")
-    if vector.fmt in {"yuv420p8", "yuv420p10le"} and (
+    if yuv420_bit_depth(vector.fmt) is not None and (
         vector.width % 2 != 0 or vector.height % 2 != 0
     ):
         raise ValueError(f"{vector.name} {vector.fmt} dimensions must be even")
@@ -483,11 +484,27 @@ def y4m_pixel_format(chroma_tag: str | None) -> str:
     normalized = (chroma_tag or "420").lower()
     if normalized in {"420", "420jpeg", "420mpeg2", "420paldv"}:
         return "yuv420p8"
-    if normalized == "420p10":
-        return "yuv420p10le"
+    if normalized.startswith("420p"):
+        bit_depth = numeric_y4m_bit_depth(normalized, "420p")
+        if bit_depth is not None:
+            return f"yuv420p{bit_depth}le"
     if normalized == "444":
         return "yuv444p8"
+    if normalized.startswith("444p"):
+        bit_depth = numeric_y4m_bit_depth(normalized, "444p")
+        if bit_depth is not None:
+            return f"yuv444p{bit_depth}le"
     raise ValueError(f"unsupported Y4M chroma format: {chroma_tag or '<default>'}")
+
+
+def numeric_y4m_bit_depth(normalized: str, prefix: str) -> int | None:
+    try:
+        bit_depth = int(normalized[len(prefix) :])
+    except ValueError:
+        return None
+    if 8 <= bit_depth <= 16:
+        return bit_depth
+    return None
 
 
 def y4m_fps(value: str | None, context: str) -> str | None:
@@ -581,11 +598,11 @@ def generate_png_yuv444_crop(vector: TestVector, source: TestVectorSource) -> by
         if bit_depth is None:
             raise ValueError(f"unsupported PNG-backed output format: {vector.fmt}")
         if bit_depth > 8:
-            return zero_pad_yuv444p8_to_le(out, bit_depth)
+            return zero_pad_planar8_to_le(out, bit_depth)
         return out
 
 
-def zero_pad_yuv444p8_to_le(data: bytes, bit_depth: int) -> bytes:
+def zero_pad_planar8_to_le(data: bytes, bit_depth: int) -> bytes:
     shift = bit_depth - 8
     out = bytearray(len(data) * 2)
     for index, sample in enumerate(data):
@@ -597,10 +614,9 @@ def zero_pad_yuv444p8_to_le(data: bytes, bit_depth: int) -> bytes:
 
 def raw_frame_len(vector: TestVector) -> int:
     luma = vector.width * vector.height
-    if vector.fmt == "yuv420p8":
-        return luma * 3 // 2
-    if vector.fmt == "yuv420p10le":
-        return luma * 3
+    bit_depth = yuv420_bit_depth(vector.fmt)
+    if bit_depth is not None:
+        return luma * 3 // 2 * bytes_per_sample(bit_depth)
     bit_depth = yuv444_bit_depth(vector.fmt)
     if bit_depth is not None:
         return luma * 3 * bytes_per_sample(bit_depth)
@@ -608,9 +624,16 @@ def raw_frame_len(vector: TestVector) -> int:
 
 
 def yuv444_bit_depth(fmt: str) -> int | None:
-    if fmt == "yuv444p8":
+    return planar_yuv_bit_depth(fmt, "yuv444p")
+
+
+def yuv420_bit_depth(fmt: str) -> int | None:
+    return planar_yuv_bit_depth(fmt, "yuv420p")
+
+
+def planar_yuv_bit_depth(fmt: str, prefix: str) -> int | None:
+    if fmt == f"{prefix}8":
         return 8
-    prefix = "yuv444p"
     suffix = "le"
     if not fmt.startswith(prefix) or not fmt.endswith(suffix):
         return None
@@ -628,7 +651,7 @@ def bytes_per_sample(bit_depth: int) -> int:
     return 1 if bit_depth <= 8 else 2
 
 
-def generate_yuv420p8(vector: TestVector) -> bytes:
+def generate_yuv420p(vector: TestVector, bit_depth: int) -> bytes:
     out = bytearray()
     for frame in range(vector.frames):
         y_plane, u444, v444 = render_frame(vector, frame)
@@ -647,7 +670,10 @@ def generate_yuv420p8(vector: TestVector) -> bytes:
         out.extend(y_plane)
         out.extend(u_plane)
         out.extend(v_plane)
-    return bytes(out)
+    data = bytes(out)
+    if bit_depth > 8:
+        return zero_pad_planar8_to_le(data, bit_depth)
+    return data
 
 
 def generate_yuv444p(vector: TestVector, bit_depth: int) -> bytes:
@@ -659,7 +685,7 @@ def generate_yuv444p(vector: TestVector, bit_depth: int) -> bytes:
         out.extend(v_plane)
     data = bytes(out)
     if bit_depth > 8:
-        return zero_pad_yuv444p8_to_le(data, bit_depth)
+        return zero_pad_planar8_to_le(data, bit_depth)
     return data
 
 
