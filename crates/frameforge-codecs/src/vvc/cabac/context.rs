@@ -959,6 +959,7 @@ impl VvcCabacProbModel {
     const MASK_1: u16 = 0x7ffe;
 
     fn from_init_value(init_value: u8, qp: i32, log2_window_size: u8) -> Self {
+        let qp = qp.clamp(0, 63);
         let slope = ((init_value >> 3) as i32) - 4;
         let offset = (((init_value & 7) as i32) * 18) + 1;
         let inistate = ((slope * (qp - 16)) >> 1) + offset;

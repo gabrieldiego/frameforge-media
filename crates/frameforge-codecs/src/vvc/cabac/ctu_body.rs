@@ -138,8 +138,13 @@ impl VvcCtuCabacGenerator {
         cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
         slice_config: VvcSliceSyntaxConfig,
     ) -> Self {
+        let contexts = if slice_config.tools.transform_skip_enabled {
+            VvcCabacContexts::with_slice_qp(slice_config.slice_qp)
+        } else {
+            VvcCabacContexts::new()
+        };
         Self {
-            contexts: VvcCabacContexts::new(),
+            contexts,
             luma_tu_count,
             luma_tu_dc_levels,
             luma_tu_ac_levels,
@@ -348,8 +353,15 @@ impl VvcCtuCabacGenerator {
                 coeff_levels[y * width + x] = *level;
             }
         }
-        let stream =
-            VvcResidualCabacSymbolStream::luma_coefficients(log2_width, log2_height, &coeff_levels);
+        let stream = if self.slice_config.tools.transform_skip_enabled {
+            VvcResidualCabacSymbolStream::luma_transform_skip_coefficients(
+                log2_width,
+                log2_height,
+                &coeff_levels,
+            )
+        } else {
+            VvcResidualCabacSymbolStream::luma_coefficients(log2_width, log2_height, &coeff_levels)
+        };
         let mut residual =
             VvcResidualCabacEncoder::new(&mut self.contexts, self.slice_config.residual_options());
         stream.emit(&mut residual, cabac);
@@ -630,12 +642,23 @@ impl VvcCtuCabacGenerator {
                 coeff_levels[y * width + x] = *level;
             }
         }
-        let stream = VvcResidualCabacSymbolStream::chroma_coefficients(
-            component,
-            (width as u16).ilog2() as u8,
-            (height as u16).ilog2() as u8,
-            &coeff_levels,
-        );
+        let log2_width = (width as u16).ilog2() as u8;
+        let log2_height = (height as u16).ilog2() as u8;
+        let stream = if self.slice_config.tools.transform_skip_enabled {
+            VvcResidualCabacSymbolStream::chroma_transform_skip_coefficients(
+                component,
+                log2_width,
+                log2_height,
+                &coeff_levels,
+            )
+        } else {
+            VvcResidualCabacSymbolStream::chroma_coefficients(
+                component,
+                log2_width,
+                log2_height,
+                &coeff_levels,
+            )
+        };
         let mut residual =
             VvcResidualCabacEncoder::new(&mut self.contexts, self.slice_config.residual_options());
         stream.emit(&mut residual, cabac);

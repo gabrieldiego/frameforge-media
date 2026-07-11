@@ -1147,6 +1147,26 @@ fn vvc_ctu_cabac_generator_is_embedded_in_ctu_body() {
 }
 
 #[test]
+fn vvc_cabac_context_initialization_clips_slice_qp() {
+    let qp0 = VvcCabacContexts::with_slice_qp(0);
+    let negative = VvcCabacContexts::with_slice_qp(-12);
+    assert_eq!(negative.split_flag[0].state(), qp0.split_flag[0].state());
+    assert_eq!(
+        negative.transform_skip_flag[0].state(),
+        qp0.transform_skip_flag[0].state()
+    );
+    assert_eq!(negative.qt_cbf_y[0].state(), qp0.qt_cbf_y[0].state());
+
+    let qp63 = VvcCabacContexts::with_slice_qp(63);
+    let too_high = VvcCabacContexts::with_slice_qp(64);
+    assert_eq!(too_high.split_flag[0].state(), qp63.split_flag[0].state());
+    assert_eq!(
+        too_high.transform_skip_flag[0].state(),
+        qp63.transform_skip_flag[0].state()
+    );
+}
+
+#[test]
 fn vvc_boundary_partition_uses_qt_until_implicit_bt_is_allowed_for_thin_shapes() {
     let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
     for geometry in [
@@ -1331,8 +1351,16 @@ fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
     .expect("64x64 partition params");
     params.luma_max_leaf_size = 4;
 
-    let leaves: Vec<_> = VvcCtuCabacOp::yuv420_ctu_partition(params)
-        .into_iter()
+    let ops = VvcCtuCabacOp::yuv420_ctu_partition(params);
+    assert!(ops.iter().any(|op| matches!(
+        op,
+        VvcCtuCabacOp::BtSplit {
+            node,
+            ..
+        } if node.width == 8 && node.height == 8
+    )));
+    let leaves: Vec<_> = ops
+        .iter()
         .filter_map(|op| match op {
             VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
             _ => None,
@@ -1343,6 +1371,7 @@ fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
     assert!(leaves
         .iter()
         .all(|node| node.width <= 4 && node.height <= 4));
+    assert!(leaves.iter().all(|node| node.cqt_depth <= 3));
 }
 
 #[test]
@@ -1603,18 +1632,18 @@ fn vvc_input_path_rejects_unsupported_high_depth_yuv420p() {
 }
 
 #[test]
-fn vvc_input_path_rejects_lossless_yuv420_until_stream_exact_path_exists() {
+fn vvc_input_path_accepts_lossless_yuv420_high_depth_exact_reconstruction() {
     let geometry = VvcVideoGeometry {
         width: 8,
         height: 8,
     };
     let format = PixelFormat::yuv420(10).unwrap();
-    let input = solid_yuv420p_high(65, 128, 192, 10, 1);
+    let input = yuv420p10_canary_8x8();
     let mut source = input.as_slice();
     let mut bitstream = Vec::new();
     let mut reconstruction = Vec::new();
 
-    let err = vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+    vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
         &mut source,
         &mut bitstream,
         Some(&mut reconstruction),
@@ -1625,14 +1654,10 @@ fn vvc_input_path_rejects_lossless_yuv420_until_stream_exact_path_exists() {
         VvcEncodeOptions { lossless: true },
         None,
     )
-    .expect_err("lossless 4:2:0 must fail closed until stream-exact");
+    .expect("lossless 4:2:0 should encode");
 
-    assert!(
-        err.contains("VVC lossless encode is not implemented"),
-        "{err}"
-    );
-    assert!(bitstream.is_empty());
-    assert!(reconstruction.is_empty());
+    assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+    assert_eq!(reconstruction, input);
 }
 
 #[test]
@@ -2362,6 +2387,20 @@ fn solid_yuv444p8_geometry(
 
 fn solid_yuv420p_high(y: u8, u: u8, v: u8, bit_depth: u8, frames: usize) -> Vec<u8> {
     solid_yuv_planar_high(y, u, v, bit_depth, 16, frames)
+}
+
+fn yuv420p10_canary_8x8() -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..64 {
+        out.extend((((i * 17 + 3) & 0x03ff) as u16).to_le_bytes());
+    }
+    for i in 0..16 {
+        out.extend((((i * 29 + 5) & 0x03ff) as u16).to_le_bytes());
+    }
+    for i in 0..16 {
+        out.extend((((i * 37 + 7) & 0x03ff) as u16).to_le_bytes());
+    }
+    out
 }
 
 fn solid_yuv_planar_high(

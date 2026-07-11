@@ -11,7 +11,6 @@ use super::{
 
 const VVC_PALETTE_CU_SIZE: u16 = 8;
 const VVC_PALETTE_LOSSLESS_SLICE_QP: i32 = 4;
-const VVC_PALETTE_LOSSLESS_SH_QP_DELTA: i32 = -28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VvcPaletteTreeType {
@@ -537,7 +536,7 @@ fn vvc_palette_444_slice_payload(
     // The current PPS base QP is 32, so sh_qp_delta -28 gives SliceQpY 4 and
     // levelScale[4] == 64. High-depth escape values are coded as levels that
     // VTM reconstructs by the bit-depth QP offset.
-    writer.write_se("sh_qp_delta", VVC_PALETTE_LOSSLESS_SH_QP_DELTA);
+    writer.write_se("sh_qp_delta", super::header::VVC_LOSSLESS_SH_QP_DELTA);
     if tool_flags.dependent_quantization_enabled {
         writer.write_flag("sh_dep_quant_used_flag", true);
     }

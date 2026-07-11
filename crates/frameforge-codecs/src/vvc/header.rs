@@ -1,8 +1,9 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::{
-    vvc_cabac_bits, VvcCodingTreeConfig, VvcNalUnit, VvcNalUnitType, VvcQuantizedColor,
-    VvcSliceSyntaxConfig, VvcSyntaxRbsp, VvcSyntaxWriter, VvcVideoGeometry,
+    vvc_cabac_bits_with_luma_max_leaf_size, VvcCodingTreeConfig, VvcNalUnit, VvcNalUnitType,
+    VvcQuantizedColor, VvcSliceSyntaxConfig, VvcSyntaxRbsp, VvcSyntaxWriter, VvcVideoGeometry,
+    VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,7 +13,9 @@ pub(in crate::vvc) enum VvcPictureKind {
 }
 
 const VVC_SPS_LOG2_MAX_POC_LSB_MINUS4: u8 = 12;
+const VVC_PPS_INIT_QP: i32 = 32;
 pub(in crate::vvc) const VVC_POC_LSB_BITS: u8 = VVC_SPS_LOG2_MAX_POC_LSB_MINUS4 + 4;
+pub(in crate::vvc) const VVC_LOSSLESS_SH_QP_DELTA: i32 = -28;
 
 impl VvcPictureKind {
     pub(in crate::vvc) fn for_frame_idx(frame_idx: usize) -> Self {
@@ -97,6 +100,7 @@ pub(in crate::vvc) fn vvc_slice_unit(
         geometry,
         color,
         slice_config,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
     )
 }
 
@@ -119,6 +123,31 @@ pub(in crate::vvc) fn vvc_ctu_slice_unit(
         ctu_geometry,
         color,
         slice_config,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    )
+}
+
+pub(in crate::vvc) fn vvc_ctu_slice_unit_with_luma_max_leaf_size(
+    frame_idx: usize,
+    picture_geometry: VvcVideoGeometry,
+    slice_address: usize,
+    ctu_geometry: VvcVideoGeometry,
+    color: VvcQuantizedColor,
+    slice_config: VvcSliceSyntaxConfig,
+    luma_max_leaf_size: u16,
+) -> Result<VvcNalUnit, String> {
+    let picture_kind = VvcPictureKind::for_frame_idx(frame_idx);
+    let poc_lsb = vvc_poc_lsb_for_frame_idx(frame_idx);
+
+    vvc_ctu_slice_unit_with_poc(
+        picture_kind,
+        poc_lsb,
+        picture_geometry,
+        slice_address,
+        ctu_geometry,
+        color,
+        slice_config,
+        luma_max_leaf_size,
     )
 }
 
@@ -130,6 +159,7 @@ fn vvc_ctu_slice_unit_with_poc(
     ctu_geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
     slice_config: VvcSliceSyntaxConfig,
+    luma_max_leaf_size: u16,
 ) -> Result<VvcNalUnit, String> {
     let slice_count = vvc_picture_ctu_count(picture_geometry);
     if slice_address >= slice_count {
@@ -150,6 +180,7 @@ fn vvc_ctu_slice_unit_with_poc(
             ctu_geometry,
             color,
             slice_config,
+            luma_max_leaf_size,
         ),
     })
 }
@@ -370,7 +401,7 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
         writer.write_flag("sps_chroma_vertical_collocated_flag", false);
     }
     writer.write_flag("sps_palette_enabled_flag", palette_enabled);
-    if palette_enabled {
+    if palette_enabled || tool_flags.transform_skip_enabled {
         writer.write_ue("sps_internal_bit_depth_minus_input_bit_depth", 0);
     }
     writer.write_flag("sps_ibc_enabled_flag", tool_flags.ibc_enabled);
@@ -589,6 +620,7 @@ pub(in crate::vvc) fn vvc_slice_payload(
         geometry,
         color,
         slice_config,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
     )
 }
 
@@ -600,6 +632,7 @@ pub(in crate::vvc) fn vvc_slice_payload_with_poc(
     ctu_geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
     slice_config: VvcSliceSyntaxConfig,
+    luma_max_leaf_size: u16,
 ) -> Vec<u8> {
     vvc_slice_rbsp_with_poc(
         picture_kind,
@@ -609,6 +642,7 @@ pub(in crate::vvc) fn vvc_slice_payload_with_poc(
         ctu_geometry,
         color,
         slice_config,
+        luma_max_leaf_size,
     )
     .bytes
 }
@@ -628,6 +662,7 @@ pub(in crate::vvc) fn vvc_slice_rbsp(
         geometry,
         color,
         slice_config,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
     )
 }
 
@@ -647,6 +682,7 @@ pub(in crate::vvc) fn vvc_slice_rbsp_with_poc(
     ctu_geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
     slice_config: VvcSliceSyntaxConfig,
+    luma_max_leaf_size: u16,
 ) -> VvcSyntaxRbsp {
     let mut writer = VvcSyntaxWriter::new();
     let tool_flags = slice_config.tools;
@@ -668,27 +704,57 @@ pub(in crate::vvc) fn vvc_slice_rbsp_with_poc(
     }
     writer.write_flag("sh_no_output_of_prior_pics_flag", false);
     write_vvc_slice_header_ref_pic_lists(&mut writer, picture_kind);
-    writer.write_se("sh_qp_delta", 0);
+    writer.write_se("sh_qp_delta", slice_config.slice_qp - VVC_PPS_INIT_QP);
     if tool_flags.dependent_quantization_enabled {
         writer.write_flag("sh_dep_quant_used_flag", true);
     }
     if tool_flags.sign_data_hiding_enabled && !tool_flags.dependent_quantization_enabled {
         writer.write_flag("sh_sign_data_hiding_used_flag", true);
     }
+    if tool_flags.transform_skip_enabled
+        && !tool_flags.dependent_quantization_enabled
+        && !tool_flags.sign_data_hiding_enabled
+    {
+        writer.write_flag("sh_ts_residual_coding_disabled_flag", true);
+    }
     write_vvc_slice_header_byte_alignment(&mut writer);
-    write_vvc_coding_tree_entropy(&mut writer, ctu_geometry, color, slice_config);
+    write_vvc_coding_tree_entropy_with_luma_max_leaf_size(
+        &mut writer,
+        ctu_geometry,
+        color,
+        slice_config,
+        luma_max_leaf_size,
+    );
     writer.rbsp_trailing_bits();
     debug_assert!(writer.is_byte_aligned());
     writer.finish()
 }
 
+#[cfg(test)]
 pub(in crate::vvc) fn write_vvc_coding_tree_entropy(
     writer: &mut VvcSyntaxWriter,
     geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
     slice_config: VvcSliceSyntaxConfig,
 ) {
-    let bits = vvc_cabac_bits(geometry, color, slice_config);
+    write_vvc_coding_tree_entropy_with_luma_max_leaf_size(
+        writer,
+        geometry,
+        color,
+        slice_config,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    );
+}
+
+pub(in crate::vvc) fn write_vvc_coding_tree_entropy_with_luma_max_leaf_size(
+    writer: &mut VvcSyntaxWriter,
+    geometry: VvcVideoGeometry,
+    color: VvcQuantizedColor,
+    slice_config: VvcSliceSyntaxConfig,
+    luma_max_leaf_size: u16,
+) {
+    let bits =
+        vvc_cabac_bits_with_luma_max_leaf_size(geometry, color, slice_config, luma_max_leaf_size);
     writer.write_cabac_bits("cabac_vvc_quantized_residual_bits", &bits);
 }
 

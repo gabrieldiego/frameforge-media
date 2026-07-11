@@ -892,6 +892,17 @@ impl VvcCtuCabacOp {
             return;
         }
         let split = Self::luma_split_availability(node, visible_width, visible_height);
+        if !split.allow_qt {
+            Self::append_visible_luma_mtt_subtree(
+                ops,
+                neighbours,
+                node,
+                visible_width,
+                visible_height,
+                max_leaf_size,
+            );
+            return;
+        }
         ops.push(Self::QtSplit {
             node,
             split_ctx: Self::luma_split_ctx(node, split, neighbours),

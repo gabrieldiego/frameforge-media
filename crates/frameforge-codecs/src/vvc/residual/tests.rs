@@ -392,6 +392,24 @@ fn vvc_residual_symbol_stream_maps_large_abs_remainder_by_spec_order() {
 }
 
 #[test]
+fn vvc_residual_symbol_stream_preserves_abs_remainders_above_u8() {
+    let coeffs = vvc_luma_coefficients(8, 8, &[(0, -381)]);
+    let stream = VvcResidualCabacSymbolStream::luma_transform_skip_coefficients(3, 3, &coeffs);
+    assert!(stream
+        .symbols
+        .contains(&VvcResidualCabacSymbol::AbsRemainder {
+            x: 0,
+            y: 0,
+            value: 188,
+            rice_param: 0
+        }));
+    assert_eq!(
+        stream.symbols.last(),
+        Some(&VvcResidualCabacSymbol::CoeffSignPattern { bits: 1, count: 1 })
+    );
+}
+
+#[test]
 fn vvc_residual_symbol_stream_can_be_derived_from_quantized_luma_coefficients() {
     let coeffs = vvc_luma_coefficients(8, 8, &[(0, -16)]);
     let stream = VvcResidualCabacSymbolStream::luma_coefficients(3, 3, &coeffs);

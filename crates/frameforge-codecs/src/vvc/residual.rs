@@ -22,6 +22,7 @@ pub(super) use prediction::{
 };
 pub use quant::quantize_vvc_color;
 pub(super) use quant::quantize_vvc_frame;
+pub(super) use quant::quantize_vvc_frame_lossless_420;
 pub(super) use recon::reconstruct_vvc_residual_frame;
 pub(super) use syntax::{
     VvcResidualCabacEncoder, VvcResidualCabacOptions, VvcResidualCabacSymbolStream,

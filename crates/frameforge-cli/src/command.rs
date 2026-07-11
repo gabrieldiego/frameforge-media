@@ -715,7 +715,10 @@ fn codec_supports_lossless_stream(codec: &str, format: PixelFormat) -> bool {
                 && matches!(format.bit_depth().bits(), 8 | 10)
         }
         "vvc" => {
-            format.chroma_sampling() == Some(ChromaSampling::Cs444) && vvc_accepts_bit_depth(format)
+            matches!(
+                format.chroma_sampling(),
+                Some(ChromaSampling::Cs420 | ChromaSampling::Cs444)
+            ) && vvc_accepts_bit_depth(format)
         }
         _ => false,
     }
@@ -1207,6 +1210,37 @@ mod tests {
             assert_eq!(forwarded, input);
             let _ = fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn encode_job_accepts_lossless_yuv420_for_vvc_path() {
+        let format_name = "yuv420p10le";
+        let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
+        let format = PixelFormat::yuv420(10).unwrap();
+        let input = vec![0; format.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.266".to_string()),
+            codec: Some("vvc".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some(format_name.to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("lossless yuv420 is native for VVC");
+        assert!(job.lossless);
+        assert_eq!(job.source_format, format);
+        assert_eq!(job.format, format);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

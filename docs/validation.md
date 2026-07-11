@@ -58,9 +58,9 @@ reconstruction. A lossless stream should only be enabled for a codec when both
 checks are expected to pass.
 
 The `high-depth-smoke` set uses deterministic lower-bit canary samples so
-truncation of 10-bit or 12-bit input is visible as a validation failure. Its
-4:2:0 canaries remain generateable for future work, but validation is gated to
-the 4:4:4 codec paths that currently emit reference-decodable lossless streams.
+truncation of 10-bit or 12-bit input is visible as a validation failure. VVC
+4:2:0 and 4:4:4 canaries are expected to pass with reference decoding; AV2 is
+currently gated to the implemented 10-bit 4:4:4 lossless smoke path.
 
 Reference tools are declared by JSON manifests under:
 

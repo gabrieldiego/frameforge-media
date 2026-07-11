@@ -484,7 +484,13 @@ impl VvcResidualPass1State {
         }
     }
 
-    pub(in crate::vvc) fn set_pass1_coeff(&mut self, x: u8, y: u8, abs_level: u8, _negative: bool) {
+    pub(in crate::vvc) fn set_pass1_coeff(
+        &mut self,
+        x: u8,
+        y: u8,
+        abs_level: u16,
+        _negative: bool,
+    ) {
         let index = self.config.coefficient_index(x, y);
         self.sig_coeff[index] = abs_level != 0;
         // VTM CoeffCodingContext::sigCtxIdAbs uses
@@ -851,7 +857,7 @@ impl VvcResidualCabacSymbolStream {
             let level = coeff_levels[pos.raster_index];
             let x = pos.x as u8;
             let y = pos.y as u8;
-            let abs_level = level.unsigned_abs().min(u8::MAX as u16) as u8;
+            let abs_level = level.unsigned_abs();
             pass1_state.set_pass1_coeff(x, y, abs_level, level < 0);
         }
         pass1_state.set_sb_coded(0, 0, coeff_levels.iter().any(|level| *level != 0));
@@ -877,7 +883,7 @@ impl VvcResidualCabacSymbolStream {
             let x = pos.x as u8;
             let y = pos.y as u8;
             let level = coeff_levels[pos.raster_index];
-            let abs_level = level.unsigned_abs().min(u8::MAX as u16) as u8;
+            let abs_level = level.unsigned_abs();
             let significant = abs_level != 0;
             if num_nonzero != 0 || next_scan_pos != infer_sig_pos {
                 symbols.push(VvcResidualCabacSymbol::SigCoeffFlag { x, y, significant });
@@ -901,9 +907,7 @@ impl VvcResidualCabacSymbolStream {
         if let Some(first_pos_2nd_pass) = first_pos_2nd_pass {
             for scan_pos in ((min_pos_2nd_pass + 1) as usize..=first_pos_2nd_pass).rev() {
                 let pos = scan[scan_pos];
-                let abs_level = coeff_levels[pos.raster_index]
-                    .unsigned_abs()
-                    .min(u8::MAX as u16) as u8;
+                let abs_level = coeff_levels[pos.raster_index].unsigned_abs();
                 if abs_level >= 4 {
                     let x = pos.x as u8;
                     let y = pos.y as u8;
@@ -921,7 +925,7 @@ impl VvcResidualCabacSymbolStream {
             for scan_pos in (0..=min_pos_2nd_pass as usize).rev() {
                 let pos = scan[scan_pos];
                 let level = coeff_levels[pos.raster_index];
-                let abs_level = level.unsigned_abs().min(u8::MAX as u16) as u8;
+                let abs_level = level.unsigned_abs();
                 let rice_param = derive_rice_param(scan_pos, coeff_levels, width, &scan, 0);
                 let zero_pos = go_rice_zero_position(residual_state, rice_param);
                 let rem_value = if abs_level == 0 {
@@ -998,7 +1002,7 @@ impl VvcResidualCabacSymbolStream {
         symbols: &mut Vec<VvcResidualCabacSymbol>,
         x: u8,
         y: u8,
-        abs_level: u8,
+        abs_level: u16,
     ) {
         // H.266 7.3.11.11 residual_coding_subblock regular-pass order: gt1,
         // parity, gt2. Remainder and sign bypass bins are collected and
@@ -1094,8 +1098,8 @@ fn diag_scan_positions(width: usize, height: usize) -> Vec<VvcScanPosition> {
     scan
 }
 
-fn template_abs_sum_level(abs_level: u8) -> u8 {
-    abs_level.min(4 + (abs_level & 1))
+fn template_abs_sum_level(abs_level: u16) -> u8 {
+    abs_level.min(4 + (abs_level & 1)) as u8
 }
 
 fn regular_bin_limit(width: usize, height: usize) -> i32 {
@@ -1106,7 +1110,7 @@ fn regular_bin_limit(width: usize, height: usize) -> i32 {
     ((width * height * 28) >> 4) as i32
 }
 
-fn regular_level_bin_count(abs_level: u8) -> i32 {
+fn regular_level_bin_count(abs_level: u16) -> i32 {
     if abs_level > 1 {
         3
     } else {
@@ -1122,7 +1126,7 @@ fn append_sign_bit(sign_bits: &mut u32, sign_count: &mut u8, negative: bool) {
     *sign_count += 1;
 }
 
-fn disabled_dep_quant_state_transition(_state: u8, _abs_level: u8) -> u8 {
+fn disabled_dep_quant_state_transition(_state: u8, _abs_level: u16) -> u8 {
     // VTM passes stateTransTable = 0 when dependent quantization is disabled,
     // so the residual state remains zero for both regular and bypass passes.
     0
@@ -1133,7 +1137,7 @@ fn derive_rice_param(
     coeff_levels: &[i16],
     width: usize,
     scan: &[VvcScanPosition],
-    base_level: i16,
+    base_level: i32,
 ) -> u8 {
     const GO_RICE_PARS_COEFF: [u8; 32] = [
         0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3,
@@ -1149,12 +1153,12 @@ fn rice_template_abs_sum(
     coeff_levels: &[i16],
     width: usize,
     scan: &[VvcScanPosition],
-) -> i16 {
+) -> i32 {
     let pos = scan[scan_pos];
     let height = coeff_levels.len() / width;
     let x = pos.x;
     let y = pos.y;
-    let mut sum = 0i16;
+    let mut sum = 0i32;
     if x + 1 < width {
         sum += coeff_abs_at(coeff_levels, width, x + 1, y);
         if x + 2 < width {
@@ -1173,8 +1177,8 @@ fn rice_template_abs_sum(
     sum
 }
 
-fn coeff_abs_at(coeff_levels: &[i16], width: usize, x: usize, y: usize) -> i16 {
-    coeff_levels[y * width + x].abs()
+fn coeff_abs_at(coeff_levels: &[i16], width: usize, x: usize, y: usize) -> i32 {
+    i32::from(coeff_levels[y * width + x]).abs()
 }
 
 fn go_rice_zero_position(state: u8, rice_param: u8) -> u32 {

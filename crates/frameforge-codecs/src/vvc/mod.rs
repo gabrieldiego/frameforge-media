@@ -26,9 +26,10 @@ use cabac::{
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
 use header::{
-    vvc_ctu_slice_unit, vvc_picture_ctu_cols, vvc_picture_ctu_count, vvc_picture_ctu_rows,
-    vvc_picture_header_unit, vvc_poc_lsb_for_frame_idx, vvc_pps_unit, vvc_slice_address_bits,
-    vvc_slice_unit, vvc_sps_unit, VvcPictureKind,
+    vvc_ctu_slice_unit, vvc_ctu_slice_unit_with_luma_max_leaf_size, vvc_picture_ctu_cols,
+    vvc_picture_ctu_count, vvc_picture_ctu_rows, vvc_picture_header_unit,
+    vvc_poc_lsb_for_frame_idx, vvc_pps_unit, vvc_slice_address_bits, vvc_slice_unit, vvc_sps_unit,
+    VvcPictureKind,
 };
 #[cfg(test)]
 use header::{
@@ -53,9 +54,10 @@ pub use residual::quantize_vvc_color;
 #[cfg(test)]
 use residual::VVC_LUMA_DC_BASE;
 use residual::{
-    quantize_vvc_frame, reconstruct_vvc_residual_frame, VvcQuantizedColor, VvcResidualCabacOptions,
-    VvcResidualComponent, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
-    VVC_CHROMA_AC_POSITIONS_4X4, VVC_LUMA_AC_COEFFS_PER_TU,
+    quantize_vvc_frame, quantize_vvc_frame_lossless_420, reconstruct_vvc_residual_frame,
+    VvcQuantizedColor, VvcResidualCabacOptions, VvcResidualComponent, MAX_VVC_CHROMA_TUS,
+    MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
+    VVC_LUMA_AC_COEFFS_PER_TU,
 };
 #[cfg(test)]
 use residual::{VvcResidualCabacEncoder, VvcResidualCtxConfig, VvcResidualPass1State};
@@ -124,6 +126,7 @@ pub const VVC_CODED_DIMENSION_GRANULARITY: usize = 8;
 const VVC_CTU_SIZE: usize = 64;
 const VVC_CURRENT_MIN_LUMA_CB_SIZE: u16 = 4;
 const VVC_CURRENT_MAX_LUMA_LEAF_SIZE: u16 = 8;
+const VVC_LOSSLESS_LUMA_LEAF_SIZE: u16 = 4;
 const VVC_CURRENT_MAX_LUMA_BT_SIZE: u16 = VVC_CURRENT_MIN_LUMA_QT_SIZE << 2;
 const VVC_CURRENT_MAX_LUMA_TT_SIZE: u16 = VVC_CURRENT_MIN_LUMA_QT_SIZE << 2;
 const VVC_CURRENT_MAX_LUMA_MTT_DEPTH: u8 = 3;
@@ -327,6 +330,7 @@ pub(super) struct VvcSliceSyntaxConfig {
     tools: VvcSyntaxToolFlags,
     ref_pic_resampling_enabled: bool,
     entry_point_offsets_present: bool,
+    slice_qp: i32,
 }
 
 impl VvcSyntaxToolFlags {
@@ -344,6 +348,13 @@ impl VvcSyntaxToolFlags {
             cclm_enabled: true,
             dependent_quantization_enabled: false,
             sign_data_hiding_enabled: false,
+        }
+    }
+
+    const fn yuv420_lossless() -> Self {
+        Self {
+            transform_skip_enabled: true,
+            ..Self::yuv420_residual()
         }
     }
 
@@ -376,6 +387,7 @@ impl VvcSliceSyntaxConfig {
             tools,
             ref_pic_resampling_enabled: true,
             entry_point_offsets_present: true,
+            slice_qp: 32,
         }
     }
 
@@ -384,6 +396,15 @@ impl VvcSliceSyntaxConfig {
             VvcCodingTreeConfig::yuv420(),
             VvcSyntaxToolFlags::yuv420_residual(),
         )
+    }
+
+    fn yuv420_lossless(bit_depth: SampleBitDepth) -> Self {
+        let mut config = Self::new(
+            VvcCodingTreeConfig::yuv420(),
+            VvcSyntaxToolFlags::yuv420_lossless(),
+        );
+        config.slice_qp = vvc_lossless_slice_qp(bit_depth);
+        config
     }
 
     const fn palette_444() -> Self {
@@ -418,6 +439,10 @@ impl VvcSliceSyntaxConfig {
     }
 }
 
+fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
+    -((i32::from(bit_depth.bits()) - 8) * 6)
+}
+
 impl VvcSampledFrame {
     fn solid(color: VvcSampledColor) -> Self {
         Self {
@@ -442,6 +467,14 @@ impl VvcSampledFrame {
             u: self.cb[0],
             v: self.cr[0],
         }
+    }
+
+    fn to_yuv_samples(&self) -> Vec<VvcSample> {
+        let mut out = Vec::with_capacity(self.luma.len() + self.cb.len() + self.cr.len());
+        out.extend_from_slice(&self.luma);
+        out.extend_from_slice(&self.cb);
+        out.extend_from_slice(&self.cr);
+        out
     }
 
     fn decoder_compat_frame(self) -> Self {
@@ -759,12 +792,22 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
             .expect("YUV input has chroma sampling"),
         bit_depth: format.bit_depth(),
     };
-    if options.lossless && stream_format.chroma_sampling != ChromaSampling::Cs444 {
+    if options.lossless
+        && !matches!(
+            stream_format.chroma_sampling,
+            ChromaSampling::Cs420 | ChromaSampling::Cs444
+        )
+    {
         return Err(format!(
             "VVC lossless encode is not implemented for {format}"
         ));
     }
-    let slice_config = VvcSliceSyntaxConfig::for_picture_format(stream_format);
+    let lossless_420 = options.lossless && stream_format.chroma_sampling == ChromaSampling::Cs420;
+    let slice_config = if lossless_420 {
+        VvcSliceSyntaxConfig::yuv420_lossless(stream_format.bit_depth)
+    } else {
+        VvcSliceSyntaxConfig::for_picture_format(stream_format)
+    };
     write_annex_b_to(
         bitstream,
         &[
@@ -821,7 +864,11 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 }
                 frame_recon.into_yuv()
             } else {
-                let compat_frame = source_frame.decoder_compat_frame();
+                let compat_frame = if lossless_420 {
+                    source_frame.clone()
+                } else {
+                    source_frame.decoder_compat_frame()
+                };
                 let mut frame_recon = VvcReconstructionFrame::new_neutral(
                     geometry,
                     VvcPictureFormat {
@@ -831,28 +878,55 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 );
                 for region in vvc_ctu_regions(geometry) {
                     let ctu_frame = extract_vvc_ctu_frame(&compat_frame, region);
-                    let quantized = quantize_vvc_frame(ctu_frame.clone());
-                    let partition_params = vvc_ctu_partition_params(ctu_frame.geometry, quantized)
-                        .ok_or_else(|| {
-                            format!(
-                                "VVC reconstruction has no generated CTU path for coded CTU geometry {}x{}",
-                                ctu_frame.geometry.coded_width(),
-                                ctu_frame.geometry.coded_height()
-                            )
-                        })?;
-                    let ctu_recon =
-                        reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params);
+                    let quantized = if lossless_420 {
+                        quantize_vvc_frame_lossless_420(ctu_frame.clone())
+                    } else {
+                        quantize_vvc_frame(ctu_frame.clone())
+                    };
+                    let partition_params = if lossless_420 {
+                        vvc_ctu_partition_params_with_luma_max_leaf_size(
+                            ctu_frame.geometry,
+                            quantized,
+                            VVC_LOSSLESS_LUMA_LEAF_SIZE,
+                        )
+                    } else {
+                        vvc_ctu_partition_params(ctu_frame.geometry, quantized)
+                    }
+                    .ok_or_else(|| {
+                        format!(
+                            "VVC reconstruction has no generated CTU path for coded CTU geometry {}x{}",
+                            ctu_frame.geometry.coded_width(),
+                            ctu_frame.geometry.coded_height()
+                        )
+                    })?;
+                    let ctu_recon = if lossless_420 {
+                        ctu_frame.to_yuv_samples()
+                    } else {
+                        reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params)
+                    };
                     frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
                     write_annex_b_to(
                         &mut frame_bitstream,
-                        &[vvc_ctu_slice_unit(
-                            frame_idx,
-                            geometry,
-                            region.slice_address,
-                            ctu_frame.geometry,
-                            quantized,
-                            slice_config,
-                        )?],
+                        &[if lossless_420 {
+                            vvc_ctu_slice_unit_with_luma_max_leaf_size(
+                                frame_idx,
+                                geometry,
+                                region.slice_address,
+                                ctu_frame.geometry,
+                                quantized,
+                                slice_config,
+                                VVC_LOSSLESS_LUMA_LEAF_SIZE,
+                            )?
+                        } else {
+                            vvc_ctu_slice_unit(
+                                frame_idx,
+                                geometry,
+                                region.slice_address,
+                                ctu_frame.geometry,
+                                quantized,
+                                slice_config,
+                            )?
+                        }],
                     )?;
                 }
                 frame_recon.into_yuv()
@@ -1388,12 +1462,29 @@ fn append_vvc_luma_partition(
     }
 }
 
+#[cfg(test)]
 fn vvc_cabac_bits(
     geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
     slice_config: VvcSliceSyntaxConfig,
 ) -> Vec<bool> {
-    if let Some(params) = vvc_ctu_partition_params(geometry, color) {
+    vvc_cabac_bits_with_luma_max_leaf_size(
+        geometry,
+        color,
+        slice_config,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    )
+}
+
+fn vvc_cabac_bits_with_luma_max_leaf_size(
+    geometry: VvcVideoGeometry,
+    color: VvcQuantizedColor,
+    slice_config: VvcSliceSyntaxConfig,
+    luma_max_leaf_size: u16,
+) -> Vec<bool> {
+    if let Some(params) =
+        vvc_ctu_partition_params_with_luma_max_leaf_size(geometry, color, luma_max_leaf_size)
+    {
         return vvc_ctu_partition_cabac_bits(params, slice_config);
     }
     unimplemented!(
@@ -1406,6 +1497,18 @@ fn vvc_cabac_bits(
 fn vvc_ctu_partition_params(
     geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
+) -> Option<VvcCtuPartitionParams> {
+    vvc_ctu_partition_params_with_luma_max_leaf_size(
+        geometry,
+        color,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    )
+}
+
+fn vvc_ctu_partition_params_with_luma_max_leaf_size(
+    geometry: VvcVideoGeometry,
+    color: VvcQuantizedColor,
+    luma_max_leaf_size: u16,
 ) -> Option<VvcCtuPartitionParams> {
     let coded = geometry.coded();
     if coded.width > VVC_CTU_SIZE
@@ -1432,7 +1535,7 @@ fn vvc_ctu_partition_params(
         visible_width: coded.width,
         visible_height: coded.height,
         chroma_sampling,
-        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+        luma_max_leaf_size,
         chroma_tu_count,
         luma_tu_count,
         luma_tu_abs_levels,

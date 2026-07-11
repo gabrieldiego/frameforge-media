@@ -112,9 +112,8 @@ Current behavior:
 `--set lossless` is stricter than native input acceptance. A codec path may
 accept a format for lossy encoding while still rejecting lossless mode until the
 emitted stream reconstructs exactly through the reference decoder. The current
-lossless stream paths are AV2 `yuv444p8`/`yuv444p10le` and VVC `yuv444p8`
-through `yuv444p12le`; high-depth 4:2:0 lossless is kept disabled until its
-bitstream residual path is exact.
+lossless stream paths are AV2 `yuv444p8`/`yuv444p10le`, VVC `yuv420p8`
+through `yuv420p12le`, and VVC `yuv444p8` through `yuv444p12le`.
 
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without

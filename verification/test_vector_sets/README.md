@@ -53,7 +53,7 @@ non-zero lower bits into generated 10-bit and 12-bit samples. It is intended to
 catch internal truncation, not to act as a compression-efficiency benchmark.
 The committed high-depth smoke manifest keeps 4:2:0 canaries generateable but
 gates validation to codec paths that currently emit reference-decodable
-lossless streams.
+lossless streams, including VVC 4:2:0 and 4:4:4 high-depth canaries.
 
 Generated filenames include metadata in the CLI-supported form:
 
