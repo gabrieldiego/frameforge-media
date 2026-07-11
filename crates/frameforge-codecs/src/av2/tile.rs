@@ -1288,11 +1288,18 @@ struct Av2Black444TilePlan {
     origin_x: usize,
     origin_y: usize,
     chroma_format: Av2ChromaFormat,
+    partition_policy: Av2PartitionPolicy,
     visible_rows_mi: usize,
     visible_cols_mi: usize,
     luma_palette: bool,
     allow_intrabc: bool,
     max_ref_bv_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Av2PartitionPolicy {
+    Fixed8x8Leaves,
+    LargestLosslessLeaves,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1720,8 +1727,16 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
         chroma_format,
         Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
     ));
-    let plan =
-        Av2Black444TilePlan::for_region(region, profile, chroma_format, false, false, None, None);
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+        region,
+        profile,
+        chroma_format,
+        Av2PartitionPolicy::LargestLosslessLeaves,
+        false,
+        false,
+        None,
+        None,
+    );
     let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
     let mut lossless = Av2LosslessSubsampledTileState::new(
         geometry,
@@ -1740,6 +1755,28 @@ impl Av2Black444TilePlan {
         region: Av2TileRegion,
         profile: Av2Black444MvpProfile,
         chroma_format: Av2ChromaFormat,
+        luma_palette: bool,
+        allow_intrabc: bool,
+        ibc: Option<&Av2LocalIbc444>,
+        palette: Option<&Av2LumaPalette444>,
+    ) -> Self {
+        Self::for_region_with_partition_policy(
+            region,
+            profile,
+            chroma_format,
+            Av2PartitionPolicy::Fixed8x8Leaves,
+            luma_palette,
+            allow_intrabc,
+            ibc,
+            palette,
+        )
+    }
+
+    fn for_region_with_partition_policy(
+        region: Av2TileRegion,
+        profile: Av2Black444MvpProfile,
+        chroma_format: Av2ChromaFormat,
+        partition_policy: Av2PartitionPolicy,
         luma_palette: bool,
         allow_intrabc: bool,
         ibc: Option<&Av2LocalIbc444>,
@@ -1767,6 +1804,7 @@ impl Av2Black444TilePlan {
             origin_x: region.origin_x,
             origin_y: region.origin_y,
             chroma_format,
+            partition_policy,
             visible_rows_mi,
             visible_cols_mi,
             luma_palette,
@@ -1818,7 +1856,18 @@ impl Av2Black444TilePlan {
                 palette,
             )
         } else {
-            choose_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+            match self.partition_policy {
+                Av2PartitionPolicy::Fixed8x8Leaves => {
+                    choose_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+                }
+                Av2PartitionPolicy::LargestLosslessLeaves => choose_largest_lossless_partition(
+                    row_mi,
+                    col_mi,
+                    block_size,
+                    visible_rows_mi,
+                    visible_cols_mi,
+                ),
+            }
         };
         self.decisions.push(Av2TileDecision {
             kind: Av2TileDecisionKind::Partition(partition),
@@ -2394,34 +2443,45 @@ impl Av2Black444TilePlan {
                     }
                 }
                 Av2TileDecisionKind::IntraLumaMode {
-                    mode,
+                    mode: _,
                     use_dpcm_y: _,
                     dpcm_horz: _,
                     use_fsc: _,
                 } => {
+                    let mode = lossless.mode_decision_for_leaf(
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    let coded_luma_mode = mode.coded_luma_mode();
                     write_intra_luma_mode(
                         writer,
                         *decision,
-                        mode,
+                        coded_luma_mode,
                         0,
-                        mode.mode_index() as u8,
-                        false,
-                        false,
+                        coded_luma_mode.mode_index() as u8,
+                        mode.luma_bdpcm_horz.is_some(),
+                        mode.luma_bdpcm_horz.unwrap_or(false),
                         false,
                         0,
                     );
                 }
                 Av2TileDecisionKind::IntraChromaMode {
                     use_bdpcm_uv: _,
-                    luma_mode,
+                    luma_mode: _,
                     chroma_intra_mode: _,
                 } => {
+                    let mode = lossless.mode_decision_for_leaf(
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
                     write_intra_chroma_mode(
                         writer,
                         *decision,
-                        false,
-                        luma_mode,
-                        Av2ChromaIntraMode::Horizontal,
+                        mode.chroma_use_bdpcm,
+                        mode.coded_luma_mode(),
+                        mode.chroma_intra_mode,
                     );
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
@@ -2648,6 +2708,35 @@ fn choose_partition(
     visible_rows_mi: usize,
     visible_cols_mi: usize,
 ) -> Av2MvpPartition {
+    choose_8x8_leaf_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+}
+
+fn choose_largest_lossless_partition(
+    row_mi: usize,
+    col_mi: usize,
+    block_size: Av2MvpBlockSize,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+) -> Av2MvpPartition {
+    if !block_size.is_partition_point() {
+        return Av2MvpPartition::None;
+    }
+
+    let allowed = allowed_partitions(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi);
+    if let Some(forced) =
+        forced_boundary_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+    {
+        if allowed.contains(forced) {
+            return forced;
+        }
+    }
+    if let Some(only_allowed) = allowed.only() {
+        return only_allowed;
+    }
+    if allowed.none {
+        return Av2MvpPartition::None;
+    }
+
     choose_8x8_leaf_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
 }
 
@@ -4068,6 +4157,7 @@ fn write_black_dc_residual_coefficients(
                 contexts.v_left[abs_row],
                 last_u_txb_nonzero,
                 chroma_format,
+                decision.block_size,
             );
             write_v_black_dc_txb(writer, skip_ctx);
             contexts.v_above[abs_col] = NONZERO_NEGATIVE_DC_ENTROPY_CONTEXT;
@@ -4325,6 +4415,43 @@ enum Av2Lossy420Plane {
     V,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2LosslessSubsampledModeDecision {
+    luma_intra_mode: Av2LumaIntraMode,
+    luma_bdpcm_horz: Option<bool>,
+    chroma_use_bdpcm: bool,
+    chroma_intra_mode: Av2ChromaIntraMode,
+}
+
+impl Default for Av2LosslessSubsampledModeDecision {
+    fn default() -> Self {
+        Self {
+            luma_intra_mode: Av2LumaIntraMode::Dc,
+            luma_bdpcm_horz: None,
+            chroma_use_bdpcm: false,
+            chroma_intra_mode: Av2ChromaIntraMode::Horizontal,
+        }
+    }
+}
+
+impl Av2LosslessSubsampledModeDecision {
+    fn coded_luma_mode(self) -> Av2LumaIntraMode {
+        match self.luma_bdpcm_horz {
+            Some(true) => Av2LumaIntraMode::Horizontal,
+            Some(false) => Av2LumaIntraMode::Vertical,
+            None => self.luma_intra_mode,
+        }
+    }
+}
+
+fn chroma_mode_for_luma_mode(mode: Av2LumaIntraMode) -> Av2ChromaIntraMode {
+    match mode {
+        Av2LumaIntraMode::Dc => Av2ChromaIntraMode::Dc,
+        Av2LumaIntraMode::Vertical => Av2ChromaIntraMode::Vertical,
+        Av2LumaIntraMode::Horizontal => Av2ChromaIntraMode::Horizontal,
+    }
+}
+
 struct Av2LosslessSubsampledTileState<'a> {
     geometry: Av2VideoGeometry,
     region: Av2TileRegion,
@@ -4429,23 +4556,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             .expect("validated AV2 subsampled lossless reconstruction must contain every sample");
     }
 
-    fn predictor(
-        &self,
-        plane: Av2LosslessPlane,
-        x0: usize,
-        y0: usize,
-        _local_x: usize,
-        local_y: usize,
-    ) -> Av2Sample {
-        match plane {
-            Av2LosslessPlane::Y => self.luma_dc_predictor(plane, x0, y0),
-            Av2LosslessPlane::U | Av2LosslessPlane::V => {
-                self.chroma_h_predictor(plane, x0, y0, local_y)
-            }
-        }
-    }
-
-    fn luma_dc_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+    fn dc_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         let have_left = x0 > tile_origin_x;
         let have_top = y0 > tile_origin_y;
@@ -4470,7 +4581,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         ((sum + count / 2) / count) as Av2Sample
     }
 
-    fn chroma_h_predictor(
+    fn h_predictor(
         &self,
         plane: Av2LosslessPlane,
         x0: usize,
@@ -4487,21 +4598,515 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
     }
 
+    fn v_predictor(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        local_x: usize,
+    ) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        if y0 > tile_origin_y {
+            self.recon_sample(plane, x0 + local_x, y0 - 1)
+        } else if x0 > tile_origin_x {
+            self.recon_sample(plane, x0 - 1, y0)
+        } else {
+            av2_lossless_v_pred_above_edge(self.bit_depth)
+        }
+    }
+
+    #[cfg(test)]
     fn tx4x4_coefficients(
         &self,
         plane: Av2LosslessPlane,
         x0: usize,
         y0: usize,
     ) -> [i32; TX4X4_SAMPLES] {
+        self.tx4x4_coefficients_for_mode(
+            plane,
+            x0,
+            y0,
+            Av2LosslessSubsampledModeDecision::default(),
+        )
+    }
+
+    fn tx4x4_coefficients_for_mode(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mode: Av2LosslessSubsampledModeDecision,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let residual = match plane {
+            Av2LosslessPlane::Y => {
+                if let Some(horz) = mode.luma_bdpcm_horz {
+                    self.dpcm_residual4x4(plane, x0, y0, horz)
+                } else {
+                    self.intra_residual4x4(
+                        plane,
+                        x0,
+                        y0,
+                        chroma_mode_for_luma_mode(mode.luma_intra_mode),
+                    )
+                }
+            }
+            Av2LosslessPlane::U | Av2LosslessPlane::V => {
+                if mode.chroma_use_bdpcm {
+                    self.dpcm_residual4x4(plane, x0, y0, mode.chroma_intra_mode.is_horizontal())
+                } else {
+                    self.intra_residual4x4(plane, x0, y0, mode.chroma_intra_mode)
+                }
+            }
+        };
+        av2_fwht4x4(&residual)
+    }
+
+    fn tx4x4_coefficients_for_mode_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mode: Av2LosslessSubsampledModeDecision,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let residual = match plane {
+            Av2LosslessPlane::Y => {
+                if let Some(horz) = mode.luma_bdpcm_horz {
+                    self.dpcm_residual4x4_for_score(plane, x0, y0, horz, leaf_x0, leaf_y0)
+                } else {
+                    self.intra_residual4x4_for_score(
+                        plane,
+                        x0,
+                        y0,
+                        chroma_mode_for_luma_mode(mode.luma_intra_mode),
+                        leaf_x0,
+                        leaf_y0,
+                    )
+                }
+            }
+            Av2LosslessPlane::U | Av2LosslessPlane::V => {
+                if mode.chroma_use_bdpcm {
+                    self.dpcm_residual4x4_for_score(
+                        plane,
+                        x0,
+                        y0,
+                        mode.chroma_intra_mode.is_horizontal(),
+                        leaf_x0,
+                        leaf_y0,
+                    )
+                } else {
+                    self.intra_residual4x4_for_score(
+                        plane,
+                        x0,
+                        y0,
+                        mode.chroma_intra_mode,
+                        leaf_x0,
+                        leaf_y0,
+                    )
+                }
+            }
+        };
+        av2_fwht4x4(&residual)
+    }
+
+    fn intra_residual4x4(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let dc_predictor =
+            (mode == Av2ChromaIntraMode::Dc).then(|| self.dc_predictor(plane, x0, y0));
         let mut residual = [0i32; TX4X4_SAMPLES];
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
-                let predictor = i32::from(self.predictor(plane, x0, y0, local_x, local_y));
+                let predictor = match mode {
+                    Av2ChromaIntraMode::Dc => dc_predictor.expect("DC predictor is precomputed"),
+                    Av2ChromaIntraMode::Horizontal => self.h_predictor(plane, x0, y0, local_y),
+                    Av2ChromaIntraMode::Vertical => self.v_predictor(plane, x0, y0, local_x),
+                    _ => unreachable!("subsampled lossless scorer only uses DC/H/V predictors"),
+                };
                 residual[local_y * TX4X4_SIZE + local_x] =
-                    i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y)) - predictor;
+                    i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
+                        - i32::from(predictor);
             }
         }
-        av2_fwht4x4(&residual)
+        residual
+    }
+
+    fn dpcm_residual4x4(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        horz: bool,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let x = x0 + local_x;
+                let y = y0 + local_y;
+                let sample = i32::from(self.source_sample(plane, x, y));
+                let predicted_delta = if horz {
+                    if local_x == 0 {
+                        sample - i32::from(self.h_predictor(plane, x0, y0, local_y))
+                    } else {
+                        sample - i32::from(self.source_sample(plane, x - 1, y))
+                    }
+                } else if local_y == 0 {
+                    sample - i32::from(self.v_predictor(plane, x0, y0, local_x))
+                } else {
+                    sample - i32::from(self.source_sample(plane, x, y - 1))
+                };
+                residual[local_y * TX4X4_SIZE + local_x] = predicted_delta;
+            }
+        }
+        residual
+    }
+
+    fn intra_residual4x4_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let dc_predictor = (mode == Av2ChromaIntraMode::Dc)
+            .then(|| self.dc_predictor_for_score(plane, x0, y0, leaf_x0, leaf_y0));
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let predictor = match mode {
+                    Av2ChromaIntraMode::Dc => dc_predictor.expect("DC predictor is precomputed"),
+                    Av2ChromaIntraMode::Horizontal => {
+                        self.h_predictor_for_score(plane, x0, y0, local_y, leaf_x0, leaf_y0)
+                    }
+                    Av2ChromaIntraMode::Vertical => {
+                        self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0)
+                    }
+                    _ => unreachable!("subsampled lossless scorer only uses DC/H/V predictors"),
+                };
+                residual[local_y * TX4X4_SIZE + local_x] =
+                    i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
+                        - i32::from(predictor);
+            }
+        }
+        residual
+    }
+
+    fn dpcm_residual4x4_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        horz: bool,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let x = x0 + local_x;
+                let y = y0 + local_y;
+                let sample = i32::from(self.source_sample(plane, x, y));
+                let predicted_delta = if horz {
+                    if local_x == 0 {
+                        sample
+                            - i32::from(
+                                self.h_predictor_for_score(
+                                    plane, x0, y0, local_y, leaf_x0, leaf_y0,
+                                ),
+                            )
+                    } else {
+                        sample - i32::from(self.source_sample(plane, x - 1, y))
+                    }
+                } else if local_y == 0 {
+                    sample
+                        - i32::from(
+                            self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0),
+                        )
+                } else {
+                    sample - i32::from(self.source_sample(plane, x, y - 1))
+                };
+                residual[local_y * TX4X4_SIZE + local_x] = predicted_delta;
+            }
+        }
+        residual
+    }
+
+    fn dc_predictor_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if !have_left && !have_top {
+            return av2_lossless_dc_predictor(self.bit_depth);
+        }
+
+        let mut sum = 0u32;
+        let mut count = 0u32;
+        if have_top {
+            for x in x0..(x0 + TX4X4_SIZE) {
+                sum +=
+                    u32::from(self.neighbor_sample_for_score(plane, x, y0 - 1, leaf_x0, leaf_y0));
+                count += 1;
+            }
+        }
+        if have_left {
+            for y in y0..(y0 + TX4X4_SIZE) {
+                sum +=
+                    u32::from(self.neighbor_sample_for_score(plane, x0 - 1, y, leaf_x0, leaf_y0));
+                count += 1;
+            }
+        }
+        ((sum + count / 2) / count) as Av2Sample
+    }
+
+    fn h_predictor_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        local_y: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        if x0 > tile_origin_x {
+            self.neighbor_sample_for_score(plane, x0 - 1, y0 + local_y, leaf_x0, leaf_y0)
+        } else if y0 > tile_origin_y {
+            self.neighbor_sample_for_score(plane, x0, y0 - 1, leaf_x0, leaf_y0)
+        } else {
+            av2_lossless_h_pred_left_edge(self.bit_depth)
+        }
+    }
+
+    fn v_predictor_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        local_x: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        if y0 > tile_origin_y {
+            self.neighbor_sample_for_score(plane, x0 + local_x, y0 - 1, leaf_x0, leaf_y0)
+        } else if x0 > tile_origin_x {
+            self.neighbor_sample_for_score(plane, x0 - 1, y0, leaf_x0, leaf_y0)
+        } else {
+            av2_lossless_v_pred_above_edge(self.bit_depth)
+        }
+    }
+
+    fn neighbor_sample_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x: usize,
+        y: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> Av2Sample {
+        if x >= leaf_x0 && y >= leaf_y0 {
+            self.source_sample(plane, x, y)
+        } else {
+            self.recon_sample(plane, x, y)
+        }
+    }
+
+    fn mode_decision_for_leaf(
+        &self,
+        decision: Av2TileDecision,
+        visible_rows_mi: usize,
+        visible_cols_mi: usize,
+    ) -> Av2LosslessSubsampledModeDecision {
+        let (luma_intra_mode, luma_bdpcm_horz) =
+            self.best_luma_mode(decision, visible_rows_mi, visible_cols_mi);
+        let (chroma_use_bdpcm, chroma_intra_mode) =
+            self.best_chroma_mode(decision, visible_rows_mi, visible_cols_mi);
+        Av2LosslessSubsampledModeDecision {
+            luma_intra_mode,
+            luma_bdpcm_horz,
+            chroma_use_bdpcm,
+            chroma_intra_mode,
+        }
+    }
+
+    fn best_luma_mode(
+        &self,
+        decision: Av2TileDecision,
+        visible_rows_mi: usize,
+        visible_cols_mi: usize,
+    ) -> (Av2LumaIntraMode, Option<bool>) {
+        let txb_width = decision
+            .block_size
+            .tx4x4_width()
+            .min(visible_cols_mi.saturating_sub(decision.col));
+        let txb_height = decision
+            .block_size
+            .tx4x4_height()
+            .min(visible_rows_mi.saturating_sub(decision.row));
+        let dc_mode = Av2LosslessSubsampledModeDecision::default();
+        let horizontal_mode = Av2LosslessSubsampledModeDecision {
+            luma_intra_mode: Av2LumaIntraMode::Horizontal,
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+        let vertical_mode = Av2LosslessSubsampledModeDecision {
+            luma_intra_mode: Av2LumaIntraMode::Vertical,
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+        let horz_mode = Av2LosslessSubsampledModeDecision {
+            luma_bdpcm_horz: Some(true),
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+        let vert_mode = Av2LosslessSubsampledModeDecision {
+            luma_bdpcm_horz: Some(false),
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+
+        let candidates = [
+            (Av2LumaIntraMode::Dc, None, dc_mode, 0usize),
+            (Av2LumaIntraMode::Horizontal, None, horizontal_mode, 32usize),
+            (Av2LumaIntraMode::Vertical, None, vertical_mode, 32usize),
+            (Av2LumaIntraMode::Horizontal, Some(true), horz_mode, 64usize),
+            (Av2LumaIntraMode::Vertical, Some(false), vert_mode, 64usize),
+        ];
+        candidates
+            .into_iter()
+            .map(|(luma_mode, bdpcm_horz, decision_mode, syntax_penalty)| {
+                (
+                    luma_mode,
+                    bdpcm_horz,
+                    self.luma_leaf_coefficient_score(
+                        decision,
+                        txb_width,
+                        txb_height,
+                        decision_mode,
+                    ) + syntax_penalty,
+                )
+            })
+            .min_by_key(|(_, _, score)| *score)
+            .map(|(luma_mode, bdpcm_horz, _)| (luma_mode, bdpcm_horz))
+            .expect("AV2 subsampled luma scorer has fixed candidates")
+    }
+
+    fn luma_leaf_coefficient_score(
+        &self,
+        decision: Av2TileDecision,
+        txb_width: usize,
+        txb_height: usize,
+        mode: Av2LosslessSubsampledModeDecision,
+    ) -> usize {
+        let mut score = 0usize;
+        let (leaf_x0, leaf_y0) = self.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
+        for row in 0..txb_height {
+            let abs_row = decision.row + row;
+            for col in 0..txb_width {
+                let abs_col = decision.col + col;
+                let (x0, y0) = self.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
+                let coefficients = self.tx4x4_coefficients_for_mode_score(
+                    Av2LosslessPlane::Y,
+                    x0,
+                    y0,
+                    mode,
+                    leaf_x0,
+                    leaf_y0,
+                );
+                score +=
+                    coefficient_proxy_score(&coefficients, Av2CoefficientProxyKind::LumaTransform);
+            }
+        }
+        score
+    }
+
+    fn best_chroma_mode(
+        &self,
+        decision: Av2TileDecision,
+        visible_rows_mi: usize,
+        visible_cols_mi: usize,
+    ) -> (bool, Av2ChromaIntraMode) {
+        let chroma_span = chroma_tx4x4_span(
+            decision,
+            visible_rows_mi,
+            visible_cols_mi,
+            self.chroma_format,
+        );
+        let horizontal = Av2LosslessSubsampledModeDecision::default();
+        let vertical = Av2LosslessSubsampledModeDecision {
+            chroma_intra_mode: Av2ChromaIntraMode::Vertical,
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+        let dc = Av2LosslessSubsampledModeDecision {
+            chroma_intra_mode: Av2ChromaIntraMode::Dc,
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+        let dpcm_horz = Av2LosslessSubsampledModeDecision {
+            chroma_use_bdpcm: true,
+            chroma_intra_mode: Av2ChromaIntraMode::Horizontal,
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+        let dpcm_vert = Av2LosslessSubsampledModeDecision {
+            chroma_use_bdpcm: true,
+            chroma_intra_mode: Av2ChromaIntraMode::Vertical,
+            ..Av2LosslessSubsampledModeDecision::default()
+        };
+
+        let candidates = [
+            (false, Av2ChromaIntraMode::Horizontal, horizontal),
+            (false, Av2ChromaIntraMode::Vertical, vertical),
+            (false, Av2ChromaIntraMode::Dc, dc),
+            (true, Av2ChromaIntraMode::Horizontal, dpcm_horz),
+            (true, Av2ChromaIntraMode::Vertical, dpcm_vert),
+        ];
+        let (use_bdpcm, mode, _) = candidates
+            .into_iter()
+            .map(|(use_bdpcm, mode, decision_mode)| {
+                (
+                    use_bdpcm,
+                    mode,
+                    self.chroma_leaf_coefficient_score(chroma_span, decision_mode)
+                        + usize::from(use_bdpcm) * 64,
+                )
+            })
+            .min_by_key(|(_, _, score)| *score)
+            .expect("AV2 subsampled chroma scorer has fixed candidates");
+        (use_bdpcm, mode)
+    }
+
+    fn chroma_leaf_coefficient_score(
+        &self,
+        chroma_span: Av2ChromaTx4x4Span,
+        mode: Av2LosslessSubsampledModeDecision,
+    ) -> usize {
+        let mut score = 0usize;
+        for plane in [Av2LosslessPlane::U, Av2LosslessPlane::V] {
+            let (leaf_x0, leaf_y0) = self.txb_origin(plane, chroma_span.col, chroma_span.row);
+            for row in 0..chroma_span.height {
+                let abs_row = chroma_span.row + row;
+                for col in 0..chroma_span.width {
+                    let abs_col = chroma_span.col + col;
+                    let (x0, y0) = self.txb_origin(plane, abs_col, abs_row);
+                    let coefficients = self
+                        .tx4x4_coefficients_for_mode_score(plane, x0, y0, mode, leaf_x0, leaf_y0);
+                    score += coefficient_proxy_score(
+                        &coefficients,
+                        Av2CoefficientProxyKind::ChromaTransform,
+                    );
+                }
+            }
+        }
+        score
     }
 
     fn copy_source_to_recon_txb(&mut self, plane: Av2LosslessPlane, x0: usize, y0: usize) {
@@ -4625,6 +5230,7 @@ fn write_lossy_420_residual_coefficients(
                 contexts.v_left[abs_row],
                 last_u_txb_nonzero,
                 Av2ChromaFormat::Yuv420,
+                decision.block_size,
             );
             let (x0, y0) = lossy.txb_origin(Av2Lossy420Plane::V, abs_col, abs_row);
             let delta = lossy.quantized_dc_delta(Av2Lossy420Plane::V, x0, y0);
@@ -4645,6 +5251,7 @@ fn write_lossless_subsampled_residual_coefficients(
     contexts: &mut Av2TxbEntropyContexts,
     lossless: &mut Av2LosslessSubsampledTileState<'_>,
 ) {
+    let mode = lossless.mode_decision_for_leaf(decision, visible_rows_mi, visible_cols_mi);
     let txb_width = decision
         .block_size
         .tx4x4_width()
@@ -4661,7 +5268,8 @@ fn write_lossless_subsampled_residual_coefficients(
                 luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
-            let coefficients = lossless.tx4x4_coefficients(Av2LosslessPlane::Y, x0, y0);
+            let coefficients =
+                lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::Y, x0, y0, mode);
             let (context, _) =
                 write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients);
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::Y, x0, y0);
@@ -4685,7 +5293,8 @@ fn write_lossless_subsampled_residual_coefficients(
                 chroma_txb_skip_base_context(contexts.u_above[abs_col], contexts.u_left[abs_row])
                     + 6;
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::U, abs_col, abs_row);
-            let coefficients = lossless.tx4x4_coefficients(Av2LosslessPlane::U, x0, y0);
+            let coefficients =
+                lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::U, x0, y0, mode);
             let (context, nonzero) =
                 write_chroma_bdpcm_txb(writer, Av2ChromaPlane::U, skip_ctx, &coefficients, false);
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::U, x0, y0);
@@ -4704,9 +5313,11 @@ fn write_lossless_subsampled_residual_coefficients(
                 contexts.v_left[abs_row],
                 last_u_txb_nonzero,
                 lossless.chroma_format,
+                decision.block_size,
             );
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::V, abs_col, abs_row);
-            let coefficients = lossless.tx4x4_coefficients(Av2LosslessPlane::V, x0, y0);
+            let coefficients =
+                lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::V, x0, y0, mode);
             let (context, _) =
                 write_chroma_bdpcm_txb(writer, Av2ChromaPlane::V, skip_ctx, &coefficients, false);
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::V, x0, y0);
@@ -7392,16 +8003,20 @@ fn v_txb_skip_context_for_chroma_format(
     left: u8,
     last_u_txb_nonzero: bool,
     chroma_format: Av2ChromaFormat,
+    block_size: Av2MvpBlockSize,
 ) -> u8 {
     // AV2 v1.0.0 get_txb_ctx() adds half of V_TXB_SKIP_CONTEXT_OFFSET only
-    // when the chroma coding block is larger than the TXB. In the shared-tree
-    // path, 4:2:2 chroma reference blocks can inherit the parent size even
-    // while residuals are emitted as 4x4 TXBs, so they use the same +3 offset
-    // as 4:4:4 for the current MVP partitioning.
-    let block_larger_than_txb_offset = match chroma_format {
-        Av2ChromaFormat::Yuv444 | Av2ChromaFormat::Yuv422 => 3,
-        Av2ChromaFormat::Yuv420 => 0,
-    };
+    // when the chroma coding block is larger than the TXB. 4:2:0 8x8 luma
+    // leaves map to exactly one 4x4 chroma TXB, while larger lossless leaves
+    // inherit the same +3 offset as 4:2:2/4:4:4.
+    let chroma_block_width = block_size.width / chroma_subsample_x(chroma_format);
+    let chroma_block_height = block_size.height / chroma_subsample_y(chroma_format);
+    let block_larger_than_txb_offset =
+        if chroma_block_width > TX4X4_SIZE || chroma_block_height > TX4X4_SIZE {
+            3
+        } else {
+            0
+        };
     chroma_txb_skip_base_context(above, left)
         + block_larger_than_txb_offset
         + if last_u_txb_nonzero { 6 } else { 0 }
@@ -7496,6 +8111,38 @@ mod tests {
                 && decision.row == 0
                 && decision.col == 0
                 && decision.block_size == Av2MvpBlockSize::new(8, 8)
+        }));
+    }
+
+    #[test]
+    fn av2_lossless_subsampled_plan_keeps_larger_leaves() {
+        let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+            Av2TileRegion::root(Av2VideoGeometry {
+                width: 64,
+                height: 64,
+            }),
+            Av2Black444MvpProfile::current(),
+            Av2ChromaFormat::Yuv420,
+            Av2PartitionPolicy::LargestLosslessLeaves,
+            false,
+            false,
+            None,
+            None,
+        );
+
+        let partition_none_count = plan
+            .decisions
+            .iter()
+            .filter(|decision| {
+                decision.kind == Av2TileDecisionKind::Partition(Av2MvpPartition::None)
+            })
+            .count();
+        assert_eq!(partition_none_count, 1);
+        assert!(plan.decisions.iter().any(|decision| {
+            decision.kind == Av2TileDecisionKind::BlackDcResidualCoefficients
+                && decision.row == 0
+                && decision.col == 0
+                && decision.block_size == Av2MvpBlockSize::new(64, 64)
         }));
     }
 
@@ -7654,19 +8301,53 @@ mod tests {
     #[test]
     fn av2_v_txb_skip_context_matches_shared_tree_chroma_refs() {
         assert_eq!(
-            v_txb_skip_context_for_chroma_format(0, 0, false, Av2ChromaFormat::Yuv420),
+            v_txb_skip_context_for_chroma_format(
+                0,
+                0,
+                false,
+                Av2ChromaFormat::Yuv420,
+                Av2MvpBlockSize::new(8, 8)
+            ),
             chroma_txb_skip_base_context(0, 0)
         );
         assert_eq!(
-            v_txb_skip_context_for_chroma_format(0, 0, false, Av2ChromaFormat::Yuv422),
+            v_txb_skip_context_for_chroma_format(
+                0,
+                0,
+                false,
+                Av2ChromaFormat::Yuv420,
+                Av2MvpBlockSize::new(16, 16)
+            ),
             chroma_txb_skip_base_context(0, 0) + 3
         );
         assert_eq!(
-            v_txb_skip_context_for_chroma_format(0, 0, false, Av2ChromaFormat::Yuv444),
+            v_txb_skip_context_for_chroma_format(
+                0,
+                0,
+                false,
+                Av2ChromaFormat::Yuv422,
+                Av2MvpBlockSize::new(8, 8)
+            ),
             chroma_txb_skip_base_context(0, 0) + 3
         );
         assert_eq!(
-            v_txb_skip_context_for_chroma_format(1, 0, true, Av2ChromaFormat::Yuv422),
+            v_txb_skip_context_for_chroma_format(
+                0,
+                0,
+                false,
+                Av2ChromaFormat::Yuv444,
+                Av2MvpBlockSize::new(8, 8)
+            ),
+            chroma_txb_skip_base_context(0, 0) + 3
+        );
+        assert_eq!(
+            v_txb_skip_context_for_chroma_format(
+                1,
+                0,
+                true,
+                Av2ChromaFormat::Yuv422,
+                Av2MvpBlockSize::new(8, 8)
+            ),
             chroma_txb_skip_base_context(1, 0) + 3 + 6
         );
     }
