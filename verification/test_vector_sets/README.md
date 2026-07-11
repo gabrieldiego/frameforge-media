@@ -27,8 +27,9 @@ Local manifests may use `pattern=source_file` with a `path` column. Raw YUV
 sources require explicit width, height, format, and frame count. Y4M source
 rows may leave width, height, format, and fps empty; the generator reads those
 from the Y4M header and strips the Y4M container markers when writing raw
-generated fixtures. Source-file generation currently supports `yuv420p8`,
-`yuv420p10le`, and `yuv444p8`.
+generated fixtures. Source-file generation supports planar 4:2:0, 4:2:2, and
+4:4:4 rows with the same 8-through-16-bit format spelling accepted by the
+fixture generator.
 
 Manifest `format` values follow the CLI raw input contract. Planar YUV and gray
 formats use checked numeric bit depths from 8 through 16, such as
@@ -38,6 +39,7 @@ formats use checked numeric bit depths from 8 through 16, such as
 Supported generated formats:
 
 - `yuv420p8` through `yuv420p16le`
+- `yuv422p8` through `yuv422p16le`
 - `yuv444p8` through `yuv444p16le`
 
 Supported patterns:
@@ -51,9 +53,10 @@ Supported patterns:
 `bitdepth_canary` is a high-depth smoke pattern that writes deterministic
 non-zero lower bits into generated 10-bit and 12-bit samples. It is intended to
 catch internal truncation, not to act as a compression-efficiency benchmark.
-The committed high-depth smoke manifest keeps 4:2:0 canaries generateable but
-gates validation to codec paths that currently emit reference-decodable
-lossless streams, including VVC 4:2:0 and 4:4:4 high-depth canaries.
+The committed high-depth smoke manifest keeps 4:2:2 canaries generateable but
+gates them to `codecs=none` until a codec path emits reference-decodable
+lossless 4:2:2 streams. VVC 4:2:0 and 4:4:4 high-depth canaries are enabled,
+and AV2 is enabled for the current 10-bit 4:4:4 canary path.
 
 Generated filenames include metadata in the CLI-supported form:
 

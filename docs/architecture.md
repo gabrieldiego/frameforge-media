@@ -69,9 +69,11 @@ codec path only accepts the same planar layout at 8-bit; this converter does
 not change chroma sampling or color family. Codec paths that support an exact
 higher depth, such as AV2 4:2:0/4:4:4 at 10 bits and VVC 4:2:0/4:4:4
 through 12 bits, receive the original raw format without conversion.
-Lossless mode adds a stricter stream-exact requirement: current lossless
-validation is enabled for AV2 4:4:4 at 8/10 bits and VVC 4:2:0/4:4:4 at 8
-through 12 bits.
+Lossless mode adds a stricter stream-exact requirement and never uses the
+8-bit fallback converter. Current lossless validation is enabled for AV2 4:4:4
+at 8/10 bits and VVC 4:2:0/4:4:4 at 8 through 12 bits. 4:2:2 lossless inputs
+are accepted by the front-end fixture and CLI plumbing, but remain codec-gated
+until AV2 and VVC each implement exact reconstruction for that sampling mode.
 
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.

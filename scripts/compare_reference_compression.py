@@ -422,6 +422,8 @@ def av2_reference_encode_command(
         command.append("--lossless=1")
     if vector.fmt == "yuv420p8":
         command.append("--i420")
+    elif vector.fmt == "yuv422p8":
+        command.append("--i422")
     elif vector.fmt == "yuv444p8":
         command.extend(["--i444", "--profile=1"])
     else:
@@ -501,6 +503,15 @@ def vvc_reference_encode_command(
                 f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
             )
     else:
+        bit_depth = generate_test_vectors.yuv422_bit_depth(vector.fmt)
+        if bit_depth is not None:
+            chroma_format = "422"
+            if not vvc_bit_depth_is_supported(bit_depth):
+                raise SystemExit(
+                    f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
+                )
+
+    if bit_depth is None:
         bit_depth = generate_test_vectors.yuv444_bit_depth(vector.fmt)
         if bit_depth is None:
             raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")

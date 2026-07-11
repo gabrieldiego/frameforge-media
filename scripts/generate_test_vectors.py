@@ -377,6 +377,9 @@ def generate_yuv(vector: TestVector, sources: dict[str, TestVectorSource]) -> by
     bit_depth = yuv420_bit_depth(vector.fmt)
     if bit_depth is not None:
         return generate_yuv420p(vector, bit_depth)
+    bit_depth = yuv422_bit_depth(vector.fmt)
+    if bit_depth is not None:
+        return generate_yuv422p(vector, bit_depth)
     bit_depth = yuv444_bit_depth(vector.fmt)
     if bit_depth is not None:
         return generate_yuv444p(vector, bit_depth)
@@ -390,6 +393,8 @@ def validate_vector(vector: TestVector) -> None:
         vector.width % 2 != 0 or vector.height % 2 != 0
     ):
         raise ValueError(f"{vector.name} {vector.fmt} dimensions must be even")
+    if yuv422_bit_depth(vector.fmt) is not None and vector.width % 2 != 0:
+        raise ValueError(f"{vector.name} {vector.fmt} width must be even")
     if yuv444_bit_depth(vector.fmt) is not None and (
         vector.width % 8 != 0 or vector.height % 8 != 0
     ):
@@ -507,6 +512,12 @@ def y4m_pixel_format(chroma_tag: str | None) -> str:
         bit_depth = numeric_y4m_bit_depth(normalized, "420p")
         if bit_depth is not None:
             return f"yuv420p{bit_depth}le"
+    if normalized == "422":
+        return "yuv422p8"
+    if normalized.startswith("422p"):
+        bit_depth = numeric_y4m_bit_depth(normalized, "422p")
+        if bit_depth is not None:
+            return f"yuv422p{bit_depth}le"
     if normalized == "444":
         return "yuv444p8"
     if normalized.startswith("444p"):
@@ -636,6 +647,9 @@ def raw_frame_len(vector: TestVector) -> int:
     bit_depth = yuv420_bit_depth(vector.fmt)
     if bit_depth is not None:
         return luma * 3 // 2 * bytes_per_sample(bit_depth)
+    bit_depth = yuv422_bit_depth(vector.fmt)
+    if bit_depth is not None:
+        return luma * 2 * bytes_per_sample(bit_depth)
     bit_depth = yuv444_bit_depth(vector.fmt)
     if bit_depth is not None:
         return luma * 3 * bytes_per_sample(bit_depth)
@@ -648,6 +662,10 @@ def yuv444_bit_depth(fmt: str) -> int | None:
 
 def yuv420_bit_depth(fmt: str) -> int | None:
     return planar_yuv_bit_depth(fmt, "yuv420p")
+
+
+def yuv422_bit_depth(fmt: str) -> int | None:
+    return planar_yuv_bit_depth(fmt, "yuv422p")
 
 
 def planar_yuv_bit_depth(fmt: str, prefix: str) -> int | None:
@@ -698,6 +716,32 @@ def generate_yuv420p(vector: TestVector, bit_depth: int) -> bytes:
     return data
 
 
+def generate_yuv422p(vector: TestVector, bit_depth: int) -> bytes:
+    if vector.pattern == "bitdepth_canary":
+        return generate_yuv422p_bitdepth_canary(vector, bit_depth)
+
+    out = bytearray()
+    for frame in range(vector.frames):
+        y_plane, u444, v444 = render_frame(vector, frame)
+        u_plane = bytearray()
+        v_plane = bytearray()
+        for y in range(vector.height):
+            for x in range(0, vector.width, 2):
+                indices = (
+                    pixel_index(vector, x, y),
+                    pixel_index(vector, x + 1, y),
+                )
+                u_plane.append(sum(u444[idx] for idx in indices) // 2)
+                v_plane.append(sum(v444[idx] for idx in indices) // 2)
+        out.extend(y_plane)
+        out.extend(u_plane)
+        out.extend(v_plane)
+    data = bytes(out)
+    if bit_depth > 8:
+        return zero_pad_planar8_to_le(data, bit_depth)
+    return data
+
+
 def generate_yuv444p(vector: TestVector, bit_depth: int) -> bytes:
     if vector.pattern == "bitdepth_canary":
         return generate_yuv444p_bitdepth_canary(vector, bit_depth)
@@ -722,6 +766,17 @@ def generate_yuv420p_bitdepth_canary(vector: TestVector, bit_depth: int) -> byte
         append_canary_plane(out, vector.width, vector.height, bit_depth, frame, plane=0)
         append_canary_plane(out, vector.width // 2, vector.height // 2, bit_depth, frame, plane=1)
         append_canary_plane(out, vector.width // 2, vector.height // 2, bit_depth, frame, plane=2)
+    return bytes(out)
+
+
+def generate_yuv422p_bitdepth_canary(vector: TestVector, bit_depth: int) -> bytes:
+    if bit_depth <= 8:
+        raise ValueError("bitdepth_canary is intended for high-depth generated vectors")
+    out = bytearray()
+    for frame in range(vector.frames):
+        append_canary_plane(out, vector.width, vector.height, bit_depth, frame, plane=0)
+        append_canary_plane(out, vector.width // 2, vector.height, bit_depth, frame, plane=1)
+        append_canary_plane(out, vector.width // 2, vector.height, bit_depth, frame, plane=2)
     return bytes(out)
 
 

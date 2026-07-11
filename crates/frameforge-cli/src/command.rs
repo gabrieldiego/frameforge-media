@@ -627,20 +627,16 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     let width = video.width as usize;
     let height = video.height as usize;
     let frames = resolve_frame_count(args, &input, source_format, width, height)?;
-    let format = codec_input_format(
-        args.codec.as_deref().expect("parser requires codec"),
-        source_format,
-    );
+    let codec = args.codec.as_deref().expect("parser requires codec");
     let lossless = lossless_setting_enabled(&args.settings)?;
-    if lossless && format != source_format {
+    let format = if lossless {
+        source_format
+    } else {
+        codec_input_format(codec, source_format)
+    };
+    if lossless && !codec_supports_lossless_stream(codec, format) {
         return Err(format!(
-            "lossless encode requires native codec support for {source_format}; refusing fallback conversion to {format}"
-        ));
-    }
-    if lossless && !codec_supports_lossless_stream(args.codec.as_deref().unwrap(), format) {
-        return Err(format!(
-            "lossless encode is not implemented for {} {format}",
-            args.codec.as_deref().unwrap()
+            "lossless encode is not implemented for {codec} {format}"
         ));
     }
     Ok(EncodeJob {
@@ -1283,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_job_rejects_lossless_bit_depth_fallback() {
+    fn encode_job_rejects_lossless_without_bit_depth_fallback() {
         let bits = 13;
         let format_name = format!("yuv420p{bits}le");
         let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
@@ -1309,7 +1305,7 @@ mod tests {
 
         let err = encode_job(&args).expect_err("lossless fallback must be rejected");
         assert!(
-            err.contains("lossless encode requires native codec support"),
+            err.contains("lossless encode is not implemented for av2 yuv420p13le"),
             "{err}"
         );
         let _ = fs::remove_file(path);
@@ -1345,6 +1341,46 @@ mod tests {
             "{err}"
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_rejects_lossless_yuv422_without_bit_depth_fallback() {
+        for codec in ["av2", "vvc"] {
+            let format_name = "yuv422p10le";
+            let path = temp_yuv_path(&format!("one_frame_8x8_{codec}_{format_name}"));
+            let format = PixelFormat::yuv422(10).unwrap();
+            let input = vec![0; format.frame_len(8, 8).unwrap()];
+            let mut file = File::create(&path).expect("create temp yuv");
+            file.write_all(&input).expect("write temp yuv");
+            drop(file);
+
+            let args = EncodeArgs {
+                input: Some(path.to_string_lossy().to_string()),
+                output: Some(if codec == "av2" { "out.obu" } else { "out.266" }.to_string()),
+                codec: Some(codec.to_string()),
+                video: Some(args::VideoSpec {
+                    width: 8,
+                    height: 8,
+                    pixel_format: Some(format_name.to_string()),
+                }),
+                settings: vec!["lossless=true".to_string()],
+                frames: None,
+                ..EncodeArgs::default()
+            };
+
+            let err = encode_job(&args).expect_err("lossless 4:2:2 is codec-gated");
+            assert!(
+                err.contains(&format!(
+                    "lossless encode is not implemented for {codec} yuv422p10le"
+                )),
+                "{err}"
+            );
+            assert!(
+                !err.contains("yuv422p8"),
+                "lossless error should not report an 8-bit fallback: {err}"
+            );
+            let _ = fs::remove_file(path);
+        }
     }
 
     #[test]
