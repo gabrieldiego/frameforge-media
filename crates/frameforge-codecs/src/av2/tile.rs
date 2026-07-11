@@ -4926,7 +4926,15 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     Av2ChromaIntraMode::Dc => dc_predictor.expect("DC predictor is precomputed"),
                     Av2ChromaIntraMode::Horizontal => self.h_predictor(plane, x0, y0, local_y),
                     Av2ChromaIntraMode::Vertical => self.v_predictor(plane, x0, y0, local_x),
-                    _ => unreachable!("subsampled lossless scorer only uses DC/H/V predictors"),
+                    Av2ChromaIntraMode::Paeth => {
+                        let left = self.h_predictor(plane, x0, y0, local_y);
+                        let above = self.v_predictor(plane, x0, y0, local_x);
+                        let above_left = self.above_left_predictor(plane, x0, y0);
+                        paeth_predictor(left, above, above_left)
+                    }
+                    _ => {
+                        unreachable!("subsampled lossless scorer only uses DC/H/V/Paeth predictors")
+                    }
                 };
                 residual[local_y * TX4X4_SIZE + local_x] =
                     i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
@@ -4988,7 +4996,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     Av2ChromaIntraMode::Vertical => {
                         self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0)
                     }
-                    _ => unreachable!("subsampled lossless scorer only uses DC/H/V predictors"),
+                    Av2ChromaIntraMode::Paeth => {
+                        let left =
+                            self.h_predictor_for_score(plane, x0, y0, local_y, leaf_x0, leaf_y0);
+                        let above =
+                            self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0);
+                        let above_left =
+                            self.above_left_predictor_for_score(plane, x0, y0, leaf_x0, leaf_y0);
+                        paeth_predictor(left, above, above_left)
+                    }
+                    _ => {
+                        unreachable!("subsampled lossless scorer only uses DC/H/V/Paeth predictors")
+                    }
                 };
                 residual[local_y * TX4X4_SIZE + local_x] =
                     i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
@@ -5110,6 +5129,43 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
     }
 
+    fn above_left_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if have_left && have_top {
+            self.recon_sample(plane, x0 - 1, y0 - 1)
+        } else if have_top {
+            self.recon_sample(plane, x0, y0 - 1)
+        } else if have_left {
+            self.recon_sample(plane, x0 - 1, y0)
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        }
+    }
+
+    fn above_left_predictor_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if have_left && have_top {
+            self.neighbor_sample_for_score(plane, x0 - 1, y0 - 1, leaf_x0, leaf_y0)
+        } else if have_top {
+            self.neighbor_sample_for_score(plane, x0, y0 - 1, leaf_x0, leaf_y0)
+        } else if have_left {
+            self.neighbor_sample_for_score(plane, x0 - 1, y0, leaf_x0, leaf_y0)
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        }
+    }
+
     fn neighbor_sample_for_score(
         &self,
         plane: Av2LosslessPlane,
@@ -5169,6 +5225,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 (false, Av2ChromaIntraMode::Horizontal, 0usize),
                 (false, Av2ChromaIntraMode::Vertical, 0usize),
                 (false, Av2ChromaIntraMode::Dc, 0usize),
+                (false, Av2ChromaIntraMode::Paeth, 128usize),
                 (true, Av2ChromaIntraMode::Horizontal, 64usize),
                 (true, Av2ChromaIntraMode::Vertical, 64usize),
             ];
