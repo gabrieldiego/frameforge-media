@@ -143,7 +143,18 @@ def run_file_case(
             str(recon),
         ]
     )
-    return run_command(vector_path.name, output, recon, reference_recon, log, command, args)
+    if vector.lossless:
+        command.extend(["--set", "lossless"])
+    return run_command(
+        vector_path.name,
+        output,
+        recon,
+        reference_recon,
+        log,
+        command,
+        args,
+        lossless_source=vector_path if vector.lossless else None,
+    )
 
 
 def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Namespace) -> ValidationResult:
@@ -162,7 +173,18 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
     if vector.fps is not None:
         command.extend(["--fps", vector.fps])
     command.extend(["--encode", f"{args.codec}:{output}", "--recon", str(recon)])
-    return run_command(vector.filename, output, recon, reference_recon, log, command, args)
+    if vector.lossless:
+        command.extend(["--set", "lossless"])
+    return run_command(
+        vector.filename,
+        output,
+        recon,
+        reference_recon,
+        log,
+        command,
+        args,
+        lossless_source=vector if vector.lossless else None,
+    )
 
 
 def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
@@ -188,6 +210,7 @@ def run_command(
     log: Path,
     command: list[str],
     args: argparse.Namespace,
+    lossless_source: Path | generate_test_vectors.TestVector | None = None,
 ) -> ValidationResult:
     if output.exists():
         output.unlink()
@@ -269,6 +292,21 @@ def run_command(
             reference_sha256="n/a",
         )
     recon_sha = sha256_file(recon)
+    lossless_status = validate_lossless_source(lossless_source, recon)
+    if lossless_status is not None and lossless_status[0] == "FAIL":
+        return ValidationResult(
+            vector_name=vector_name,
+            output=output,
+            recon=recon,
+            reference_recon=None,
+            log=log,
+            status="FAIL",
+            reason=lossless_status[1],
+            bytes_written=size,
+            sha256=sha256_file(output),
+            recon_sha256=recon_sha,
+            reference_sha256="n/a",
+        )
     reference_status = validate_reference_decode(args, output, recon, reference_recon, log)
     if reference_status is not None and reference_status[0] == "FAIL":
         return ValidationResult(
@@ -286,8 +324,14 @@ def run_command(
         )
     reference_sha = sha256_file(reference_recon) if reference_recon.exists() else "n/a"
     reason = "encoded output and internal reconstruction were produced"
+    if lossless_status is not None:
+        reason = lossless_status[1]
     if reference_status is not None:
-        reason = reference_status[1]
+        reason = (
+            f"{reason}; {reference_status[1]}"
+            if lossless_status is not None
+            else reference_status[1]
+        )
     return ValidationResult(
         vector_name=vector_name,
         output=output,
@@ -301,6 +345,26 @@ def run_command(
         recon_sha256=recon_sha,
         reference_sha256=reference_sha,
     )
+
+
+def validate_lossless_source(
+    source: Path | generate_test_vectors.TestVector | None, recon: Path
+) -> tuple[str, str] | None:
+    if source is None:
+        return None
+    if isinstance(source, Path):
+        source_bytes = source.read_bytes()
+    else:
+        source_bytes = generate_test_vectors.generate_yuv(source, {})
+    recon_bytes = recon.read_bytes()
+    if source_bytes != recon_bytes:
+        if len(source_bytes) != len(recon_bytes):
+            return (
+                "FAIL",
+                f"lossless reconstruction length differs from source ({len(recon_bytes)} != {len(source_bytes)})",
+            )
+        return ("FAIL", "lossless reconstruction differs from source")
+    return ("PASS", "lossless reconstruction matches source")
 
 
 def codec_extension(codec: str) -> str:

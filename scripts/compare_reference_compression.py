@@ -24,7 +24,7 @@ DEFAULT_LOG_DIR = REPO_ROOT / "verification" / "generated" / "compression_compar
 REFERENCE_TOOLS = REPO_ROOT / "scripts" / "reference_tools.py"
 VTM_CFG_DIR = REPO_ROOT / "verification" / "references" / "vvc" / "vtm" / "cfg"
 VVC_MIN_BIT_DEPTH = 8
-VVC_MAX_BIT_DEPTH = 16
+VVC_MAX_BIT_DEPTH = 12
 
 
 @dataclass(frozen=True)
@@ -505,8 +505,6 @@ def vvc_reference_encode_command(
         command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless.cfg")])
         if chroma_format == "444":
             command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless444.cfg")])
-    if bit_depth > 12:
-        command.append("--Profile=none")
 
     command.extend(
         [

@@ -114,7 +114,7 @@ fn vvc_sps_signals_native_420_bit_depth_profiles() {
         width: 16,
         height: 16,
     };
-    for (bits, expected_profile) in [(8, 1), (10, 1), (12, 2), (13, 0), (16, 0)] {
+    for (bits, expected_profile) in [(8, 1), (10, 1), (12, 2)] {
         let rbsp = vvc_sps_rbsp(
             geometry,
             VvcSliceSyntaxConfig::yuv420_residual(),
@@ -1520,7 +1520,7 @@ fn vvc_input_path_preserves_native_yuv420p_high_depth() {
         VvcEncodeParams { frames: 1 },
     )
     .unwrap();
-    for bit_depth in 9..=16 {
+    for bit_depth in 9..=12 {
         let format = PixelFormat::yuv420(bit_depth).unwrap();
         let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
         let frame = sample_vvc_yuv_frame(
@@ -1555,6 +1555,17 @@ fn vvc_input_path_preserves_native_yuv420p_high_depth() {
 }
 
 #[test]
+fn vvc_input_path_rejects_unsupported_high_depth_yuv420p() {
+    for bit_depth in 13..=16 {
+        let format = PixelFormat::yuv420(bit_depth).unwrap();
+        let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
+        let err = vvc_yuv420p_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
+            .unwrap_err();
+        assert!(err.contains("8..12"), "{err}");
+    }
+}
+
+#[test]
 fn vvc_input_path_accepts_supported_yuv_subsampling() {
     let expected = vvc_yuv420p8_annex_b_from_input(
         &solid_yuv420p8(65, 128, 192, 1),
@@ -1579,6 +1590,17 @@ fn vvc_input_path_rejects_high_depth_yuv422_until_native_path_exists() {
     let err = vvc_default_yuv_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
         .unwrap_err();
     assert!(err.contains("4:2:2"), "{err}");
+}
+
+#[test]
+fn vvc_input_path_rejects_unsupported_high_depth_yuv444p() {
+    for bit_depth in 13..=16 {
+        let format = PixelFormat::yuv444(bit_depth).unwrap();
+        let input = solid_yuv_planar_high(65, 128, 192, bit_depth, 64, 1);
+        let err = vvc_default_yuv_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
+            .unwrap_err();
+        assert!(err.contains("8..12"), "{err}");
+    }
 }
 
 #[test]
@@ -1875,7 +1897,7 @@ fn vvc_palette_444_cu_syntax_uses_native_high_depth_entries() {
         width: 8,
         height: 8,
     };
-    for bits in [10, 16] {
+    for bits in [10, 12] {
         let bit_depth = SampleBitDepth::new(bits).expect("valid bit depth");
         let max_sample = bit_depth.max_sample();
         let colors = [

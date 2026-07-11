@@ -96,9 +96,9 @@ Current behavior:
 - AV2 accepts `yuv444p8` and `yuv444p10le` natively for the current 4:4:4 path.
   Higher 4:4:4 depths are scaled to `yuv444p8` before encoding until a
   reference-valid 12-bit profile path is added.
-- VVC accepts `yuv420p8` through `yuv420p16le` natively for the current 4:2:0
+- VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
   residual path. Higher 4:2:0 depths are scaled to `yuv420p8` before encoding.
-- VVC accepts `yuv444p8` through `yuv444p16le` natively for the current 4:4:4
+- VVC accepts `yuv444p8` through `yuv444p12le` natively for the current 4:4:4
   palette path. Higher 4:4:4 depths are scaled to `yuv444p8` before encoding.
   Palette entries carry native samples; high-depth escape-coded samples follow
   VTM palette escape level scaling, which is exact for zero-padded 8-bit

@@ -472,11 +472,6 @@ fn vvc_general_profile_idc(
         // PTL/GCI constraint set is generated. Profile NONE avoids the Main 10
         // palette-off constraint while this clean-room subset is still forming.
         0
-    } else if bit_depth.bits() > 12 {
-        // The named VVC 4:2:0 profiles in VTM top out at Main 12. Keep higher
-        // experimental bit depths decodable by using profile NONE until a
-        // concrete profile/constraint story exists for this subset.
-        0
     } else if bit_depth.bits() > 10 {
         2
     } else {

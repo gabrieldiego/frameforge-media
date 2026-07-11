@@ -652,6 +652,9 @@ def bytes_per_sample(bit_depth: int) -> int:
 
 
 def generate_yuv420p(vector: TestVector, bit_depth: int) -> bytes:
+    if vector.pattern == "bitdepth_canary":
+        return generate_yuv420p_bitdepth_canary(vector, bit_depth)
+
     out = bytearray()
     for frame in range(vector.frames):
         y_plane, u444, v444 = render_frame(vector, frame)
@@ -677,6 +680,9 @@ def generate_yuv420p(vector: TestVector, bit_depth: int) -> bytes:
 
 
 def generate_yuv444p(vector: TestVector, bit_depth: int) -> bytes:
+    if vector.pattern == "bitdepth_canary":
+        return generate_yuv444p_bitdepth_canary(vector, bit_depth)
+
     out = bytearray()
     for frame in range(vector.frames):
         y_plane, u_plane, v_plane = render_frame(vector, frame)
@@ -687,6 +693,55 @@ def generate_yuv444p(vector: TestVector, bit_depth: int) -> bytes:
     if bit_depth > 8:
         return zero_pad_planar8_to_le(data, bit_depth)
     return data
+
+
+def generate_yuv420p_bitdepth_canary(vector: TestVector, bit_depth: int) -> bytes:
+    if bit_depth <= 8:
+        raise ValueError("bitdepth_canary is intended for high-depth generated vectors")
+    out = bytearray()
+    for frame in range(vector.frames):
+        append_canary_plane(out, vector.width, vector.height, bit_depth, frame, plane=0)
+        append_canary_plane(out, vector.width // 2, vector.height // 2, bit_depth, frame, plane=1)
+        append_canary_plane(out, vector.width // 2, vector.height // 2, bit_depth, frame, plane=2)
+    return bytes(out)
+
+
+def generate_yuv444p_bitdepth_canary(vector: TestVector, bit_depth: int) -> bytes:
+    if bit_depth <= 8:
+        raise ValueError("bitdepth_canary is intended for high-depth generated vectors")
+    out = bytearray()
+    for frame in range(vector.frames):
+        for plane in range(3):
+            append_canary_plane(out, vector.width, vector.height, bit_depth, frame, plane)
+    return bytes(out)
+
+
+def append_canary_plane(
+    out: bytearray,
+    width: int,
+    height: int,
+    bit_depth: int,
+    frame: int,
+    plane: int,
+) -> None:
+    for y in range(height):
+        for x in range(width):
+            out.extend(bitdepth_canary_sample(x, y, frame, plane, bit_depth).to_bytes(2, "little"))
+
+
+def bitdepth_canary_sample(x: int, y: int, frame: int, plane: int, bit_depth: int) -> int:
+    shift = bit_depth - 8
+    low_mask = (1 << shift) - 1
+    block_index = ((x // 8) + (y // 8) * 2 + frame) % 4
+    base = (
+        (32, 96, 160, 224),
+        (80, 144, 208, 48),
+        (112, 176, 64, 240),
+    )[plane][block_index]
+    lower = ((x & 3) | ((y & 3) << 2) | (plane << 1) | frame) & low_mask
+    if lower == 0:
+        lower = low_mask
+    return (base << shift) | lower
 
 
 def render_frame(vector: TestVector, frame: int) -> tuple[bytearray, bytearray, bytearray]:
@@ -723,6 +778,8 @@ def sample_yuv(vector: TestVector, x: int, y: int, frame: int) -> tuple[int, int
             (224, 112, 144),
         )
         return palette[((x // 8) + (y // 8) * 2 + frame) % len(palette)]
+    if vector.pattern == "bitdepth_canary":
+        raise ValueError("bitdepth_canary is only supported for high-depth generated vectors")
     raise ValueError(f"unsupported pattern: {vector.pattern}")
 
 

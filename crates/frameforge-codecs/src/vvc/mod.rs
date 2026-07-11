@@ -253,7 +253,7 @@ pub struct VvcSampledColor {
 
 pub(in crate::vvc) type VvcSample = u16;
 pub(in crate::vvc) const VVC_MIN_BIT_DEPTH: u8 = 8;
-pub(in crate::vvc) const VVC_MAX_BIT_DEPTH: u8 = 16;
+pub(in crate::vvc) const VVC_MAX_BIT_DEPTH: u8 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VvcSampledFrame {

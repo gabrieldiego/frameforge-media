@@ -678,7 +678,7 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
 }
 
 const VVC_MIN_BIT_DEPTH: u8 = 8;
-const VVC_MAX_BIT_DEPTH: u8 = 16;
+const VVC_MAX_BIT_DEPTH: u8 = 12;
 
 fn vvc_accepts_bit_depth(format: PixelFormat) -> bool {
     (VVC_MIN_BIT_DEPTH..=VVC_MAX_BIT_DEPTH).contains(&format.bit_depth().bits())
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[test]
     fn encode_job_preserves_high_bit_depth_yuv420_for_vvc_path() {
-        for bits in [10, 12, 16] {
+        for bits in [10, 12] {
             let format_name = format!("yuv420p{bits}le");
             let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
             let format = PixelFormat::yuv420(bits).unwrap();
@@ -1160,7 +1160,7 @@ mod tests {
 
     #[test]
     fn encode_job_preserves_high_bit_depth_yuv444_for_vvc_path() {
-        for bits in [10, 12, 16] {
+        for bits in [10, 12] {
             let format_name = format!("yuv444p{bits}le");
             let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
             let format = PixelFormat::yuv444(bits).unwrap();

@@ -47,6 +47,13 @@ Planar YUV and gray bit depths from 8 through 16 are described in
 codec support where available and the 8-bit fallback used by codec paths that
 do not yet encode a higher depth natively.
 
+Rows may set `lossless=true`. Validation passes that request to `ff encode`
+with `--set lossless` and compares the encoder's internal reconstruction bytes
+against the generated source bytes before optional reference-decoder checks.
+The `high-depth-smoke` set uses this path with deterministic lower-bit canary
+samples so truncation of 10-bit or 12-bit input is visible as a validation
+failure.
+
 Reference tools are declared by JSON manifests under:
 
 ```text
