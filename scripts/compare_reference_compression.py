@@ -402,6 +402,20 @@ def av2_reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
+    bit_depth = generate_test_vectors.yuv420_bit_depth(vector.fmt)
+    chroma_flag = "--i420"
+    profile_args: list[str] = []
+    if bit_depth is None:
+        bit_depth = generate_test_vectors.yuv422_bit_depth(vector.fmt)
+        chroma_flag = "--i422"
+        profile_args = ["--profile=3"]
+    if bit_depth is None:
+        bit_depth = generate_test_vectors.yuv444_bit_depth(vector.fmt)
+        chroma_flag = "--i444"
+        profile_args = ["--profile=4"]
+    if bit_depth is None or bit_depth not in {8, 10}:
+        raise SystemExit(f"unsupported AV2 reference encode pixel format: {vector.fmt}")
+
     command = [
         encoder,
         "--codec=av2",
@@ -410,8 +424,8 @@ def av2_reference_encode_command(
         f"--width={vector.width}",
         f"--height={vector.height}",
         f"--fps={reference_fps_ratio(vector)}",
-        "--input-bit-depth=8",
-        "--bit-depth=8",
+        f"--input-bit-depth={bit_depth}",
+        f"--bit-depth={bit_depth}",
         "--cpu-used=9",
         "--psnr=0",
         "--quiet",
@@ -420,14 +434,8 @@ def av2_reference_encode_command(
     command.extend(avm_reference_preset_args(vector, args))
     if vector.lossless:
         command.append("--lossless=1")
-    if vector.fmt == "yuv420p8":
-        command.append("--i420")
-    elif vector.fmt == "yuv422p8":
-        command.append("--i422")
-    elif vector.fmt == "yuv444p8":
-        command.extend(["--i444", "--profile=1"])
-    else:
-        raise SystemExit(f"unsupported AV2 reference encode pixel format: {vector.fmt}")
+    command.append(chroma_flag)
+    command.extend(profile_args)
     if args.reference_args:
         command.extend(shlex.split(args.reference_args))
     command.extend(["-o", str(output), str(vector_path)])
