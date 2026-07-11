@@ -244,6 +244,7 @@ mod tests {
             Av2TileRegion::root(geometry),
             Av2ChromaFormat::Yuv422,
             SampleBitDepth::new(8).expect("valid bit depth"),
+            Av2LosslessSubsampledModeSearch::Exhaustive,
             &source,
             &mut recon,
         );

@@ -12,6 +12,7 @@ struct Av2LosslessSubsampledTileState<'a> {
     region: Av2TileRegion,
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
+    mode_search: Av2LosslessSubsampledModeSearch,
     source: &'a [u8],
     recon: &'a mut [u8],
     y_len: usize,
@@ -26,6 +27,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         region: Av2TileRegion,
         chroma_format: Av2ChromaFormat,
         bit_depth: SampleBitDepth,
+        mode_search: Av2LosslessSubsampledModeSearch,
         source: &'a [u8],
         recon: &'a mut [u8],
     ) -> Self {
@@ -56,6 +58,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             region,
             chroma_format,
             bit_depth,
+            mode_search,
             source,
             recon,
             y_len,
@@ -1333,6 +1336,14 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         visible_cols_mi: usize,
         coded_mi_context: &Av2CodedMiContext,
     ) -> Av2LosslessSubsampledModeDecision {
+        if self.mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
+            return self.fast_mode_decision_for_leaf(
+                decision,
+                visible_rows_mi,
+                visible_cols_mi,
+                coded_mi_context,
+            );
+        }
         let txb_width = decision
             .block_size
             .tx4x4_width()
@@ -1484,6 +1495,81 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
 
         best.0
+    }
+
+    fn fast_mode_decision_for_leaf(
+        &self,
+        decision: Av2TileDecision,
+        visible_rows_mi: usize,
+        visible_cols_mi: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> Av2LosslessSubsampledModeDecision {
+        let txb_width = decision
+            .block_size
+            .tx4x4_width()
+            .min(visible_cols_mi.saturating_sub(decision.col));
+        let txb_height = decision
+            .block_size
+            .tx4x4_height()
+            .min(visible_rows_mi.saturating_sub(decision.row));
+        let chroma_span = chroma_tx4x4_span(
+            decision,
+            visible_rows_mi,
+            visible_cols_mi,
+            self.chroma_format,
+        );
+        let mut mode = Av2LosslessSubsampledModeDecision::default();
+
+        let mut best_luma = (mode.luma_intra_mode, mode.luma_bdpcm_horz, usize::MAX);
+        for (luma_intra_mode, luma_bdpcm_horz, syntax_penalty) in [
+            (Av2LumaIntraMode::Dc, None, 0usize),
+            (Av2LumaIntraMode::Horizontal, None, 32usize),
+            (Av2LumaIntraMode::Vertical, None, 32usize),
+            (Av2LumaIntraMode::Horizontal, Some(true), 64usize),
+            (Av2LumaIntraMode::Vertical, Some(false), 64usize),
+        ] {
+            let candidate = Av2LosslessSubsampledModeDecision {
+                luma_intra_mode,
+                luma_bdpcm_horz,
+                ..mode
+            };
+            let score = self.luma_leaf_coefficient_score(
+                decision,
+                txb_width,
+                txb_height,
+                candidate,
+                coded_mi_context,
+            ) + syntax_penalty;
+            if score < best_luma.2 {
+                best_luma = (luma_intra_mode, luma_bdpcm_horz, score);
+            }
+        }
+        mode.luma_intra_mode = best_luma.0;
+        mode.luma_bdpcm_horz = best_luma.1;
+
+        let mut best_chroma = (mode.chroma_use_bdpcm, mode.chroma_intra_mode, usize::MAX);
+        for (chroma_use_bdpcm, chroma_intra_mode, syntax_penalty) in [
+            (false, Av2ChromaIntraMode::Horizontal, 0usize),
+            (false, Av2ChromaIntraMode::Vertical, 0usize),
+            (false, Av2ChromaIntraMode::Dc, 0usize),
+            (true, Av2ChromaIntraMode::Horizontal, 64usize),
+            (true, Av2ChromaIntraMode::Vertical, 64usize),
+        ] {
+            let candidate = Av2LosslessSubsampledModeDecision {
+                chroma_use_bdpcm,
+                chroma_intra_mode,
+                ..mode
+            };
+            let score =
+                self.chroma_leaf_coefficient_score(chroma_span, candidate, coded_mi_context)
+                    + syntax_penalty;
+            if score < best_chroma.2 {
+                best_chroma = (chroma_use_bdpcm, chroma_intra_mode, score);
+            }
+        }
+        mode.chroma_use_bdpcm = best_chroma.0;
+        mode.chroma_intra_mode = best_chroma.1;
+        mode
     }
 
     fn luma_leaf_coefficient_score(

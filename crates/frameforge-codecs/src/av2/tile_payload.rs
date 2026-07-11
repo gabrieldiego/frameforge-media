@@ -137,6 +137,20 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
         chroma_format,
         Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
     ));
+    if use_fast_lossless_subsampled_path(region) {
+        return av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
+            region,
+            profile,
+            geometry,
+            chroma_format,
+            bit_depth,
+            source,
+            recon,
+            Av2PartitionPolicy::LargestLosslessLeaves,
+            Av2LosslessSubsampledModeSearch::FastScreenContent,
+        );
+    }
+
     let mut best: Option<(Av2EntropyPayload, Vec<u8>)> = None;
     for partition_policy in [
         Av2PartitionPolicy::LargestLosslessLeaves,
@@ -154,6 +168,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
             source,
             &mut candidate_recon,
             partition_policy,
+            Av2LosslessSubsampledModeSearch::Exhaustive,
         );
         let replace = best.as_ref().is_none_or(|(best_payload, _)| {
             (payload.bytes.len(), payload.symbol_bits)
@@ -170,6 +185,35 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
     payload
 }
 
+const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
+
+fn use_fast_lossless_subsampled_path(region: Av2TileRegion) -> bool {
+    region.width * region.height >= AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS
+}
+
+fn cached_lossless_subsampled_mode(
+    cache: &mut Option<(Av2TileDecision, Av2LosslessSubsampledModeDecision)>,
+    lossless: &Av2LosslessSubsampledTileState<'_>,
+    decision: Av2TileDecision,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    coded_mi_context: &Av2CodedMiContext,
+) -> Av2LosslessSubsampledModeDecision {
+    if let Some((cached_decision, cached_mode)) = cache {
+        if *cached_decision == decision {
+            return *cached_mode;
+        }
+    }
+    let mode = lossless.mode_decision_for_leaf(
+        decision,
+        visible_rows_mi,
+        visible_cols_mi,
+        coded_mi_context,
+    );
+    *cache = Some((decision, mode));
+    mode
+}
+
 fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
@@ -179,6 +223,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     source: &[u8],
     recon: &mut [u8],
     partition_policy: Av2PartitionPolicy,
+    mode_search: Av2LosslessSubsampledModeSearch,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_partition_policy(
         region,
@@ -196,6 +241,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         region,
         chroma_format,
         bit_depth,
+        mode_search,
         source,
         recon,
     );
@@ -902,6 +948,7 @@ impl Av2Black444TilePlan {
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut fsc_mode_context =
             Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut mode_cache: Option<(Av2TileDecision, Av2LosslessSubsampledModeDecision)> = None;
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -927,7 +974,9 @@ impl Av2Black444TilePlan {
                     dpcm_horz: _,
                     use_fsc: _,
                 } => {
-                    let mode = lossless.mode_decision_for_leaf(
+                    let mode = cached_lossless_subsampled_mode(
+                        &mut mode_cache,
+                        lossless,
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
@@ -971,7 +1020,9 @@ impl Av2Black444TilePlan {
                     luma_mode: _,
                     chroma_intra_mode: _,
                 } => {
-                    let mode = lossless.mode_decision_for_leaf(
+                    let mode = cached_lossless_subsampled_mode(
+                        &mut mode_cache,
+                        lossless,
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
@@ -986,6 +1037,14 @@ impl Av2Black444TilePlan {
                     );
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
+                    let mode = cached_lossless_subsampled_mode(
+                        &mut mode_cache,
+                        lossless,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        &coded_mi_context,
+                    );
                     write_lossless_subsampled_residual_coefficients(
                         writer,
                         *decision,
@@ -994,6 +1053,7 @@ impl Av2Black444TilePlan {
                         &mut txb_contexts,
                         &coded_mi_context,
                         lossless,
+                        mode,
                     );
                     intrabc_context.update_leaf(
                         decision.row,

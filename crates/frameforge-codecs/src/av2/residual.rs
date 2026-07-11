@@ -101,13 +101,8 @@ fn write_lossless_subsampled_residual_coefficients(
     contexts: &mut Av2TxbEntropyContexts,
     coded_mi_context: &Av2CodedMiContext,
     lossless: &mut Av2LosslessSubsampledTileState<'_>,
+    mode: Av2LosslessSubsampledModeDecision,
 ) {
-    let mode = lossless.mode_decision_for_leaf(
-        decision,
-        visible_rows_mi,
-        visible_cols_mi,
-        coded_mi_context,
-    );
     let txb_width = decision
         .block_size
         .tx4x4_width()

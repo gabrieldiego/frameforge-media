@@ -256,6 +256,12 @@ struct Av2LosslessSubsampledModeDecision {
     use_fsc: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Av2LosslessSubsampledModeSearch {
+    Exhaustive,
+    FastScreenContent,
+}
+
 impl Default for Av2LosslessSubsampledModeDecision {
     fn default() -> Self {
         Self {
