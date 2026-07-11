@@ -295,12 +295,16 @@ impl Av2TileLayout {
     }
 
     fn single_for_geometry(geometry: Av2VideoGeometry) -> Self {
+        Self::try_single_for_geometry(geometry)
+            .expect("AV2 MVP single-tile layout exceeds the configured tile limits")
+    }
+
+    fn try_single_for_geometry(geometry: Av2VideoGeometry) -> Option<Self> {
         let limits = Av2TileLimits::for_geometry(geometry);
-        assert!(
-            limits.min_log2_cols == 0 && limits.min_log2 == 0,
-            "AV2 MVP single-tile layout exceeds the configured tile limits"
-        );
-        Self {
+        if limits.min_log2_cols != 0 || limits.min_log2 != 0 {
+            return None;
+        }
+        Some(Self {
             regions: vec![Av2TileRegion {
                 origin_x: 0,
                 origin_y: 0,
@@ -315,7 +319,7 @@ impl Av2TileLayout {
             min_log2_rows: limits.min_log2,
             max_log2_cols: limits.max_log2_cols,
             max_log2_rows: limits.max_log2_rows,
-        }
+        })
     }
 
     fn tile_count(&self) -> usize {
@@ -1569,7 +1573,8 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
     frame: &[u8],
     reconstruction: &mut [u8],
 ) -> Av2SyntaxPayload {
-    let tile_layout = Av2TileLayout::for_geometry(geometry);
+    let tile_layout = Av2TileLayout::try_single_for_geometry(geometry)
+        .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry));
     let profile = Av2Black444MvpProfile::current();
     let mut payload = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
     let tile_payloads: Vec<_> = tile_layout
