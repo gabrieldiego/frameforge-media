@@ -919,8 +919,6 @@ impl Av2MvpBlockSize {
     fn fsc_size_group(self) -> Option<usize> {
         // AV2 v1.0.0 allow_fsc_intra() permits intra FSC signalling when
         // enable_idtx_intra is active and both block dimensions are 4..=32.
-        // FrameForge keeps fsc_mode=0 until a dedicated IDTX coefficient path
-        // is implemented for software and RTL.
         if self.width > 32 || self.height > 32 {
             return None;
         }
@@ -2423,6 +2421,8 @@ impl Av2Black444TilePlan {
             Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut intrabc_context =
             Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut fsc_mode_context =
+            Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -2454,6 +2454,8 @@ impl Av2Black444TilePlan {
                         self.visible_cols_mi,
                     );
                     let coded_luma_mode = mode.coded_luma_mode();
+                    let fsc_context =
+                        fsc_mode_context.context(decision.row, decision.col, decision.block_size);
                     write_intra_luma_mode(
                         writer,
                         *decision,
@@ -2462,8 +2464,14 @@ impl Av2Black444TilePlan {
                         coded_luma_mode.mode_index() as u8,
                         mode.luma_bdpcm_horz.is_some(),
                         mode.luma_bdpcm_horz.unwrap_or(false),
-                        false,
-                        0,
+                        mode.use_fsc,
+                        fsc_context,
+                    );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        mode.use_fsc,
                     );
                 }
                 Av2TileDecisionKind::IntraChromaMode {
@@ -4421,6 +4429,7 @@ struct Av2LosslessSubsampledModeDecision {
     luma_bdpcm_horz: Option<bool>,
     chroma_use_bdpcm: bool,
     chroma_intra_mode: Av2ChromaIntraMode,
+    use_fsc: bool,
 }
 
 impl Default for Av2LosslessSubsampledModeDecision {
@@ -4430,6 +4439,7 @@ impl Default for Av2LosslessSubsampledModeDecision {
             luma_bdpcm_horz: None,
             chroma_use_bdpcm: false,
             chroma_intra_mode: Av2ChromaIntraMode::Horizontal,
+            use_fsc: false,
         }
     }
 }
@@ -4658,7 +4668,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 }
             }
         };
-        av2_fwht4x4(&residual)
+        if mode.use_fsc {
+            idtx4x4_coefficients(&residual)
+        } else {
+            av2_fwht4x4(&residual)
+        }
     }
 
     fn tx4x4_coefficients_for_mode_score(
@@ -4707,7 +4721,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 }
             }
         };
-        av2_fwht4x4(&residual)
+        if mode.use_fsc {
+            idtx4x4_coefficients(&residual)
+        } else {
+            av2_fwht4x4(&residual)
+        }
     }
 
     fn intra_residual4x4(
@@ -4931,24 +4949,6 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         visible_rows_mi: usize,
         visible_cols_mi: usize,
     ) -> Av2LosslessSubsampledModeDecision {
-        let (luma_intra_mode, luma_bdpcm_horz) =
-            self.best_luma_mode(decision, visible_rows_mi, visible_cols_mi);
-        let (chroma_use_bdpcm, chroma_intra_mode) =
-            self.best_chroma_mode(decision, visible_rows_mi, visible_cols_mi);
-        Av2LosslessSubsampledModeDecision {
-            luma_intra_mode,
-            luma_bdpcm_horz,
-            chroma_use_bdpcm,
-            chroma_intra_mode,
-        }
-    }
-
-    fn best_luma_mode(
-        &self,
-        decision: Av2TileDecision,
-        visible_rows_mi: usize,
-        visible_cols_mi: usize,
-    ) -> (Av2LumaIntraMode, Option<bool>) {
         let txb_width = decision
             .block_size
             .tx4x4_width()
@@ -4957,48 +4957,60 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             .block_size
             .tx4x4_height()
             .min(visible_rows_mi.saturating_sub(decision.row));
-        let dc_mode = Av2LosslessSubsampledModeDecision::default();
-        let horizontal_mode = Av2LosslessSubsampledModeDecision {
-            luma_intra_mode: Av2LumaIntraMode::Horizontal,
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-        let vertical_mode = Av2LosslessSubsampledModeDecision {
-            luma_intra_mode: Av2LumaIntraMode::Vertical,
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-        let horz_mode = Av2LosslessSubsampledModeDecision {
-            luma_bdpcm_horz: Some(true),
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-        let vert_mode = Av2LosslessSubsampledModeDecision {
-            luma_bdpcm_horz: Some(false),
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
+        let chroma_span = chroma_tx4x4_span(
+            decision,
+            visible_rows_mi,
+            visible_cols_mi,
+            self.chroma_format,
+        );
+        let fsc_allowed = decision.block_size.fsc_size_group().is_some();
+        let mut best = (Av2LosslessSubsampledModeDecision::default(), usize::MAX);
 
-        let candidates = [
-            (Av2LumaIntraMode::Dc, None, dc_mode, 0usize),
-            (Av2LumaIntraMode::Horizontal, None, horizontal_mode, 32usize),
-            (Av2LumaIntraMode::Vertical, None, vertical_mode, 32usize),
-            (Av2LumaIntraMode::Horizontal, Some(true), horz_mode, 64usize),
-            (Av2LumaIntraMode::Vertical, Some(false), vert_mode, 64usize),
-        ];
-        candidates
-            .into_iter()
-            .map(|(luma_mode, bdpcm_horz, decision_mode, syntax_penalty)| {
-                (
-                    luma_mode,
-                    bdpcm_horz,
-                    self.luma_leaf_coefficient_score(
-                        decision,
-                        txb_width,
-                        txb_height,
-                        decision_mode,
-                    ) + syntax_penalty,
-                )
-            })
-            .min_by_key(|(_, _, score)| *score)
-            .map(|(luma_mode, bdpcm_horz, _)| (luma_mode, bdpcm_horz))
-            .expect("AV2 subsampled luma scorer has fixed candidates")
+        for use_fsc in [false, true] {
+            if use_fsc && !fsc_allowed {
+                continue;
+            }
+            let luma_candidates = [
+                (Av2LumaIntraMode::Dc, None, 0usize),
+                (Av2LumaIntraMode::Horizontal, None, 32usize),
+                (Av2LumaIntraMode::Vertical, None, 32usize),
+                (Av2LumaIntraMode::Horizontal, Some(true), 64usize),
+                (Av2LumaIntraMode::Vertical, Some(false), 64usize),
+            ];
+            let chroma_candidates = [
+                (false, Av2ChromaIntraMode::Horizontal, 0usize),
+                (false, Av2ChromaIntraMode::Vertical, 0usize),
+                (false, Av2ChromaIntraMode::Dc, 0usize),
+                (true, Av2ChromaIntraMode::Horizontal, 64usize),
+                (true, Av2ChromaIntraMode::Vertical, 64usize),
+            ];
+
+            for (luma_intra_mode, luma_bdpcm_horz, luma_syntax_penalty) in luma_candidates {
+                for (chroma_use_bdpcm, chroma_intra_mode, chroma_syntax_penalty) in
+                    chroma_candidates
+                {
+                    let mode = Av2LosslessSubsampledModeDecision {
+                        luma_intra_mode,
+                        luma_bdpcm_horz,
+                        chroma_use_bdpcm,
+                        chroma_intra_mode,
+                        use_fsc,
+                    };
+                    let fsc_syntax_penalty = usize::from(use_fsc) * 96;
+                    let score = self
+                        .luma_leaf_coefficient_score(decision, txb_width, txb_height, mode)
+                        + self.chroma_leaf_coefficient_score(chroma_span, mode)
+                        + luma_syntax_penalty
+                        + chroma_syntax_penalty
+                        + fsc_syntax_penalty;
+                    if score < best.1 {
+                        best = (mode, score);
+                    }
+                }
+            }
+        }
+
+        best.0
     }
 
     fn luma_leaf_coefficient_score(
@@ -5023,65 +5035,15 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     leaf_x0,
                     leaf_y0,
                 );
-                score +=
-                    coefficient_proxy_score(&coefficients, Av2CoefficientProxyKind::LumaTransform);
+                let kind = if mode.use_fsc {
+                    Av2CoefficientProxyKind::LumaIdtx
+                } else {
+                    Av2CoefficientProxyKind::LumaTransform
+                };
+                score += coefficient_proxy_score(&coefficients, kind);
             }
         }
         score
-    }
-
-    fn best_chroma_mode(
-        &self,
-        decision: Av2TileDecision,
-        visible_rows_mi: usize,
-        visible_cols_mi: usize,
-    ) -> (bool, Av2ChromaIntraMode) {
-        let chroma_span = chroma_tx4x4_span(
-            decision,
-            visible_rows_mi,
-            visible_cols_mi,
-            self.chroma_format,
-        );
-        let horizontal = Av2LosslessSubsampledModeDecision::default();
-        let vertical = Av2LosslessSubsampledModeDecision {
-            chroma_intra_mode: Av2ChromaIntraMode::Vertical,
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-        let dc = Av2LosslessSubsampledModeDecision {
-            chroma_intra_mode: Av2ChromaIntraMode::Dc,
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-        let dpcm_horz = Av2LosslessSubsampledModeDecision {
-            chroma_use_bdpcm: true,
-            chroma_intra_mode: Av2ChromaIntraMode::Horizontal,
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-        let dpcm_vert = Av2LosslessSubsampledModeDecision {
-            chroma_use_bdpcm: true,
-            chroma_intra_mode: Av2ChromaIntraMode::Vertical,
-            ..Av2LosslessSubsampledModeDecision::default()
-        };
-
-        let candidates = [
-            (false, Av2ChromaIntraMode::Horizontal, horizontal),
-            (false, Av2ChromaIntraMode::Vertical, vertical),
-            (false, Av2ChromaIntraMode::Dc, dc),
-            (true, Av2ChromaIntraMode::Horizontal, dpcm_horz),
-            (true, Av2ChromaIntraMode::Vertical, dpcm_vert),
-        ];
-        let (use_bdpcm, mode, _) = candidates
-            .into_iter()
-            .map(|(use_bdpcm, mode, decision_mode)| {
-                (
-                    use_bdpcm,
-                    mode,
-                    self.chroma_leaf_coefficient_score(chroma_span, decision_mode)
-                        + usize::from(use_bdpcm) * 64,
-                )
-            })
-            .min_by_key(|(_, _, score)| *score)
-            .expect("AV2 subsampled chroma scorer has fixed candidates");
-        (use_bdpcm, mode)
     }
 
     fn chroma_leaf_coefficient_score(
@@ -5260,6 +5222,9 @@ fn write_lossless_subsampled_residual_coefficients(
         .block_size
         .tx4x4_height()
         .min(visible_rows_mi.saturating_sub(decision.row));
+    if mode.use_fsc {
+        write_lossless_tx_size_4x4(writer, decision.block_size);
+    }
     for row in 0..txb_height {
         let abs_row = decision.row + row;
         for col in 0..txb_width {
@@ -5270,8 +5235,11 @@ fn write_lossless_subsampled_residual_coefficients(
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
             let coefficients =
                 lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::Y, x0, y0, mode);
-            let (context, _) =
-                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients);
+            let (context, _) = if mode.use_fsc {
+                write_luma_palette_fsc_txb(writer, &coefficients)
+            } else {
+                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+            };
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::Y, x0, y0);
             contexts.y_above[abs_col] = context;
             contexts.y_left[abs_row] = context;
@@ -5295,8 +5263,13 @@ fn write_lossless_subsampled_residual_coefficients(
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::U, abs_col, abs_row);
             let coefficients =
                 lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::U, x0, y0, mode);
-            let (context, nonzero) =
-                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::U, skip_ctx, &coefficients, false);
+            let (context, nonzero) = write_chroma_bdpcm_txb(
+                writer,
+                Av2ChromaPlane::U,
+                skip_ctx,
+                &coefficients,
+                mode.use_fsc,
+            );
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::U, x0, y0);
             contexts.u_above[abs_col] = context;
             contexts.u_left[abs_row] = context;
@@ -5318,8 +5291,13 @@ fn write_lossless_subsampled_residual_coefficients(
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::V, abs_col, abs_row);
             let coefficients =
                 lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::V, x0, y0, mode);
-            let (context, _) =
-                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::V, skip_ctx, &coefficients, false);
+            let (context, _) = write_chroma_bdpcm_txb(
+                writer,
+                Av2ChromaPlane::V,
+                skip_ctx,
+                &coefficients,
+                mode.use_fsc,
+            );
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::V, x0, y0);
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
