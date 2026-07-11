@@ -54,9 +54,10 @@ Supported patterns:
 non-zero lower bits into generated 10-bit and 12-bit samples. It is intended to
 catch internal truncation, not to act as a compression-efficiency benchmark.
 The committed high-depth smoke manifest keeps 4:2:2 canaries generateable but
-gates them to `codecs=none` until a codec path emits reference-decodable
-lossless 4:2:2 streams. VVC 4:2:0 and 4:4:4 high-depth canaries are enabled,
-and AV2 is enabled for the current 10-bit 4:4:4 canary path.
+enables them only for codec paths that emit reference-decodable lossless 4:2:2
+streams. VVC 4:2:0, 4:2:2, and 4:4:4 high-depth canaries are enabled through
+12 bits, and AV2 is enabled for the 10-bit 4:2:0, 4:2:2, and 4:4:4 canary
+paths.
 
 Generated filenames include metadata in the CLI-supported form:
 

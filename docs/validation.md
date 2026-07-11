@@ -60,8 +60,9 @@ checks are expected to pass.
 The `high-depth-smoke` set uses deterministic lower-bit canary samples so
 truncation of 10-bit or 12-bit input is visible as a validation failure. VVC
 4:2:0, 4:2:2, and 4:4:4 canaries are expected to pass with reference decoding;
-AV2 is currently gated to the implemented 10-bit 4:4:4 lossless smoke path
-until its 4:2:0, 4:2:2, and 12-bit paths are stream-exact.
+AV2 10-bit 4:2:0, 4:2:2, and 4:4:4 canaries are expected to pass with
+reference decoding. AV2 12-bit canaries remain gated until a reference-valid
+12-bit profile path is available.
 
 Reference tools are declared by JSON manifests under:
 

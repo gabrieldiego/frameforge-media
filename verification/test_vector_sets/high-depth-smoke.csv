@@ -1,7 +1,7 @@
 # description=Tiny high-depth canary vectors for lossless reconstruction smoke checks.
 name,width,height,frames,format,pattern,fps,lossless,codecs
-canary_420_10,16,16,1,yuv420p10le,bitdepth_canary,30,true,vvc
-canary_422_10,16,16,1,yuv422p10le,bitdepth_canary,30,true,vvc
+canary_420_10,16,16,1,yuv420p10le,bitdepth_canary,30,true,av2|vvc
+canary_422_10,16,16,1,yuv422p10le,bitdepth_canary,30,true,av2|vvc
 canary_444_10,16,16,1,yuv444p10le,bitdepth_canary,30,true,av2|vvc
 canary_420_12,16,16,1,yuv420p12le,bitdepth_canary,30,true,vvc
 canary_422_12,16,16,1,yuv422p12le,bitdepth_canary,30,true,vvc

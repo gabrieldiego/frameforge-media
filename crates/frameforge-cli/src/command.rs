@@ -707,8 +707,10 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
 fn codec_supports_lossless_stream(codec: &str, format: PixelFormat) -> bool {
     match codec {
         "av2" => {
-            format.chroma_sampling() == Some(ChromaSampling::Cs444)
-                && matches!(format.bit_depth().bits(), 8 | 10)
+            matches!(
+                format.chroma_sampling(),
+                Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
+            ) && matches!(format.bit_depth().bits(), 8 | 10)
         }
         "vvc" => {
             matches!(
@@ -1312,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_job_rejects_lossless_yuv420_even_when_codec_accepts_lossy() {
+    fn encode_job_accepts_lossless_yuv420_for_av2_path() {
         let format_name = "yuv420p10le";
         let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
         let format = PixelFormat::yuv420(10).unwrap();
@@ -1335,16 +1337,15 @@ mod tests {
             ..EncodeArgs::default()
         };
 
-        let err = encode_job(&args).expect_err("lossless 4:2:0 must be rejected for now");
-        assert!(
-            err.contains("lossless encode is not implemented for av2 yuv420p10le"),
-            "{err}"
-        );
+        let job = encode_job(&args).expect("AV2 lossless 4:2:0 is native");
+        assert!(job.lossless);
+        assert_eq!(job.source_format, format);
+        assert_eq!(job.format, format);
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn encode_job_rejects_lossless_yuv422_for_av2_without_bit_depth_fallback() {
+    fn encode_job_accepts_lossless_yuv422_for_av2_without_bit_depth_fallback() {
         let format_name = "yuv422p10le";
         let path = temp_yuv_path(&format!("one_frame_8x8_av2_{format_name}"));
         let format = PixelFormat::yuv422(10).unwrap();
@@ -1367,15 +1368,10 @@ mod tests {
             ..EncodeArgs::default()
         };
 
-        let err = encode_job(&args).expect_err("AV2 lossless 4:2:2 is codec-gated");
-        assert!(
-            err.contains("lossless encode is not implemented for av2 yuv422p10le"),
-            "{err}"
-        );
-        assert!(
-            !err.contains("yuv422p8"),
-            "lossless error should not report an 8-bit fallback: {err}"
-        );
+        let job = encode_job(&args).expect("AV2 lossless 4:2:2 is native");
+        assert!(job.lossless);
+        assert_eq!(job.source_format, format);
+        assert_eq!(job.format, format);
         let _ = fs::remove_file(path);
     }
 

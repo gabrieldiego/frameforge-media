@@ -90,12 +90,12 @@ shared bit-depth converter before calling the codec.
 
 Current behavior:
 
-- AV2 accepts `yuv420p8` and `yuv420p10le` natively for the current 4:2:0 path.
-  Higher 4:2:0 depths are scaled to `yuv420p8` before encoding until a
+- AV2 accepts `yuv420p8`/`yuv420p10le` and `yuv444p8`/`yuv444p10le`
+  natively for the current non-lossless paths. Higher 4:2:0 and 4:4:4 depths
+  are scaled to the matching 8-bit format before encoding until a
   reference-valid 12-bit profile path is added.
-- AV2 accepts `yuv444p8` and `yuv444p10le` natively for the current 4:4:4 path.
-  Higher 4:4:4 depths are scaled to `yuv444p8` before encoding until a
-  reference-valid 12-bit profile path is added.
+- AV2 accepts `yuv422p8`/`yuv422p10le` natively for stream-exact lossless
+  4:2:2 encoding. Non-lossless AV2 4:2:2 is still unsupported.
 - VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
   residual path. Higher 4:2:0 depths are scaled to `yuv420p8` before encoding.
 - VVC accepts `yuv444p8` through `yuv444p12le` natively for the current 4:4:4
@@ -115,10 +115,10 @@ Current behavior:
 accept a format for lossy encoding while still rejecting lossless mode until the
 emitted stream reconstructs exactly through the reference decoder. Lossless
 mode never uses the 8-bit fallback converter; unsupported exact source formats
-fail before encoding. AV2 still rejects 4:2:2 lossless streams until its codec
-path is implemented. The current lossless stream paths are AV2
-`yuv444p8`/`yuv444p10le`, VVC `yuv420p8` through `yuv420p12le`, VVC
-`yuv422p8` through `yuv422p12le`, and VVC `yuv444p8` through `yuv444p12le`.
+fail before encoding. The current lossless stream paths are AV2 `yuv420p8` and
+`yuv420p10le`, AV2 `yuv422p8` and `yuv422p10le`, AV2 `yuv444p8` and
+`yuv444p10le`, VVC `yuv420p8` through `yuv420p12le`, VVC `yuv422p8` through
+`yuv422p12le`, and VVC `yuv444p8` through `yuv444p12le`.
 
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without

@@ -1707,6 +1707,34 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
     writer.finish()
 }
 
+pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    recon: &mut [u8],
+) -> Av2EntropyPayload {
+    debug_assert!(matches!(
+        chroma_format,
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+    ));
+    let plan =
+        Av2Black444TilePlan::for_region(region, profile, chroma_format, false, false, None, None);
+    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
+    let mut lossless = Av2LosslessSubsampledTileState::new(
+        geometry,
+        region,
+        chroma_format,
+        bit_depth,
+        source,
+        recon,
+    );
+    plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless);
+    writer.finish()
+}
+
 impl Av2Black444TilePlan {
     fn for_region(
         region: Av2TileRegion,
@@ -2330,6 +2358,95 @@ impl Av2Black444TilePlan {
                 | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {
                     unreachable!("AV2 4:2:0 residual path disables palette and IntraBC")
+                }
+            }
+        }
+    }
+
+    fn write_lossless_subsampled_entropy(
+        &self,
+        writer: &mut Av2EntropyWriter,
+        lossless: &mut Av2LosslessSubsampledTileState<'_>,
+    ) {
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut txb_contexts =
+            Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut intrabc_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        for decision in &self.decisions {
+            match decision.kind {
+                Av2TileDecisionKind::Partition(partition) => {
+                    write_partition(
+                        writer,
+                        *decision,
+                        partition,
+                        &partition_context,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    if partition == Av2MvpPartition::None {
+                        partition_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::IntraLumaMode {
+                    mode,
+                    use_dpcm_y: _,
+                    dpcm_horz: _,
+                    use_fsc: _,
+                } => {
+                    write_intra_luma_mode(
+                        writer,
+                        *decision,
+                        mode,
+                        0,
+                        mode.mode_index() as u8,
+                        false,
+                        false,
+                        false,
+                        0,
+                    );
+                }
+                Av2TileDecisionKind::IntraChromaMode {
+                    use_bdpcm_uv: _,
+                    luma_mode,
+                    chroma_intra_mode: _,
+                } => {
+                    write_intra_chroma_mode(
+                        writer,
+                        *decision,
+                        false,
+                        luma_mode,
+                        Av2ChromaIntraMode::Horizontal,
+                    );
+                }
+                Av2TileDecisionKind::BlackDcResidualCoefficients => {
+                    write_lossless_subsampled_residual_coefficients(
+                        writer,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        &mut txb_contexts,
+                        lossless,
+                    );
+                    intrabc_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        false,
+                        false,
+                    );
+                }
+                Av2TileDecisionKind::IntrabcFlag(_)
+                | Av2TileDecisionKind::IntrabcCopy { .. }
+                | Av2TileDecisionKind::LumaPaletteModeInfo
+                | Av2TileDecisionKind::LumaPaletteColorMap
+                | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {
+                    unreachable!("AV2 subsampled lossless path disables palette and IntraBC")
                 }
             }
         }
@@ -3986,6 +4103,24 @@ fn chroma_tx4x4_span(
                 .tx4x4_height()
                 .min(visible_rows_mi.saturating_sub(decision.row)),
         },
+        Av2ChromaFormat::Yuv422 => {
+            // 4:2:2 chroma uses half-resolution columns and full-resolution
+            // rows, so an 8x8 luma leaf maps to two vertical 4x4 chroma TXBs.
+            let row = decision.row;
+            let col = decision.col / 2;
+            let visible_rows = visible_rows_mi;
+            let visible_cols = visible_cols_mi / 2;
+            Av2ChromaTx4x4Span {
+                row,
+                col,
+                width: (decision.block_size.tx4x4_width() / 2)
+                    .min(visible_cols.saturating_sub(col)),
+                height: decision
+                    .block_size
+                    .tx4x4_height()
+                    .min(visible_rows.saturating_sub(row)),
+            }
+        }
         Av2ChromaFormat::Yuv420 => {
             // AV2 v1.0.0 residual() uses chroma transform units in chroma
             // sample coordinates. FrameForge's first 4:2:0 milestone keeps
@@ -4190,6 +4325,209 @@ enum Av2Lossy420Plane {
     V,
 }
 
+struct Av2LosslessSubsampledTileState<'a> {
+    geometry: Av2VideoGeometry,
+    region: Av2TileRegion,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &'a [u8],
+    recon: &'a mut [u8],
+    y_len: usize,
+    c_width: usize,
+    c_height: usize,
+    c_len: usize,
+}
+
+impl<'a> Av2LosslessSubsampledTileState<'a> {
+    fn new(
+        geometry: Av2VideoGeometry,
+        region: Av2TileRegion,
+        chroma_format: Av2ChromaFormat,
+        bit_depth: SampleBitDepth,
+        source: &'a [u8],
+        recon: &'a mut [u8],
+    ) -> Self {
+        assert!(
+            matches!(
+                chroma_format,
+                Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+            ),
+            "AV2 subsampled lossless state expects 4:2:0 or 4:2:2 input"
+        );
+        let y_len = geometry.width * geometry.height;
+        let c_width = geometry.width / chroma_subsample_x(chroma_format);
+        let c_height = geometry.height / chroma_subsample_y(chroma_format);
+        let c_len = c_width * c_height;
+        let expected_len = (y_len + 2 * c_len) * bit_depth.bytes_per_sample();
+        assert_eq!(
+            source.len(),
+            expected_len,
+            "AV2 subsampled lossless source length must match geometry"
+        );
+        assert_eq!(
+            recon.len(),
+            source.len(),
+            "AV2 subsampled lossless reconstruction length must match source"
+        );
+        Self {
+            geometry,
+            region,
+            chroma_format,
+            bit_depth,
+            source,
+            recon,
+            y_len,
+            c_width,
+            c_height,
+            c_len,
+        }
+    }
+
+    fn plane_geometry(&self, plane: Av2LosslessPlane) -> (usize, usize) {
+        match plane {
+            Av2LosslessPlane::Y => (self.geometry.width, self.geometry.height),
+            Av2LosslessPlane::U | Av2LosslessPlane::V => (self.c_width, self.c_height),
+        }
+    }
+
+    fn plane_origin(&self, plane: Av2LosslessPlane) -> (usize, usize) {
+        match plane {
+            Av2LosslessPlane::Y => (self.region.origin_x, self.region.origin_y),
+            Av2LosslessPlane::U | Av2LosslessPlane::V => (
+                self.region.origin_x / chroma_subsample_x(self.chroma_format),
+                self.region.origin_y / chroma_subsample_y(self.chroma_format),
+            ),
+        }
+    }
+
+    fn txb_origin(&self, plane: Av2LosslessPlane, col: usize, row: usize) -> (usize, usize) {
+        let (origin_x, origin_y) = self.plane_origin(plane);
+        (origin_x + col * TX4X4_SIZE, origin_y + row * TX4X4_SIZE)
+    }
+
+    fn offset(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> usize {
+        match plane {
+            Av2LosslessPlane::Y => y * self.geometry.width + x,
+            Av2LosslessPlane::U => self.y_len + y * self.c_width + x,
+            Av2LosslessPlane::V => self.y_len + self.c_len + y * self.c_width + x,
+        }
+    }
+
+    fn source_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
+        read_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
+            .expect("validated AV2 subsampled lossless source must contain every sample")
+    }
+
+    fn recon_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
+        read_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
+            .expect("validated AV2 subsampled lossless reconstruction must contain every sample")
+    }
+
+    fn set_recon_sample(&mut self, plane: Av2LosslessPlane, x: usize, y: usize, sample: Av2Sample) {
+        let offset = self.offset(plane, x, y);
+        write_planar_sample(self.recon, offset, sample, self.bit_depth)
+            .expect("validated AV2 subsampled lossless reconstruction must contain every sample");
+    }
+
+    fn predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+        match plane {
+            Av2LosslessPlane::Y => self.luma_dc_predictor(plane, x0, y0),
+            Av2LosslessPlane::U | Av2LosslessPlane::V => self.chroma_h_predictor(plane, x0, y0),
+        }
+    }
+
+    fn luma_dc_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if !have_left && !have_top {
+            return av2_lossless_dc_predictor(self.bit_depth);
+        }
+
+        let mut sum = 0u32;
+        let mut count = 0u32;
+        if have_top {
+            for x in x0..(x0 + TX4X4_SIZE) {
+                sum += u32::from(self.recon_sample(plane, x, y0 - 1));
+                count += 1;
+            }
+        }
+        if have_left {
+            for y in y0..(y0 + TX4X4_SIZE) {
+                sum += u32::from(self.recon_sample(plane, x0 - 1, y));
+                count += 1;
+            }
+        }
+        ((sum + count / 2) / count) as Av2Sample
+    }
+
+    fn chroma_h_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        if x0 > tile_origin_x {
+            self.recon_sample(plane, x0 - 1, y0)
+        } else if y0 > tile_origin_y {
+            self.recon_sample(plane, x0, y0 - 1)
+        } else {
+            av2_lossless_h_pred_left_edge(self.bit_depth)
+        }
+    }
+
+    fn tx4x4_coefficients(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let predictor = i32::from(self.predictor(plane, x0, y0));
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                residual[local_y * TX4X4_SIZE + local_x] =
+                    i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y)) - predictor;
+            }
+        }
+        av2_fwht4x4(&residual)
+    }
+
+    fn copy_source_to_recon_txb(&mut self, plane: Av2LosslessPlane, x0: usize, y0: usize) {
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        for local_y in 0..TX4X4_SIZE {
+            let y = y0 + local_y;
+            if y >= plane_height {
+                continue;
+            }
+            for local_x in 0..TX4X4_SIZE {
+                let x = x0 + local_x;
+                if x < plane_width {
+                    let sample = self.source_sample(plane, x, y);
+                    self.set_recon_sample(plane, x, y, sample);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Av2LosslessPlane {
+    Y,
+    U,
+    V,
+}
+
+fn chroma_subsample_x(chroma_format: Av2ChromaFormat) -> usize {
+    match chroma_format {
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
+        Av2ChromaFormat::Yuv444 => 1,
+    }
+}
+
+fn chroma_subsample_y(chroma_format: Av2ChromaFormat) -> usize {
+    match chroma_format {
+        Av2ChromaFormat::Yuv420 => 2,
+        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
+    }
+}
+
 const AV2_LOSSY_420_DC_QUANT_STEP: i32 = 8;
 
 fn round_div_i32(value: i32, divisor: i32) -> i32 {
@@ -4278,6 +4616,86 @@ fn write_lossy_420_residual_coefficients(
             let (context, _) =
                 write_chroma_dc_delta_txb(writer, Av2ChromaPlane::V, skip_ctx, delta);
             lossy.fill_recon_txb(Av2Lossy420Plane::V, x0, y0, delta);
+            contexts.v_above[abs_col] = context;
+            contexts.v_left[abs_row] = context;
+        }
+    }
+}
+
+fn write_lossless_subsampled_residual_coefficients(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    contexts: &mut Av2TxbEntropyContexts,
+    lossless: &mut Av2LosslessSubsampledTileState<'_>,
+) {
+    let txb_width = decision
+        .block_size
+        .tx4x4_width()
+        .min(visible_cols_mi.saturating_sub(decision.col));
+    let txb_height = decision
+        .block_size
+        .tx4x4_height()
+        .min(visible_rows_mi.saturating_sub(decision.row));
+    for row in 0..txb_height {
+        let abs_row = decision.row + row;
+        for col in 0..txb_width {
+            let abs_col = decision.col + col;
+            let skip_ctx =
+                luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
+            let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
+            let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
+            let coefficients = lossless.tx4x4_coefficients(Av2LosslessPlane::Y, x0, y0);
+            let (context, _) =
+                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients);
+            lossless.copy_source_to_recon_txb(Av2LosslessPlane::Y, x0, y0);
+            contexts.y_above[abs_col] = context;
+            contexts.y_left[abs_row] = context;
+        }
+    }
+
+    let chroma_span = chroma_tx4x4_span(
+        decision,
+        visible_rows_mi,
+        visible_cols_mi,
+        lossless.chroma_format,
+    );
+    let mut u_nonzero = vec![false; chroma_span.width * chroma_span.height];
+    for row in 0..chroma_span.height {
+        let abs_row = chroma_span.row + row;
+        for col in 0..chroma_span.width {
+            let abs_col = chroma_span.col + col;
+            let skip_ctx =
+                chroma_txb_skip_base_context(contexts.u_above[abs_col], contexts.u_left[abs_row])
+                    + 6;
+            let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::U, abs_col, abs_row);
+            let coefficients = lossless.tx4x4_coefficients(Av2LosslessPlane::U, x0, y0);
+            let (context, nonzero) =
+                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::U, skip_ctx, &coefficients, false);
+            lossless.copy_source_to_recon_txb(Av2LosslessPlane::U, x0, y0);
+            contexts.u_above[abs_col] = context;
+            contexts.u_left[abs_row] = context;
+            u_nonzero[row * chroma_span.width + col] = nonzero;
+        }
+    }
+
+    for row in 0..chroma_span.height {
+        let abs_row = chroma_span.row + row;
+        for col in 0..chroma_span.width {
+            let abs_col = chroma_span.col + col;
+            let last_u_txb_nonzero = u_nonzero[row * chroma_span.width + col];
+            let skip_ctx = v_txb_skip_context_for_chroma_format(
+                contexts.v_above[abs_col],
+                contexts.v_left[abs_row],
+                last_u_txb_nonzero,
+                lossless.chroma_format,
+            );
+            let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::V, abs_col, abs_row);
+            let coefficients = lossless.tx4x4_coefficients(Av2LosslessPlane::V, x0, y0);
+            let (context, _) =
+                write_chroma_bdpcm_txb(writer, Av2ChromaPlane::V, skip_ctx, &coefficients, false);
+            lossless.copy_source_to_recon_txb(Av2LosslessPlane::V, x0, y0);
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
         }
@@ -6966,6 +7384,7 @@ fn v_txb_skip_context_for_chroma_format(
     // 8x8 chroma blocks in 4:4:4, but only 4x4 chroma blocks in 4:2:0.
     let block_larger_than_txb_offset = match chroma_format {
         Av2ChromaFormat::Yuv444 => 3,
+        Av2ChromaFormat::Yuv422 => 3,
         Av2ChromaFormat::Yuv420 => 0,
     };
     chroma_txb_skip_base_context(above, left)
