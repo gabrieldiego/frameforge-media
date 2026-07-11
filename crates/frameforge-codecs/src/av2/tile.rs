@@ -4429,10 +4429,19 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             .expect("validated AV2 subsampled lossless reconstruction must contain every sample");
     }
 
-    fn predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+    fn predictor(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        _local_x: usize,
+        local_y: usize,
+    ) -> Av2Sample {
         match plane {
             Av2LosslessPlane::Y => self.luma_dc_predictor(plane, x0, y0),
-            Av2LosslessPlane::U | Av2LosslessPlane::V => self.chroma_h_predictor(plane, x0, y0),
+            Av2LosslessPlane::U | Av2LosslessPlane::V => {
+                self.chroma_h_predictor(plane, x0, y0, local_y)
+            }
         }
     }
 
@@ -4461,10 +4470,16 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         ((sum + count / 2) / count) as Av2Sample
     }
 
-    fn chroma_h_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
+    fn chroma_h_predictor(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        local_y: usize,
+    ) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         if x0 > tile_origin_x {
-            self.recon_sample(plane, x0 - 1, y0)
+            self.recon_sample(plane, x0 - 1, y0 + local_y)
         } else if y0 > tile_origin_y {
             self.recon_sample(plane, x0, y0 - 1)
         } else {
@@ -4478,10 +4493,10 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         x0: usize,
         y0: usize,
     ) -> [i32; TX4X4_SAMPLES] {
-        let predictor = i32::from(self.predictor(plane, x0, y0));
         let mut residual = [0i32; TX4X4_SAMPLES];
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
+                let predictor = i32::from(self.predictor(plane, x0, y0, local_x, local_y));
                 residual[local_y * TX4X4_SIZE + local_x] =
                     i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y)) - predictor;
             }
@@ -4661,7 +4676,7 @@ fn write_lossless_subsampled_residual_coefficients(
         visible_cols_mi,
         lossless.chroma_format,
     );
-    let mut u_nonzero = vec![false; chroma_span.width * chroma_span.height];
+    let mut last_u_txb_nonzero = false;
     for row in 0..chroma_span.height {
         let abs_row = chroma_span.row + row;
         for col in 0..chroma_span.width {
@@ -4676,7 +4691,7 @@ fn write_lossless_subsampled_residual_coefficients(
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::U, x0, y0);
             contexts.u_above[abs_col] = context;
             contexts.u_left[abs_row] = context;
-            u_nonzero[row * chroma_span.width + col] = nonzero;
+            last_u_txb_nonzero = nonzero;
         }
     }
 
@@ -4684,7 +4699,6 @@ fn write_lossless_subsampled_residual_coefficients(
         let abs_row = chroma_span.row + row;
         for col in 0..chroma_span.width {
             let abs_col = chroma_span.col + col;
-            let last_u_txb_nonzero = u_nonzero[row * chroma_span.width + col];
             let skip_ctx = v_txb_skip_context_for_chroma_format(
                 contexts.v_above[abs_col],
                 contexts.v_left[abs_row],
@@ -7380,11 +7394,12 @@ fn v_txb_skip_context_for_chroma_format(
     chroma_format: Av2ChromaFormat,
 ) -> u8 {
     // AV2 v1.0.0 get_txb_ctx() adds half of V_TXB_SKIP_CONTEXT_OFFSET only
-    // when the chroma coding block is larger than the TXB. 8x8 luma leaves are
-    // 8x8 chroma blocks in 4:4:4, but only 4x4 chroma blocks in 4:2:0.
+    // when the chroma coding block is larger than the TXB. In the shared-tree
+    // path, 4:2:2 chroma reference blocks can inherit the parent size even
+    // while residuals are emitted as 4x4 TXBs, so they use the same +3 offset
+    // as 4:4:4 for the current MVP partitioning.
     let block_larger_than_txb_offset = match chroma_format {
-        Av2ChromaFormat::Yuv444 => 3,
-        Av2ChromaFormat::Yuv422 => 3,
+        Av2ChromaFormat::Yuv444 | Av2ChromaFormat::Yuv422 => 3,
         Av2ChromaFormat::Yuv420 => 0,
     };
     chroma_txb_skip_base_context(above, left)
@@ -7602,5 +7617,57 @@ mod tests {
         // wrap to txb_skip=1 in narrower RTL state.
         assert_eq!(tx4x4_eob(&levels), Some(TX4X4_SAMPLES));
         assert_eq!(eob_pos_token(TX4X4_SAMPLES), (5, 7));
+    }
+
+    #[test]
+    fn av2_lossless_422_chroma_h_predictor_uses_row_edges() {
+        let geometry = Av2VideoGeometry {
+            width: 16,
+            height: 16,
+        };
+        let y_len = geometry.width * geometry.height;
+        let c_width = geometry.width / 2;
+        let c_len = c_width * geometry.height;
+        let mut source = vec![128u8; y_len + 2 * c_len];
+        let v_offset = y_len + c_len;
+        for y in 0..geometry.height {
+            for x in 0..c_width {
+                source[v_offset + y * c_width + x] = 96 + (y as u8) * 4;
+            }
+        }
+        let mut recon = source.clone();
+        let lossless = Av2LosslessSubsampledTileState::new(
+            geometry,
+            Av2TileRegion::root(geometry),
+            Av2ChromaFormat::Yuv422,
+            SampleBitDepth::new(8).expect("valid bit depth"),
+            &source,
+            &mut recon,
+        );
+
+        assert_eq!(
+            lossless.tx4x4_coefficients(Av2LosslessPlane::V, 4, 0),
+            [0; TX4X4_SAMPLES]
+        );
+    }
+
+    #[test]
+    fn av2_v_txb_skip_context_matches_shared_tree_chroma_refs() {
+        assert_eq!(
+            v_txb_skip_context_for_chroma_format(0, 0, false, Av2ChromaFormat::Yuv420),
+            chroma_txb_skip_base_context(0, 0)
+        );
+        assert_eq!(
+            v_txb_skip_context_for_chroma_format(0, 0, false, Av2ChromaFormat::Yuv422),
+            chroma_txb_skip_base_context(0, 0) + 3
+        );
+        assert_eq!(
+            v_txb_skip_context_for_chroma_format(0, 0, false, Av2ChromaFormat::Yuv444),
+            chroma_txb_skip_base_context(0, 0) + 3
+        );
+        assert_eq!(
+            v_txb_skip_context_for_chroma_format(1, 0, true, Av2ChromaFormat::Yuv422),
+            chroma_txb_skip_base_context(1, 0) + 3 + 6
+        );
     }
 }
