@@ -1,13 +1,14 @@
 use super::ctu_split::{
-    vvc_chroma_420_height, vvc_chroma_420_split_availability, vvc_chroma_420_width,
-    VvcChromaSplitAvailability, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams,
-    VvcPartSplit, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType,
+    vvc_chroma_height, vvc_chroma_split_availability, vvc_chroma_width, VvcChromaSplitAvailability,
+    VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcPartSplit, VvcQtSplitCtxInput,
+    VvcSplitCtxInput, VvcTreeType,
 };
 use super::{VvcCabacContext, VvcCabacContexts, VvcCabacEncoder};
+use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
-    VvcResidualComponent, VvcSliceSyntaxConfig, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
-    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
+    chroma_subsample_x, chroma_subsample_y, VvcResidualComponent, VvcSliceSyntaxConfig,
+    MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
     VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
     VVC_LUMA_AC_COEFFS_PER_TU,
 };
@@ -26,6 +27,7 @@ pub(in crate::vvc) fn encode_ctu_partition_body(
         params.cr_tu_dc_levels,
         params.cb_tu_ac_levels,
         params.cr_tu_ac_levels,
+        params.chroma_sampling,
         slice_config,
     );
     for op in VvcCtuCabacOp::yuv420_ctu_partition(params) {
@@ -46,6 +48,7 @@ pub(in crate::vvc) struct VvcCtuCabacGenerator {
     cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     chroma_tu_index: usize,
+    chroma_sampling: ChromaSampling,
     slice_config: VvcSliceSyntaxConfig,
 }
 
@@ -60,6 +63,7 @@ struct VvcChromaNeighbourInfo {
 struct VvcChromaNeighbourState {
     width: u16,
     height: u16,
+    chroma_sampling: ChromaSampling,
     valid: Vec<bool>,
     cb_width: Vec<u16>,
     cb_height: Vec<u16>,
@@ -67,18 +71,35 @@ struct VvcChromaNeighbourState {
 }
 
 impl VvcChromaNeighbourState {
-    fn new(visible_width: u16, visible_height: u16) -> Self {
-        let width = visible_width / 2;
-        let height = visible_height / 2;
+    fn new(visible_width: u16, visible_height: u16, chroma_sampling: ChromaSampling) -> Self {
+        let width = visible_width / chroma_subsample_x(chroma_sampling) as u16;
+        let height = visible_height / chroma_subsample_y(chroma_sampling) as u16;
         let samples = usize::from(width) * usize::from(height);
         Self {
             width,
             height,
+            chroma_sampling,
             valid: vec![false; samples],
             cb_width: vec![0; samples],
             cb_height: vec![0; samples],
             cqt_depth: vec![0; samples],
         }
+    }
+
+    fn node_x(&self, node: VvcCodingTreeNode) -> u16 {
+        node.x / chroma_subsample_x(self.chroma_sampling) as u16
+    }
+
+    fn node_y(&self, node: VvcCodingTreeNode) -> u16 {
+        node.y / chroma_subsample_y(self.chroma_sampling) as u16
+    }
+
+    fn node_width(&self, node: VvcCodingTreeNode) -> u16 {
+        vvc_chroma_width(node, self.chroma_sampling)
+    }
+
+    fn node_height(&self, node: VvcCodingTreeNode) -> u16 {
+        vvc_chroma_height(node, self.chroma_sampling)
     }
 
     fn index(&self, x: u16, y: u16) -> Option<usize> {
@@ -98,28 +119,34 @@ impl VvcChromaNeighbourState {
     }
 
     fn left_of(&self, node: VvcCodingTreeNode) -> Option<VvcChromaNeighbourInfo> {
-        let y = node.y / 2;
-        (node.x / 2).checked_sub(1).and_then(|x| self.info_at(x, y))
+        let y = self.node_y(node);
+        self.node_x(node)
+            .checked_sub(1)
+            .and_then(|x| self.info_at(x, y))
     }
 
     fn above_of(&self, node: VvcCodingTreeNode) -> Option<VvcChromaNeighbourInfo> {
-        let x = node.x / 2;
-        (node.y / 2).checked_sub(1).and_then(|y| self.info_at(x, y))
+        let x = self.node_x(node);
+        self.node_y(node)
+            .checked_sub(1)
+            .and_then(|y| self.info_at(x, y))
     }
 
     fn mark_leaf(&mut self, node: VvcCodingTreeNode) {
-        let start_x = node.x / 2;
-        let start_y = node.y / 2;
-        let end_x = (start_x + vvc_chroma_420_width(node)).min(self.width);
-        let end_y = (start_y + vvc_chroma_420_height(node)).min(self.height);
+        let start_x = self.node_x(node);
+        let start_y = self.node_y(node);
+        let node_width = self.node_width(node);
+        let node_height = self.node_height(node);
+        let end_x = (start_x + node_width).min(self.width);
+        let end_y = (start_y + node_height).min(self.height);
         for y in start_y..end_y {
             for x in start_x..end_x {
                 let index = self
                     .index(x, y)
                     .expect("chroma leaf coordinates are in range");
                 self.valid[index] = true;
-                self.cb_width[index] = vvc_chroma_420_width(node);
-                self.cb_height[index] = vvc_chroma_420_height(node);
+                self.cb_width[index] = node_width;
+                self.cb_height[index] = node_height;
                 self.cqt_depth[index] = node.cqt_depth;
             }
         }
@@ -136,6 +163,7 @@ impl VvcCtuCabacGenerator {
         cr_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
         cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
         cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
+        chroma_sampling: ChromaSampling,
         slice_config: VvcSliceSyntaxConfig,
     ) -> Self {
         let contexts = if slice_config.tools.transform_skip_enabled {
@@ -155,6 +183,7 @@ impl VvcCtuCabacGenerator {
             cb_tu_ac_levels,
             cr_tu_ac_levels,
             chroma_tu_index: 0,
+            chroma_sampling,
             slice_config,
         }
     }
@@ -375,7 +404,8 @@ impl VvcCtuCabacGenerator {
         visible_height: u16,
     ) {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeChroma);
-        let mut neighbours = VvcChromaNeighbourState::new(visible_width, visible_height);
+        let mut neighbours =
+            VvcChromaNeighbourState::new(visible_width, visible_height, self.chroma_sampling);
         self.emit_chroma_visible_qt_subtree(
             cabac,
             node,
@@ -399,11 +429,16 @@ impl VvcCtuCabacGenerator {
         if !node.intersects_visible(visible_width, visible_height) {
             return;
         }
-        if node.fits_visible(visible_width, visible_height) && Self::chroma_leaf_allowed(node) {
+        if node.fits_visible(visible_width, visible_height) && self.chroma_leaf_allowed(node) {
             self.emit_chroma_transform_only_leaf(
                 cabac,
                 node,
-                vvc_chroma_420_split_availability(node, visible_width, visible_height),
+                vvc_chroma_split_availability(
+                    node,
+                    visible_width,
+                    visible_height,
+                    self.chroma_sampling,
+                ),
                 0,
                 neighbours,
             );
@@ -422,7 +457,12 @@ impl VvcCtuCabacGenerator {
             return;
         }
 
-        let split = vvc_chroma_420_split_availability(node, visible_width, visible_height);
+        let split = vvc_chroma_split_availability(
+            node,
+            visible_width,
+            visible_height,
+            self.chroma_sampling,
+        );
         if split.allow_qt {
             self.emit_chroma_visible_qt_split(cabac, node, split, neighbours);
             for child_idx in 0..4 {
@@ -464,7 +504,12 @@ impl VvcCtuCabacGenerator {
         min_leaf_size: u16,
         neighbours: &mut VvcChromaNeighbourState,
     ) {
-        let split = vvc_chroma_420_split_availability(node, visible_width, visible_height);
+        let split = vvc_chroma_split_availability(
+            node,
+            visible_width,
+            visible_height,
+            self.chroma_sampling,
+        );
         if split.allow_qt {
             if split.allow_btt() {
                 self.contexts.encode(
@@ -632,8 +677,8 @@ impl VvcCtuCabacGenerator {
         dc_level: i16,
         ac_levels: [i16; VVC_CHROMA_AC_COEFFS_PER_TU],
     ) {
-        let width = usize::from(vvc_chroma_420_width(node));
-        let height = usize::from(vvc_chroma_420_height(node));
+        let width = usize::from(vvc_chroma_width(node, self.chroma_sampling));
+        let height = usize::from(vvc_chroma_height(node, self.chroma_sampling));
         let mut coeff_levels = vec![0; width * height];
         coeff_levels[0] = dc_level;
         for (slot, level) in ac_levels.iter().enumerate() {
@@ -723,9 +768,9 @@ impl VvcCtuCabacGenerator {
         neighbours.mark_leaf(node);
     }
 
-    fn chroma_leaf_allowed(node: VvcCodingTreeNode) -> bool {
-        let chroma_width = vvc_chroma_420_width(node);
-        let chroma_height = vvc_chroma_420_height(node);
+    fn chroma_leaf_allowed(&self, node: VvcCodingTreeNode) -> bool {
+        let chroma_width = vvc_chroma_width(node, self.chroma_sampling);
+        let chroma_height = vvc_chroma_height(node, self.chroma_sampling);
         // H.266 7.3.11.10 transform_unit() is reached after the encoder's
         // chosen legal coding-tree split. The spec maximum for this SPS remains
         // MaxTbSizeY/SubWidthC by MaxTbSizeY/SubHeightC, but this hardware
@@ -771,8 +816,8 @@ impl VvcCtuCabacGenerator {
         VvcSplitCtxInput {
             available_left: left.is_some(),
             available_above: above.is_some(),
-            condition_left: left.is_some_and(|info| info.cb_height < vvc_chroma_420_height(node)),
-            condition_above: above.is_some_and(|info| info.cb_width < vvc_chroma_420_width(node)),
+            condition_left: left.is_some_and(|info| info.cb_height < neighbours.node_height(node)),
+            condition_above: above.is_some_and(|info| info.cb_width < neighbours.node_width(node)),
             allow_bt_vertical: split.allow_bt_vertical,
             allow_bt_horizontal: split.allow_bt_horizontal,
             allow_tt_vertical: split.allow_tt_vertical,
@@ -820,8 +865,8 @@ impl VvcCtuCabacGenerator {
         let Some(left) = neighbours.left_of(node) else {
             return 0;
         };
-        let d_a = vvc_chroma_420_width(node) / above.cb_width.max(1);
-        let d_l = vvc_chroma_420_height(node) / left.cb_height.max(1);
+        let d_a = neighbours.node_width(node) / above.cb_width.max(1);
+        let d_l = neighbours.node_height(node) / left.cb_height.max(1);
         if d_a == d_l {
             0
         } else if d_a < d_l {

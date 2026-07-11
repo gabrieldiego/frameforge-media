@@ -1,6 +1,9 @@
-use crate::picture::SampleBitDepth;
+use crate::picture::{ChromaSampling, SampleBitDepth};
 
-use super::super::{vvc_neutral_sample, VvcCodingTreeNode, VvcSample, VvcVideoGeometry};
+use super::super::{
+    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcCodingTreeNode, VvcSample,
+    VvcVideoGeometry,
+};
 
 pub(in crate::vvc) fn predict_vvc_luma_dc_block(
     luma: &[VvcSample],
@@ -24,16 +27,19 @@ pub(in crate::vvc) fn predict_vvc_chroma_dc_block(
     chroma: &[VvcSample],
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
+    chroma_sampling: ChromaSampling,
     bit_depth: SampleBitDepth,
 ) -> Vec<VvcSample> {
+    let subsample_x = chroma_subsample_x(chroma_sampling);
+    let subsample_y = chroma_subsample_y(chroma_sampling);
     predict_vvc_dc_block(
         chroma,
-        geometry.width / 2,
-        geometry.height / 2,
-        usize::from(node.x / 2),
-        usize::from(node.y / 2),
-        usize::from(node.width / 2),
-        usize::from(node.height / 2),
+        geometry.width / subsample_x,
+        geometry.height / subsample_y,
+        usize::from(node.x) / subsample_x,
+        usize::from(node.y) / subsample_y,
+        usize::from(node.width) / subsample_x,
+        usize::from(node.height) / subsample_y,
         bit_depth,
     )
 }
@@ -122,17 +128,21 @@ pub(in crate::vvc) fn fill_visible_chroma_node(
     chroma: &mut [VvcSample],
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
+    chroma_sampling: ChromaSampling,
     predicted: &[VvcSample],
     residuals: &[i16],
     bit_depth: SampleBitDepth,
 ) {
-    let node_width = usize::from(node.width / 2);
-    let start_x = usize::from(node.x / 2);
-    let start_y = usize::from(node.y / 2);
-    let chroma_width = geometry.width / 2;
-    let chroma_height = geometry.height / 2;
+    let subsample_x = chroma_subsample_x(chroma_sampling);
+    let subsample_y = chroma_subsample_y(chroma_sampling);
+    let node_width = usize::from(node.width) / subsample_x;
+    let node_height = usize::from(node.height) / subsample_y;
+    let start_x = usize::from(node.x) / subsample_x;
+    let start_y = usize::from(node.y) / subsample_y;
+    let chroma_width = geometry.width / subsample_x;
+    let chroma_height = geometry.height / subsample_y;
     let end_x = (start_x + node_width).min(chroma_width);
-    let end_y = (start_y + usize::from(node.height / 2)).min(chroma_height);
+    let end_y = (start_y + node_height).min(chroma_height);
     let max_sample = i32::from(bit_depth.max_sample());
     for y in start_y..end_y {
         let row = y * chroma_width;

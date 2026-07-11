@@ -103,10 +103,11 @@ Current behavior:
   Palette entries carry native samples; high-depth escape-coded samples follow
   VTM palette escape level scaling, which is exact for zero-padded 8-bit
   upconverts but can quantize arbitrary high-depth escape samples.
-- VVC accepts only 8-bit 4:2:2 compatibility input for the current lossy
-  compatibility path. Higher 4:2:2 depths are scaled to `yuv422p8` before
-  non-lossless encoding until that path gains native high-depth syntax and
-  reconstruction.
+- VVC accepts `yuv422p8` through `yuv422p12le` natively for stream-exact
+  lossless 4:2:2 encoding. The current non-lossless 4:2:2 compatibility path
+  still accepts only 8-bit input; higher depths are scaled to `yuv422p8`
+  before non-lossless encoding until that path gains native high-depth syntax
+  and reconstruction.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 
@@ -114,11 +115,10 @@ Current behavior:
 accept a format for lossy encoding while still rejecting lossless mode until the
 emitted stream reconstructs exactly through the reference decoder. Lossless
 mode never uses the 8-bit fallback converter; unsupported exact source formats
-fail before encoding. 4:2:2 lossless inputs and canary fixtures are recognized
-by the front-end, but AV2 and VVC still reject 4:2:2 lossless streams until
-their codec paths are implemented. The current lossless stream paths are AV2
-`yuv444p8`/`yuv444p10le`, VVC `yuv420p8` through `yuv420p12le`, and VVC
-`yuv444p8` through `yuv444p12le`.
+fail before encoding. AV2 still rejects 4:2:2 lossless streams until its codec
+path is implemented. The current lossless stream paths are AV2
+`yuv444p8`/`yuv444p10le`, VVC `yuv420p8` through `yuv420p12le`, VVC
+`yuv422p8` through `yuv422p12le`, and VVC `yuv444p8` through `yuv444p12le`.
 
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without

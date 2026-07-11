@@ -68,8 +68,13 @@ fn reconstruct_vvc_residual_frame_420(
         .into_iter()
         .enumerate()
     {
-        let cb_predicted =
-            predict_vvc_chroma_dc_block(&cb, frame.geometry, node, frame.format.bit_depth);
+        let cb_predicted = predict_vvc_chroma_dc_block(
+            &cb,
+            frame.geometry,
+            node,
+            ChromaSampling::Cs420,
+            frame.format.bit_depth,
+        );
         let cb_residuals = inverse_transform_vvc_chroma_residual_levels(
             node.width / 2,
             node.height / 2,
@@ -84,12 +89,18 @@ fn reconstruct_vvc_residual_frame_420(
             &mut cb,
             frame.geometry,
             node,
+            ChromaSampling::Cs420,
             &cb_predicted,
             &cb_residuals,
             frame.format.bit_depth,
         );
-        let cr_predicted =
-            predict_vvc_chroma_dc_block(&cr, frame.geometry, node, frame.format.bit_depth);
+        let cr_predicted = predict_vvc_chroma_dc_block(
+            &cr,
+            frame.geometry,
+            node,
+            ChromaSampling::Cs420,
+            frame.format.bit_depth,
+        );
         let cr_residuals = inverse_transform_vvc_chroma_residual_levels(
             node.width / 2,
             node.height / 2,
@@ -104,6 +115,7 @@ fn reconstruct_vvc_residual_frame_420(
             &mut cr,
             frame.geometry,
             node,
+            ChromaSampling::Cs420,
             &cr_predicted,
             &cr_residuals,
             frame.format.bit_depth,

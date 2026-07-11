@@ -1,9 +1,10 @@
 use crate::picture::ChromaSampling;
 use crate::vvc::{
-    MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE,
-    VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_CHROMA_420_BT_SIZE,
-    VVC_CURRENT_MAX_CHROMA_420_MTT_DEPTH, VVC_CURRENT_MAX_CHROMA_420_TT_SIZE,
-    VVC_CURRENT_MAX_LUMA_BT_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH, VVC_CURRENT_MAX_LUMA_TT_SIZE,
+    chroma_subsample_x, chroma_subsample_y, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
+    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
+    VVC_CURRENT_MAX_CHROMA_420_BT_SIZE, VVC_CURRENT_MAX_CHROMA_420_MTT_DEPTH,
+    VVC_CURRENT_MAX_CHROMA_420_TT_SIZE, VVC_CURRENT_MAX_LUMA_BT_SIZE,
+    VVC_CURRENT_MAX_LUMA_MTT_DEPTH, VVC_CURRENT_MAX_LUMA_TT_SIZE,
     VVC_CURRENT_MIN_CHROMA_420_QT_SIZE, VVC_CURRENT_MIN_LUMA_CB_SIZE, VVC_CURRENT_MIN_LUMA_QT_SIZE,
     VVC_LUMA_AC_COEFFS_PER_TU,
 };
@@ -67,6 +68,13 @@ impl VvcCtuPartitionParams {
 pub(in crate::vvc) fn vvc_chroma_420_transform_nodes(
     shape: VvcCtuPartitionShape,
 ) -> Vec<VvcCodingTreeNode> {
+    debug_assert_eq!(shape.chroma_sampling, ChromaSampling::Cs420);
+    vvc_chroma_transform_nodes(shape)
+}
+
+pub(in crate::vvc) fn vvc_chroma_transform_nodes(
+    shape: VvcCtuPartitionShape,
+) -> Vec<VvcCodingTreeNode> {
     let mut nodes = Vec::new();
     append_chroma_visible_qt_subtree(
         &mut nodes,
@@ -77,6 +85,7 @@ pub(in crate::vvc) fn vvc_chroma_420_transform_nodes(
         ),
         shape.visible_width,
         shape.visible_height,
+        shape.chroma_sampling,
     );
     nodes
 }
@@ -86,22 +95,31 @@ fn append_chroma_visible_qt_subtree(
     node: VvcCodingTreeNode,
     visible_width: u16,
     visible_height: u16,
+    chroma_sampling: ChromaSampling,
 ) {
     debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeChroma);
     if !node.intersects_visible(visible_width, visible_height) {
         return;
     }
-    if node.fits_visible(visible_width, visible_height) && chroma_leaf_allowed(node) {
+    if node.fits_visible(visible_width, visible_height)
+        && chroma_leaf_allowed(node, chroma_sampling)
+    {
         nodes.push(node);
         return;
     }
 
     if !node.fits_visible(visible_width, visible_height) {
-        append_chroma_implicit_boundary_children(nodes, node, visible_width, visible_height);
+        append_chroma_implicit_boundary_children(
+            nodes,
+            node,
+            visible_width,
+            visible_height,
+            chroma_sampling,
+        );
         return;
     }
 
-    let split = vvc_chroma_420_split_availability(node, visible_width, visible_height);
+    let split = vvc_chroma_split_availability(node, visible_width, visible_height, chroma_sampling);
     if split.allow_qt {
         for child_idx in 0..4 {
             append_chroma_visible_qt_subtree(
@@ -109,6 +127,7 @@ fn append_chroma_visible_qt_subtree(
                 node.qt_child(child_idx),
                 visible_width,
                 visible_height,
+                chroma_sampling,
             );
         }
     } else {
@@ -119,6 +138,7 @@ fn append_chroma_visible_qt_subtree(
                 node.mtt_child(vertical, child_idx),
                 visible_width,
                 visible_height,
+                chroma_sampling,
             );
         }
     }
@@ -129,8 +149,9 @@ fn append_chroma_implicit_boundary_children(
     node: VvcCodingTreeNode,
     visible_width: u16,
     visible_height: u16,
+    chroma_sampling: ChromaSampling,
 ) {
-    let split = vvc_chroma_420_split_availability(node, visible_width, visible_height);
+    let split = vvc_chroma_split_availability(node, visible_width, visible_height, chroma_sampling);
     if split.allow_qt {
         for child_idx in 0..4 {
             append_chroma_visible_qt_subtree(
@@ -138,6 +159,7 @@ fn append_chroma_implicit_boundary_children(
                 node.qt_child(child_idx),
                 visible_width,
                 visible_height,
+                chroma_sampling,
             );
         }
         return;
@@ -150,6 +172,7 @@ fn append_chroma_implicit_boundary_children(
                     node.qt_child(child_idx),
                     visible_width,
                     visible_height,
+                    chroma_sampling,
                 );
             }
         }
@@ -165,6 +188,7 @@ fn append_chroma_implicit_boundary_children(
                     ),
                     visible_width,
                     visible_height,
+                    chroma_sampling,
                 );
             }
         }
@@ -180,6 +204,7 @@ fn append_chroma_implicit_boundary_children(
                     ),
                     visible_width,
                     visible_height,
+                    chroma_sampling,
                 );
             }
         }
@@ -192,9 +217,9 @@ fn append_chroma_implicit_boundary_children(
     }
 }
 
-fn chroma_leaf_allowed(node: VvcCodingTreeNode) -> bool {
-    let chroma_width = vvc_chroma_420_width(node);
-    let chroma_height = vvc_chroma_420_height(node);
+fn chroma_leaf_allowed(node: VvcCodingTreeNode, chroma_sampling: ChromaSampling) -> bool {
+    let chroma_width = vvc_chroma_width(node, chroma_sampling);
+    let chroma_height = vvc_chroma_height(node, chroma_sampling);
     // H.266 7.3.11.10 permits transform_unit() after any legal coding-tree
     // leaf. The current residual hardware deliberately chooses legal splits
     // down to 8x8 luma-coordinate leaves, which are 4x4 chroma TUs in 4:2:0.
@@ -203,12 +228,18 @@ fn chroma_leaf_allowed(node: VvcCodingTreeNode) -> bool {
         && chroma_height <= VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE
 }
 
-pub(in crate::vvc) fn vvc_chroma_420_width(node: VvcCodingTreeNode) -> u16 {
-    node.width / 2
+pub(in crate::vvc) fn vvc_chroma_width(
+    node: VvcCodingTreeNode,
+    chroma_sampling: ChromaSampling,
+) -> u16 {
+    node.width / chroma_subsample_x(chroma_sampling) as u16
 }
 
-pub(in crate::vvc) fn vvc_chroma_420_height(node: VvcCodingTreeNode) -> u16 {
-    node.height / 2
+pub(in crate::vvc) fn vvc_chroma_height(
+    node: VvcCodingTreeNode,
+    chroma_sampling: ChromaSampling,
+) -> u16 {
+    node.height / chroma_subsample_y(chroma_sampling) as u16
 }
 
 fn chroma_implicit_split(
@@ -250,13 +281,14 @@ fn chroma_implicit_split(
     }
 }
 
-pub(in crate::vvc) fn vvc_chroma_420_split_availability(
+pub(in crate::vvc) fn vvc_chroma_split_availability(
     node: VvcCodingTreeNode,
     visible_width: u16,
     visible_height: u16,
+    chroma_sampling: ChromaSampling,
 ) -> VvcChromaSplitAvailability {
-    let chroma_width = vvc_chroma_420_width(node);
-    let chroma_height = vvc_chroma_420_height(node);
+    let chroma_width = vvc_chroma_width(node, chroma_sampling);
+    let chroma_height = vvc_chroma_height(node, chroma_sampling);
     let chroma_area = chroma_width * chroma_height;
     let implicit_split = chroma_implicit_split(node, visible_width, visible_height);
     let max_mtt_depth = VVC_CURRENT_MAX_CHROMA_420_MTT_DEPTH + node.depth_offset;

@@ -19,9 +19,10 @@ mod palette;
 mod residual;
 mod syntax;
 use cabac::{
-    encode_ctu_partition_body, vvc_chroma_420_transform_nodes, VvcCabacContext, VvcCabacContexts,
-    VvcCabacDumpContextEvent, VvcCabacDumpSymbol, VvcCabacEncoder, VvcCodingTreeNode,
-    VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape, VvcLastSigCoeffPrefixCtxInput,
+    encode_ctu_partition_body, vvc_chroma_420_transform_nodes, vvc_chroma_transform_nodes,
+    VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
+    VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
+    VvcLastSigCoeffPrefixCtxInput,
 };
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
@@ -54,7 +55,7 @@ pub use residual::quantize_vvc_color;
 #[cfg(test)]
 use residual::VVC_LUMA_DC_BASE;
 use residual::{
-    quantize_vvc_frame, quantize_vvc_frame_lossless_420, reconstruct_vvc_residual_frame,
+    quantize_vvc_frame, quantize_vvc_frame_lossless_residual, reconstruct_vvc_residual_frame,
     VvcQuantizedColor, VvcResidualCabacOptions, VvcResidualComponent, MAX_VVC_CHROMA_TUS,
     MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
     VVC_LUMA_AC_COEFFS_PER_TU,
@@ -231,7 +232,7 @@ impl VvcVideoGeometry {
     }
 }
 
-fn chroma_subsample_x(chroma_sampling: ChromaSampling) -> usize {
+pub(in crate::vvc) fn chroma_subsample_x(chroma_sampling: ChromaSampling) -> usize {
     match chroma_sampling {
         ChromaSampling::Monochrome => 1,
         ChromaSampling::Cs420 | ChromaSampling::Cs422 => 2,
@@ -239,7 +240,7 @@ fn chroma_subsample_x(chroma_sampling: ChromaSampling) -> usize {
     }
 }
 
-fn chroma_subsample_y(chroma_sampling: ChromaSampling) -> usize {
+pub(in crate::vvc) fn chroma_subsample_y(chroma_sampling: ChromaSampling) -> usize {
     match chroma_sampling {
         ChromaSampling::Monochrome => 1,
         ChromaSampling::Cs420 => 2,
@@ -306,6 +307,10 @@ impl VvcCodingTreeConfig {
             chroma_sampling: ChromaSampling::Cs420,
         }
     }
+
+    const fn yuv(chroma_sampling: ChromaSampling) -> Self {
+        Self { chroma_sampling }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +363,14 @@ impl VvcSyntaxToolFlags {
         }
     }
 
+    const fn residual_lossless(chroma_sampling: ChromaSampling) -> Self {
+        let mut tools = Self::yuv420_lossless();
+        if matches!(chroma_sampling, ChromaSampling::Cs422) {
+            tools.cclm_enabled = false;
+        }
+        tools
+    }
+
     const fn palette_444() -> Self {
         Self {
             ibc_enabled: true,
@@ -398,10 +411,10 @@ impl VvcSliceSyntaxConfig {
         )
     }
 
-    fn yuv420_lossless(bit_depth: SampleBitDepth) -> Self {
+    fn residual_lossless(chroma_sampling: ChromaSampling, bit_depth: SampleBitDepth) -> Self {
         let mut config = Self::new(
-            VvcCodingTreeConfig::yuv420(),
-            VvcSyntaxToolFlags::yuv420_lossless(),
+            VvcCodingTreeConfig::yuv(chroma_sampling),
+            VvcSyntaxToolFlags::residual_lossless(chroma_sampling),
         );
         config.slice_qp = vvc_lossless_slice_qp(bit_depth);
         config
@@ -792,19 +805,34 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
             .expect("YUV input has chroma sampling"),
         bit_depth: format.bit_depth(),
     };
+    if !options.lossless
+        && stream_format.chroma_sampling == ChromaSampling::Cs422
+        && stream_format.bit_depth.bits() != 8
+    {
+        return Err(format!(
+            "VVC high-depth 4:2:2 input currently supports lossless mode only; got {format}"
+        ));
+    }
     if options.lossless
         && !matches!(
             stream_format.chroma_sampling,
-            ChromaSampling::Cs420 | ChromaSampling::Cs444
+            ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444
         )
     {
         return Err(format!(
             "VVC lossless encode is not implemented for {format}"
         ));
     }
-    let lossless_420 = options.lossless && stream_format.chroma_sampling == ChromaSampling::Cs420;
-    let slice_config = if lossless_420 {
-        VvcSliceSyntaxConfig::yuv420_lossless(stream_format.bit_depth)
+    let lossless_residual = options.lossless
+        && matches!(
+            stream_format.chroma_sampling,
+            ChromaSampling::Cs420 | ChromaSampling::Cs422
+        );
+    let slice_config = if lossless_residual {
+        VvcSliceSyntaxConfig::residual_lossless(
+            stream_format.chroma_sampling,
+            stream_format.bit_depth,
+        )
     } else {
         VvcSliceSyntaxConfig::for_picture_format(stream_format)
     };
@@ -864,30 +892,26 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 }
                 frame_recon.into_yuv()
             } else {
-                let compat_frame = if lossless_420 {
+                let compat_frame = if lossless_residual {
                     source_frame.clone()
                 } else {
                     source_frame.decoder_compat_frame()
                 };
-                let mut frame_recon = VvcReconstructionFrame::new_neutral(
-                    geometry,
-                    VvcPictureFormat {
-                        chroma_sampling: ChromaSampling::Cs420,
-                        bit_depth: compat_frame.format.bit_depth,
-                    },
-                );
+                let mut frame_recon =
+                    VvcReconstructionFrame::new_neutral(geometry, compat_frame.format);
                 for region in vvc_ctu_regions(geometry) {
                     let ctu_frame = extract_vvc_ctu_frame(&compat_frame, region);
-                    let quantized = if lossless_420 {
-                        quantize_vvc_frame_lossless_420(ctu_frame.clone())
+                    let quantized = if lossless_residual {
+                        quantize_vvc_frame_lossless_residual(ctu_frame.clone())
                     } else {
                         quantize_vvc_frame(ctu_frame.clone())
                     };
-                    let partition_params = if lossless_420 {
-                        vvc_ctu_partition_params_with_luma_max_leaf_size(
+                    let partition_params = if lossless_residual {
+                        vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
                             ctu_frame.geometry,
                             quantized,
                             VVC_LOSSLESS_LUMA_LEAF_SIZE,
+                            ctu_frame.format.chroma_sampling,
                         )
                     } else {
                         vvc_ctu_partition_params(ctu_frame.geometry, quantized)
@@ -899,7 +923,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             ctu_frame.geometry.coded_height()
                         )
                     })?;
-                    let ctu_recon = if lossless_420 {
+                    let ctu_recon = if lossless_residual {
                         ctu_frame.to_yuv_samples()
                     } else {
                         reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params)
@@ -907,7 +931,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                     frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
                     write_annex_b_to(
                         &mut frame_bitstream,
-                        &[if lossless_420 {
+                        &[if lossless_residual {
                             vvc_ctu_slice_unit_with_luma_max_leaf_size(
                                 frame_idx,
                                 geometry,
@@ -1295,13 +1319,13 @@ fn validate_vvc_input_format(format: PixelFormat) -> Result<(), String> {
     };
     match chroma_sampling {
         ChromaSampling::Cs420 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
-        ChromaSampling::Cs422 if format.bit_depth().bits() == 8 => Ok(()),
+        ChromaSampling::Cs422 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
         ChromaSampling::Cs444 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
         ChromaSampling::Cs420 => Err(format!(
             "VVC 4:2:0 input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
         ChromaSampling::Cs422 => Err(format!(
-            "VVC 4:2:2 input currently supports only 8-bit compatibility input; got {format}"
+            "VVC 4:2:2 input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
         ChromaSampling::Cs444 => Err(format!(
             "VVC 4:4:4 palette input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
@@ -1482,9 +1506,12 @@ fn vvc_cabac_bits_with_luma_max_leaf_size(
     slice_config: VvcSliceSyntaxConfig,
     luma_max_leaf_size: u16,
 ) -> Vec<bool> {
-    if let Some(params) =
-        vvc_ctu_partition_params_with_luma_max_leaf_size(geometry, color, luma_max_leaf_size)
-    {
+    if let Some(params) = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+        geometry,
+        color,
+        luma_max_leaf_size,
+        slice_config.coding_tree.chroma_sampling,
+    ) {
         return vvc_ctu_partition_cabac_bits(params, slice_config);
     }
     unimplemented!(
@@ -1518,7 +1545,28 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size(
     {
         return None;
     }
-    let chroma_sampling = ChromaSampling::Cs420;
+    vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+        geometry,
+        color,
+        luma_max_leaf_size,
+        ChromaSampling::Cs420,
+    )
+}
+
+fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+    geometry: VvcVideoGeometry,
+    color: VvcQuantizedColor,
+    luma_max_leaf_size: u16,
+    chroma_sampling: ChromaSampling,
+) -> Option<VvcCtuPartitionParams> {
+    let coded = geometry.coded();
+    if coded.width > VVC_CTU_SIZE
+        || coded.height > VVC_CTU_SIZE
+        || coded.width < 8
+        || coded.height < 8
+    {
+        return None;
+    }
     let shape = VvcCtuPartitionShape {
         root_width: VVC_CTU_SIZE as u16,
         root_height: VVC_CTU_SIZE as u16,
@@ -1526,9 +1574,9 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size(
         visible_height: coded.height as u16,
         chroma_sampling,
     };
-    let chroma_tu_count = vvc_chroma_420_transform_nodes(shape).len();
+    let chroma_tu_count = vvc_chroma_transform_nodes(shape).len();
     let (luma_tu_count, luma_tu_abs_levels, luma_tu_negative, luma_tu_dc_levels, luma_tu_ac_levels) =
-        vvc_luma_residual_arrays_for_geometry(coded, chroma_sampling, color);
+        vvc_luma_residual_arrays_for_geometry(coded, chroma_sampling, luma_max_leaf_size, color);
     Some(VvcCtuPartitionParams {
         root_width: VVC_CTU_SIZE,
         root_height: VVC_CTU_SIZE,
@@ -1554,6 +1602,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size(
 fn vvc_luma_residual_arrays_for_geometry(
     coded: VvcCodedGeometry,
     chroma_sampling: ChromaSampling,
+    luma_max_leaf_size: u16,
     color: VvcQuantizedColor,
 ) -> (
     usize,
@@ -1577,7 +1626,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         );
     }
 
-    let leaf_count = vvc_luma_leaf_count(coded, chroma_sampling);
+    let leaf_count = vvc_luma_leaf_count(coded, chroma_sampling, luma_max_leaf_size);
     luma_tu_count = leaf_count;
     for idx in 0..leaf_count.min(MAX_VVC_LUMA_TUS) {
         luma_tu_abs_levels[idx] = color.luma_tu_remainders[0];
@@ -1594,14 +1643,18 @@ fn vvc_luma_residual_arrays_for_geometry(
     )
 }
 
-fn vvc_luma_leaf_count(coded: VvcCodedGeometry, chroma_sampling: ChromaSampling) -> usize {
+fn vvc_luma_leaf_count(
+    coded: VvcCodedGeometry,
+    chroma_sampling: ChromaSampling,
+    luma_max_leaf_size: u16,
+) -> usize {
     let params = VvcCtuPartitionParams {
         root_width: VVC_CTU_SIZE,
         root_height: VVC_CTU_SIZE,
         visible_width: coded.width,
         visible_height: coded.height,
         chroma_sampling,
-        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+        luma_max_leaf_size,
         chroma_tu_count: 0,
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],

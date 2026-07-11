@@ -713,7 +713,7 @@ fn codec_supports_lossless_stream(codec: &str, format: PixelFormat) -> bool {
         "vvc" => {
             matches!(
                 format.chroma_sampling(),
-                Some(ChromaSampling::Cs420 | ChromaSampling::Cs444)
+                Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
             ) && vvc_accepts_bit_depth(format)
         }
         _ => false,
@@ -1344,43 +1344,70 @@ mod tests {
     }
 
     #[test]
-    fn encode_job_rejects_lossless_yuv422_without_bit_depth_fallback() {
-        for codec in ["av2", "vvc"] {
-            let format_name = "yuv422p10le";
-            let path = temp_yuv_path(&format!("one_frame_8x8_{codec}_{format_name}"));
-            let format = PixelFormat::yuv422(10).unwrap();
-            let input = vec![0; format.frame_len(8, 8).unwrap()];
-            let mut file = File::create(&path).expect("create temp yuv");
-            file.write_all(&input).expect("write temp yuv");
-            drop(file);
+    fn encode_job_rejects_lossless_yuv422_for_av2_without_bit_depth_fallback() {
+        let format_name = "yuv422p10le";
+        let path = temp_yuv_path(&format!("one_frame_8x8_av2_{format_name}"));
+        let format = PixelFormat::yuv422(10).unwrap();
+        let input = vec![0; format.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
 
-            let args = EncodeArgs {
-                input: Some(path.to_string_lossy().to_string()),
-                output: Some(if codec == "av2" { "out.obu" } else { "out.266" }.to_string()),
-                codec: Some(codec.to_string()),
-                video: Some(args::VideoSpec {
-                    width: 8,
-                    height: 8,
-                    pixel_format: Some(format_name.to_string()),
-                }),
-                settings: vec!["lossless=true".to_string()],
-                frames: None,
-                ..EncodeArgs::default()
-            };
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some(format_name.to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
 
-            let err = encode_job(&args).expect_err("lossless 4:2:2 is codec-gated");
-            assert!(
-                err.contains(&format!(
-                    "lossless encode is not implemented for {codec} yuv422p10le"
-                )),
-                "{err}"
-            );
-            assert!(
-                !err.contains("yuv422p8"),
-                "lossless error should not report an 8-bit fallback: {err}"
-            );
-            let _ = fs::remove_file(path);
-        }
+        let err = encode_job(&args).expect_err("AV2 lossless 4:2:2 is codec-gated");
+        assert!(
+            err.contains("lossless encode is not implemented for av2 yuv422p10le"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("yuv422p8"),
+            "lossless error should not report an 8-bit fallback: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_accepts_lossless_yuv422_for_vvc_path() {
+        let format_name = "yuv422p10le";
+        let path = temp_yuv_path(&format!("one_frame_8x8_vvc_{format_name}"));
+        let format = PixelFormat::yuv422(10).unwrap();
+        let input = vec![0; format.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.266".to_string()),
+            codec: Some("vvc".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some(format_name.to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("VVC lossless 4:2:2 is native");
+        assert!(job.lossless);
+        assert_eq!(job.source_format, format);
+        assert_eq!(job.format, format);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

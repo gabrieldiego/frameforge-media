@@ -128,6 +128,30 @@ fn vvc_sps_signals_native_420_bit_depth_profiles() {
     }
 }
 
+#[test]
+fn vvc_sps_signals_444_capable_profiles_for_422() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    for (bits, expected_profile) in [(8, 33), (10, 33), (12, 34)] {
+        let rbsp = vvc_sps_rbsp(
+            geometry,
+            VvcSliceSyntaxConfig::residual_lossless(
+                ChromaSampling::Cs422,
+                SampleBitDepth::new(bits).expect("valid bit depth"),
+            ),
+            SampleBitDepth::new(bits).expect("valid bit depth"),
+        );
+        assert_eq!(
+            vvc_ue_value(&rbsp, "sps_bitdepth_minus8"),
+            u32::from(bits - 8)
+        );
+        assert_eq!(vvc_u_value(&rbsp, "sps_chroma_format_idc"), 2);
+        assert_eq!(vvc_u_value(&rbsp, "general_profile_idc"), expected_profile);
+    }
+}
+
 fn assert_vvc_annex_b_has_min_picture_nals(bytes: &[u8], frames: usize) -> Vec<VvcNalInfo> {
     let infos = parse_annex_b_nal_units(bytes).unwrap();
     assert!(infos.len() >= 2 + frames);
@@ -1136,6 +1160,7 @@ fn vvc_ctu_cabac_generator_is_embedded_in_ctu_body() {
         params.cr_tu_dc_levels,
         params.cb_tu_ac_levels,
         params.cr_tu_ac_levels,
+        params.chroma_sampling,
         vvc_test_slice_config(),
     );
     manual.start();
@@ -1144,6 +1169,48 @@ fn vvc_ctu_cabac_generator_is_embedded_in_ctu_body() {
     }
     manual.encode_bin_trm(true);
     assert_eq!(via_body, manual.finish());
+}
+
+#[test]
+fn vvc_lossless_cabac_body_uses_active_chroma_sampling() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
+    let bit_depth = SampleBitDepth::new(8).expect("valid bit depth");
+    let config = VvcSliceSyntaxConfig::residual_lossless(ChromaSampling::Cs422, bit_depth);
+    let params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+        geometry,
+        black,
+        VVC_LOSSLESS_LUMA_LEAF_SIZE,
+        ChromaSampling::Cs422,
+    )
+    .expect("4:2:2 partition parameters");
+    assert_eq!(params.chroma_tu_count, 8);
+
+    let via_slice_config = vvc_cabac_bits_with_luma_max_leaf_size(
+        geometry,
+        black,
+        config,
+        VVC_LOSSLESS_LUMA_LEAF_SIZE,
+    );
+    assert_eq!(
+        via_slice_config,
+        vvc_ctu_partition_cabac_bits(params, config)
+    );
+
+    let legacy_420_params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+        geometry,
+        black,
+        VVC_LOSSLESS_LUMA_LEAF_SIZE,
+        ChromaSampling::Cs420,
+    )
+    .expect("4:2:0 partition parameters");
+    assert_ne!(
+        via_slice_config,
+        vvc_ctu_partition_cabac_bits(legacy_420_params, config)
+    );
 }
 
 #[test]
@@ -1655,6 +1722,35 @@ fn vvc_input_path_accepts_lossless_yuv420_high_depth_exact_reconstruction() {
         None,
     )
     .expect("lossless 4:2:0 should encode");
+
+    assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+    assert_eq!(reconstruction, input);
+}
+
+#[test]
+fn vvc_input_path_accepts_lossless_yuv422_high_depth_exact_reconstruction() {
+    let geometry = VvcVideoGeometry {
+        width: 8,
+        height: 8,
+    };
+    let format = PixelFormat::yuv422(10).unwrap();
+    let input = yuv422p10_canary_8x8();
+    let mut source = input.as_slice();
+    let mut bitstream = Vec::new();
+    let mut reconstruction = Vec::new();
+
+    vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+        &mut source,
+        &mut bitstream,
+        Some(&mut reconstruction),
+        VvcEncodeParams { frames: 1 },
+        geometry,
+        VvcVideoLimits::unbounded(),
+        format,
+        VvcEncodeOptions { lossless: true },
+        None,
+    )
+    .expect("lossless 4:2:2 should encode");
 
     assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
     assert_eq!(reconstruction, input);
@@ -2398,6 +2494,20 @@ fn yuv420p10_canary_8x8() -> Vec<u8> {
         out.extend((((i * 29 + 5) & 0x03ff) as u16).to_le_bytes());
     }
     for i in 0..16 {
+        out.extend((((i * 37 + 7) & 0x03ff) as u16).to_le_bytes());
+    }
+    out
+}
+
+fn yuv422p10_canary_8x8() -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..64 {
+        out.extend((((i * 17 + 3) & 0x03ff) as u16).to_le_bytes());
+    }
+    for i in 0..32 {
+        out.extend((((i * 29 + 5) & 0x03ff) as u16).to_le_bytes());
+    }
+    for i in 0..32 {
         out.extend((((i * 37 + 7) & 0x03ff) as u16).to_le_bytes());
     }
     out
