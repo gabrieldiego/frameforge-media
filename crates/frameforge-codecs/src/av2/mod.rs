@@ -395,6 +395,11 @@ pub struct Av2EncodeRequest {
     pub format: PixelFormat,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Av2EncodeOptions {
+    pub lossless: bool,
+}
+
 pub struct Av2EncodeFrameMetrics<'a> {
     pub frame_idx: usize,
     pub frame_count: usize,
@@ -491,14 +496,38 @@ pub fn av2_encode_fixed_black_444(
 pub fn av2_encode_fixed_black_444_with_frame_metrics(
     input: &mut dyn Read,
     output: &mut dyn Write,
+    recon: Option<&mut dyn Write>,
+    request: Av2EncodeRequest,
+    frame_metrics: Option<&mut dyn for<'a> FnMut(Av2EncodeFrameMetrics<'a>)>,
+) -> Result<(), String> {
+    av2_encode_fixed_black_444_with_options_and_frame_metrics(
+        input,
+        output,
+        recon,
+        request,
+        Av2EncodeOptions::default(),
+        frame_metrics,
+    )
+}
+
+pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
+    input: &mut dyn Read,
+    output: &mut dyn Write,
     mut recon: Option<&mut dyn Write>,
     request: Av2EncodeRequest,
+    options: Av2EncodeOptions,
     mut frame_metrics: Option<&mut dyn for<'a> FnMut(Av2EncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
     request.validate()?;
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
+    if options.lossless && stream_format.chroma_format != Av2ChromaFormat::Yuv444 {
+        return Err(format!(
+            "AV2 lossless encode is not implemented for {}",
+            request.format
+        ));
+    }
 
     let expected_len = Picture::expected_len(geometry.width, geometry.height, request.format);
     for frame_index in 0..request.params.frames {
@@ -1994,6 +2023,38 @@ mod tests {
                 expected_uvlc_bit_count(stream_format.bitdepth_lut_index()),
             );
         }
+    }
+
+    #[test]
+    fn av2_yuv420_rejects_lossless_until_stream_exact_path_exists() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let format = PixelFormat::yuv420(10).expect("valid AV2 high-depth 4:2:0 format");
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format,
+        };
+        let input = vec![0; Picture::expected_len(geometry.width, geometry.height, format)];
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let err = av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            None,
+            request,
+            Av2EncodeOptions { lossless: true },
+            None,
+        )
+        .expect_err("lossless 4:2:0 must fail closed until stream-exact");
+
+        assert!(
+            err.contains("AV2 lossless encode is not implemented"),
+            "{err}"
+        );
+        assert!(output.is_empty());
     }
 
     #[test]

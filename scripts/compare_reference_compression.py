@@ -92,8 +92,22 @@ def main() -> int:
 
     reference_encoder = resolve_reference_encoder(args.codec)
     vectors = generate_test_vectors.generate_vectors(args.set, args.vector_dir, args.set_dir)
+    enabled_vectors = []
+    skipped = 0
+    for vector_path in vectors:
+        vector = vector_for_path(args.set, args.set_dir, vector_path)
+        if vector.codecs is not None and args.codec.lower() not in vector.codecs:
+            skipped += 1
+            continue
+        enabled_vectors.append(vector_path)
+    vectors = enabled_vectors
     if args.limit:
         vectors = vectors[: args.limit]
+    if skipped:
+        print(
+            f"Skipped {skipped} vector(s) not enabled for codec {args.codec}",
+            flush=True,
+        )
 
     results: list[ComparisonResult] = []
     for index, vector_path in enumerate(vectors, start=1):

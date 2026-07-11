@@ -74,8 +74,19 @@ def main() -> int:
         paths = generate_test_vectors.generate_vectors(args.set, args.vector_dir, args.set_dir)
         vectors_by_filename = {vector.filename: vector for vector in vector_set.vectors}
         cases = [(vectors_by_filename[path.name], path) for path in paths]
+    skipped_by_codec = [
+        vector for vector, _ in cases if not vector_enabled_for_codec(vector, args.codec)
+    ]
+    cases = [
+        (vector, path) for vector, path in cases if vector_enabled_for_codec(vector, args.codec)
+    ]
     if args.limit:
         cases = cases[: args.limit]
+    if skipped_by_codec:
+        print(
+            f"Skipped {len(skipped_by_codec)} vector(s) not enabled for codec {args.codec}",
+            flush=True,
+        )
 
     results: list[ValidationResult] = []
     for index, (vector, vector_path) in enumerate(cases, start=1):
@@ -118,6 +129,10 @@ def load_vector_set(set_name: str, set_dir: Path) -> generate_test_vectors.TestV
         choices = ", ".join(sorted(sets)) or "<none>"
         raise ValueError(f"unknown test vector set '{set_name}'; choices: {choices}")
     return sets[set_name]
+
+
+def vector_enabled_for_codec(vector: generate_test_vectors.TestVector, codec: str) -> bool:
+    return vector.codecs is None or codec.lower() in vector.codecs
 
 
 def run_file_case(

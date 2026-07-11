@@ -1566,6 +1566,39 @@ fn vvc_input_path_rejects_unsupported_high_depth_yuv420p() {
 }
 
 #[test]
+fn vvc_input_path_rejects_lossless_yuv420_until_stream_exact_path_exists() {
+    let geometry = VvcVideoGeometry {
+        width: 8,
+        height: 8,
+    };
+    let format = PixelFormat::yuv420(10).unwrap();
+    let input = solid_yuv420p_high(65, 128, 192, 10, 1);
+    let mut source = input.as_slice();
+    let mut bitstream = Vec::new();
+    let mut reconstruction = Vec::new();
+
+    let err = vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+        &mut source,
+        &mut bitstream,
+        Some(&mut reconstruction),
+        VvcEncodeParams { frames: 1 },
+        geometry,
+        VvcVideoLimits::unbounded(),
+        format,
+        VvcEncodeOptions { lossless: true },
+        None,
+    )
+    .expect_err("lossless 4:2:0 must fail closed until stream-exact");
+
+    assert!(
+        err.contains("VVC lossless encode is not implemented"),
+        "{err}"
+    );
+    assert!(bitstream.is_empty());
+    assert!(reconstruction.is_empty());
+}
+
+#[test]
 fn vvc_input_path_accepts_supported_yuv_subsampling() {
     let expected = vvc_yuv420p8_annex_b_from_input(
         &solid_yuv420p8(65, 128, 192, 1),

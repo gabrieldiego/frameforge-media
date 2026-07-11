@@ -90,6 +90,11 @@ pub struct VvcEncodeParams {
     pub frames: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VvcEncodeOptions {
+    pub lossless: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VvcEncodeArtifacts {
     pub bitstream: Vec<u8>,
@@ -650,6 +655,7 @@ pub fn vvc_yuv_encode_stream_with_limits<R: Read, W: Write>(
         geometry,
         limits,
         format,
+        VvcEncodeOptions::default(),
         None,
         None,
     )
@@ -673,6 +679,7 @@ pub fn vvc_yuv_encode_stream_with_limits_and_progress<R: Read, W: Write>(
         geometry,
         limits,
         format,
+        VvcEncodeOptions::default(),
         progress,
         None,
     )
@@ -688,6 +695,30 @@ pub fn vvc_yuv_encode_stream_with_limits_and_frame_metrics<R: Read, W: Write>(
     format: PixelFormat,
     frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
+    vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+        input,
+        bitstream,
+        reconstruction,
+        params,
+        geometry,
+        limits,
+        format,
+        VvcEncodeOptions::default(),
+        frame_metrics,
+    )
+}
+
+pub fn vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics<R: Read, W: Write>(
+    input: &mut R,
+    bitstream: &mut W,
+    reconstruction: Option<&mut dyn Write>,
+    params: VvcEncodeParams,
+    geometry: VvcVideoGeometry,
+    limits: VvcVideoLimits,
+    format: PixelFormat,
+    options: VvcEncodeOptions,
+    frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
+) -> Result<(), String> {
     vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics(
         input,
         bitstream,
@@ -696,6 +727,7 @@ pub fn vvc_yuv_encode_stream_with_limits_and_frame_metrics<R: Read, W: Write>(
         geometry,
         limits,
         format,
+        options,
         None,
         frame_metrics,
     )
@@ -709,6 +741,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     geometry: VvcVideoGeometry,
     limits: VvcVideoLimits,
     format: PixelFormat,
+    options: VvcEncodeOptions,
     mut progress: Option<&mut dyn FnMut(VvcEncodeProgress)>,
     mut frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
@@ -727,6 +760,11 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
             .expect("YUV input has chroma sampling"),
         bit_depth: format.bit_depth(),
     };
+    if options.lossless && stream_format.chroma_sampling != ChromaSampling::Cs444 {
+        return Err(format!(
+            "VVC lossless encode is not implemented for {format}"
+        ));
+    }
     let slice_config = VvcSliceSyntaxConfig::for_picture_format(stream_format);
     write_annex_b_to(
         bitstream,

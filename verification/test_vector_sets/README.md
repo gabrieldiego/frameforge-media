@@ -19,6 +19,10 @@ black_16x16,16,16,1,yuv420p8,black,30,false
 `lossless` is optional and defaults to false. When true, validation passes
 `--set lossless` to the encoder and compares the internal reconstruction
 against the generated source bytes.
+`codecs` is optional and defaults to all codecs. Use a `|`-separated list such
+as `av2|vvc` to enable a row only for selected codec validation and compression
+comparison runs, or `none` to keep the vector generateable while no codec path
+currently claims support for it.
 Local manifests may use `pattern=source_file` with a `path` column. Raw YUV
 sources require explicit width, height, format, and frame count. Y4M source
 rows may leave width, height, format, and fps empty; the generator reads those
@@ -47,6 +51,9 @@ Supported patterns:
 `bitdepth_canary` is a high-depth smoke pattern that writes deterministic
 non-zero lower bits into generated 10-bit and 12-bit samples. It is intended to
 catch internal truncation, not to act as a compression-efficiency benchmark.
+The committed high-depth smoke manifest keeps 4:2:0 canaries generateable but
+gates validation to codec paths that currently emit reference-decodable
+lossless streams.
 
 Generated filenames include metadata in the CLI-supported form:
 

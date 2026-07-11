@@ -44,6 +44,7 @@ class TestVector:
     crop_x: int | None
     crop_y: int | None
     lossless: bool
+    codecs: frozenset[str] | None
 
     @property
     def filename(self) -> str:
@@ -236,6 +237,7 @@ def parse_vector(row: dict[str, str], path: Path) -> TestVector:
         crop_x=parse_optional_non_negative_int(row.get("crop_x", ""), "crop_x"),
         crop_y=parse_optional_non_negative_int(row.get("crop_y", ""), "crop_y"),
         lossless=parse_optional_bool(row.get("lossless", ""), "lossless"),
+        codecs=parse_optional_codecs(row.get("codecs", "")),
     )
 
 
@@ -293,6 +295,23 @@ def parse_optional_bool(value: str | None, field: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{field} expects a boolean, got '{stripped}'")
+
+
+def parse_optional_codecs(value: str | None) -> frozenset[str] | None:
+    stripped = optional_field(value)
+    if stripped is None:
+        return None
+    normalized = stripped.lower()
+    if normalized in {"none", "-"}:
+        return frozenset()
+    codecs = [
+        item.strip()
+        for item in normalized.replace(";", "|").replace(" ", "|").split("|")
+        if item.strip()
+    ]
+    if not codecs:
+        return None
+    return frozenset(codecs)
 
 
 def parse_optional_path(value: str | None) -> Path | None:

@@ -558,6 +558,7 @@ struct EncodeJob {
     height: usize,
     source_format: PixelFormat,
     format: PixelFormat,
+    lossless: bool,
 }
 
 fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
@@ -630,6 +631,18 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         args.codec.as_deref().expect("parser requires codec"),
         source_format,
     );
+    let lossless = lossless_setting_enabled(&args.settings)?;
+    if lossless && format != source_format {
+        return Err(format!(
+            "lossless encode requires native codec support for {source_format}; refusing fallback conversion to {format}"
+        ));
+    }
+    if lossless && !codec_supports_lossless_stream(args.codec.as_deref().unwrap(), format) {
+        return Err(format!(
+            "lossless encode is not implemented for {} {format}",
+            args.codec.as_deref().unwrap()
+        ));
+    }
     Ok(EncodeJob {
         input,
         output,
@@ -639,7 +652,25 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         height,
         source_format,
         format,
+        lossless,
     })
+}
+
+fn lossless_setting_enabled(settings: &[String]) -> Result<bool, String> {
+    for spec in settings {
+        if args::setting_name(spec) != "lossless" {
+            continue;
+        }
+        let value = args::setting_value(spec).unwrap_or("true");
+        if value == "true" {
+            return Ok(true);
+        }
+        if value == "false" {
+            return Ok(false);
+        }
+        return Err(format!("lossless expects true or false, got '{value}'"));
+    }
+    Ok(false)
 }
 
 fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
@@ -673,6 +704,19 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
             Some(ChromaSampling::Cs444) => vvc_accepts_bit_depth(format),
             _ => false,
         },
+        _ => false,
+    }
+}
+
+fn codec_supports_lossless_stream(codec: &str, format: PixelFormat) -> bool {
+    match codec {
+        "av2" => {
+            format.chroma_sampling() == Some(ChromaSampling::Cs444)
+                && matches!(format.bit_depth().bits(), 8 | 10)
+        }
+        "vvc" => {
+            format.chroma_sampling() == Some(ChromaSampling::Cs444) && vvc_accepts_bit_depth(format)
+        }
         _ => false,
     }
 }
@@ -773,6 +817,9 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
         },
         format: job.format,
     };
+    let options = frameforge_codecs::av2::Av2EncodeOptions {
+        lossless: job.lossless,
+    };
     let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
     let mut recon = create_optional_writer(job.recon.as_deref())?;
@@ -787,11 +834,12 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
             metrics.reconstruction,
         );
     };
-    frameforge_codecs::av2::av2_encode_fixed_black_444_with_frame_metrics(
+    frameforge_codecs::av2::av2_encode_fixed_black_444_with_options_and_frame_metrics(
         &mut input,
         &mut output,
         recon.as_mut().map(|writer| writer as &mut dyn Write),
         request,
+        options,
         Some(&mut frame_metrics),
     )?;
     if let (Some(path), Some(writer)) = (job.recon.as_deref(), recon.as_mut()) {
@@ -835,7 +883,7 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
             metrics.reconstruction,
         );
     };
-    frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_frame_metrics(
+    frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
         &mut input,
         &mut output,
         recon.as_mut().map(|writer| writer as &mut dyn Write),
@@ -843,6 +891,9 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
         geometry,
         limits,
         job.format,
+        frameforge_codecs::vvc::VvcEncodeOptions {
+            lossless: job.lossless,
+        },
         Some(&mut frame_metrics),
     )?;
     if let (Some(path), Some(writer)) = (job.recon.as_deref(), recon.as_mut()) {
@@ -1198,6 +1249,71 @@ mod tests {
     }
 
     #[test]
+    fn encode_job_rejects_lossless_bit_depth_fallback() {
+        let bits = 13;
+        let format_name = format!("yuv420p{bits}le");
+        let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
+        let format = PixelFormat::yuv420(bits).unwrap();
+        let input = vec![0; format.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some(format_name),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("lossless fallback must be rejected");
+        assert!(
+            err.contains("lossless encode requires native codec support"),
+            "{err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_rejects_lossless_yuv420_even_when_codec_accepts_lossy() {
+        let format_name = "yuv420p10le";
+        let path = temp_yuv_path(&format!("one_frame_8x8_{format_name}"));
+        let format = PixelFormat::yuv420(10).unwrap();
+        let input = vec![0; format.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some(format_name.to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("lossless 4:2:0 must be rejected for now");
+        assert!(
+            err.contains("lossless encode is not implemented for av2 yuv420p10le"),
+            "{err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn open_job_reader_hides_unselected_file_suffix() {
         let path = temp_yuv_path("reader_prefix_8x8");
         let mut file = File::create(&path).expect("create temp yuv");
@@ -1214,6 +1330,7 @@ mod tests {
             height: 8,
             source_format: PixelFormat::Yuv420p8,
             format: PixelFormat::Yuv420p8,
+            lossless: false,
         };
         let mut reader = open_job_reader(&job).expect("open reader");
         let mut bytes = Vec::new();

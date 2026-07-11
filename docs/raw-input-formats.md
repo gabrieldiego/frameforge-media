@@ -109,6 +109,13 @@ Current behavior:
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 
+`--set lossless` is stricter than native input acceptance. A codec path may
+accept a format for lossy encoding while still rejecting lossless mode until the
+emitted stream reconstructs exactly through the reference decoder. The current
+lossless stream paths are AV2 `yuv444p8`/`yuv444p10le` and VVC `yuv444p8`
+through `yuv444p12le`; high-depth 4:2:0 lossless is kept disabled until its
+bitstream residual path is exact.
+
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without
 scaling.

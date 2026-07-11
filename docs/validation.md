@@ -13,7 +13,9 @@ Expected validation layers:
 - benchmark and throughput reporting for performance-sensitive stages.
 
 Do not weaken pass criteria to hide incomplete codec support. Unsupported
-syntax or geometry should fail visibly until implemented.
+syntax or geometry should fail visibly until implemented. Manifest `codecs`
+gates may keep future vectors generateable while excluding them from a codec's
+validation run, but an enabled row is expected to pass.
 
 ## Batch Fixtures
 
@@ -50,9 +52,15 @@ do not yet encode a higher depth natively.
 Rows may set `lossless=true`. Validation passes that request to `ff encode`
 with `--set lossless` and compares the encoder's internal reconstruction bytes
 against the generated source bytes before optional reference-decoder checks.
-The `high-depth-smoke` set uses this path with deterministic lower-bit canary
-samples so truncation of 10-bit or 12-bit input is visible as a validation
-failure.
+When `VALIDATION_REFERENCE_MODE` is `auto` or `required` and a reference decoder
+is used, the reference reconstruction must also match the internal
+reconstruction. A lossless stream should only be enabled for a codec when both
+checks are expected to pass.
+
+The `high-depth-smoke` set uses deterministic lower-bit canary samples so
+truncation of 10-bit or 12-bit input is visible as a validation failure. Its
+4:2:0 canaries remain generateable for future work, but validation is gated to
+the 4:4:4 codec paths that currently emit reference-decodable lossless streams.
 
 Reference tools are declared by JSON manifests under:
 
