@@ -114,7 +114,7 @@ fn vvc_sps_signals_native_420_bit_depth_profiles() {
         width: 16,
         height: 16,
     };
-    for (bits, expected_profile) in [(8, 1), (10, 1), (12, 2)] {
+    for (bits, expected_profile) in [(8, 1), (10, 1), (12, 2), (13, 0), (16, 0)] {
         let rbsp = vvc_sps_rbsp(
             geometry,
             VvcSliceSyntaxConfig::yuv420_residual(),
@@ -1520,7 +1520,7 @@ fn vvc_input_path_preserves_native_yuv420p_high_depth() {
         VvcEncodeParams { frames: 1 },
     )
     .unwrap();
-    for bit_depth in 9..=12 {
+    for bit_depth in 9..=16 {
         let format = PixelFormat::yuv420(bit_depth).unwrap();
         let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
         let frame = sample_vvc_yuv_frame(
@@ -1551,17 +1551,6 @@ fn vvc_input_path_preserves_native_yuv420p_high_depth() {
             artifacts.reconstruction.len(),
             Picture::expected_len(8, 8, format)
         );
-    }
-}
-
-#[test]
-fn vvc_input_path_rejects_unsupported_yuv420p_depths() {
-    for bit_depth in 13..=16 {
-        let format = PixelFormat::yuv420(bit_depth).unwrap();
-        let input = solid_yuv420p_high(65, 128, 192, bit_depth, 1);
-        let err = vvc_yuv420p_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
-            .unwrap_err();
-        assert!(err.contains("8..12"), "{err}");
     }
 }
 
@@ -1886,52 +1875,55 @@ fn vvc_palette_444_cu_syntax_uses_native_high_depth_entries() {
         width: 8,
         height: 8,
     };
-    let bit_depth = SampleBitDepth::new(10).expect("valid bit depth");
-    let colors = [
-        VvcSampledColor {
-            y: 12,
-            u: 512,
-            v: 128,
-        },
-        VvcSampledColor {
-            y: 1023,
-            u: 768,
-            v: 900,
-        },
-    ];
-    let mut luma = Vec::with_capacity(64);
-    let mut cb = Vec::with_capacity(64);
-    let mut cr = Vec::with_capacity(64);
-    for idx in 0..64 {
-        let color = colors[idx % colors.len()];
-        luma.push(color.y);
-        cb.push(color.u);
-        cr.push(color.v);
+    for bits in [10, 16] {
+        let bit_depth = SampleBitDepth::new(bits).expect("valid bit depth");
+        let max_sample = bit_depth.max_sample();
+        let colors = [
+            VvcSampledColor {
+                y: 12,
+                u: max_sample / 2,
+                v: 128,
+            },
+            VvcSampledColor {
+                y: max_sample,
+                u: max_sample.saturating_sub(255),
+                v: max_sample.saturating_sub(123),
+            },
+        ];
+        let mut luma = Vec::with_capacity(64);
+        let mut cb = Vec::with_capacity(64);
+        let mut cr = Vec::with_capacity(64);
+        for idx in 0..64 {
+            let color = colors[idx % colors.len()];
+            luma.push(color.y);
+            cb.push(color.u);
+            cr.push(color.v);
+        }
+        let frame = VvcSampledFrame {
+            geometry,
+            format: VvcPictureFormat {
+                chroma_sampling: ChromaSampling::Cs444,
+                bit_depth,
+            },
+            luma: luma.clone(),
+            cb: cb.clone(),
+            cr: cr.clone(),
+            chroma_len: 64,
+        };
+
+        let syntax = vvc_palette_444_cu_syntax(&frame, 0, 0);
+        assert_eq!(syntax.bit_depth, bit_depth);
+        assert_eq!(syntax.new_palette_entries, colors);
+        assert_eq!(
+            vvc_palette_444_new_entry_token_bit_counts(syntax.clone()),
+            vec![bits; 6]
+        );
+
+        let decoded = vvc_palette_444_decode_reconstruction(geometry, syntax);
+        assert_eq!(decoded.luma, luma);
+        assert_eq!(decoded.cb, cb);
+        assert_eq!(decoded.cr, cr);
     }
-    let frame = VvcSampledFrame {
-        geometry,
-        format: VvcPictureFormat {
-            chroma_sampling: ChromaSampling::Cs444,
-            bit_depth,
-        },
-        luma: luma.clone(),
-        cb: cb.clone(),
-        cr: cr.clone(),
-        chroma_len: 64,
-    };
-
-    let syntax = vvc_palette_444_cu_syntax(&frame, 0, 0);
-    assert_eq!(syntax.bit_depth, bit_depth);
-    assert_eq!(syntax.new_palette_entries, colors);
-    assert_eq!(
-        vvc_palette_444_new_entry_token_bit_counts(syntax.clone()),
-        vec![10; 6]
-    );
-
-    let decoded = vvc_palette_444_decode_reconstruction(geometry, syntax);
-    assert_eq!(decoded.luma, luma);
-    assert_eq!(decoded.cb, cb);
-    assert_eq!(decoded.cr, cr);
 }
 
 #[test]

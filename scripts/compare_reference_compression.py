@@ -23,6 +23,8 @@ DEFAULT_OUT_DIR = REPO_ROOT / "verification" / "generated" / "compression_compar
 DEFAULT_LOG_DIR = REPO_ROOT / "verification" / "generated" / "compression_compare_logs"
 REFERENCE_TOOLS = REPO_ROOT / "scripts" / "reference_tools.py"
 VTM_CFG_DIR = REPO_ROOT / "verification" / "references" / "vvc" / "vtm" / "cfg"
+VVC_MIN_BIT_DEPTH = 8
+VVC_MAX_BIT_DEPTH = 16
 
 
 @dataclass(frozen=True)
@@ -480,7 +482,7 @@ def vvc_reference_encode_command(
     bit_depth = generate_test_vectors.yuv420_bit_depth(vector.fmt)
     if bit_depth is not None:
         chroma_format = "420"
-        if bit_depth > 12:
+        if not vvc_bit_depth_is_supported(bit_depth):
             raise SystemExit(
                 f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
             )
@@ -489,7 +491,7 @@ def vvc_reference_encode_command(
         if bit_depth is None:
             raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
         chroma_format = "444"
-        if bit_depth > 12:
+        if not vvc_bit_depth_is_supported(bit_depth):
             raise SystemExit(
                 f"unsupported VVC reference encode pixel format for native FrameForge comparison: {vector.fmt}"
             )
@@ -503,6 +505,8 @@ def vvc_reference_encode_command(
         command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless.cfg")])
         if chroma_format == "444":
             command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless444.cfg")])
+    if bit_depth > 12:
+        command.append("--Profile=none")
 
     command.extend(
         [
@@ -531,6 +535,10 @@ def vvc_reference_encode_command(
     if args.reference_args:
         command.extend(shlex.split(args.reference_args))
     return command
+
+
+def vvc_bit_depth_is_supported(bit_depth: int) -> bool:
+    return VVC_MIN_BIT_DEPTH <= bit_depth <= VVC_MAX_BIT_DEPTH
 
 
 def reference_fps_ratio(vector: generate_test_vectors.TestVector) -> str:

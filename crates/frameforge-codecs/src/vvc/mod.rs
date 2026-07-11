@@ -252,6 +252,8 @@ pub struct VvcSampledColor {
 }
 
 pub(in crate::vvc) type VvcSample = u16;
+pub(in crate::vvc) const VVC_MIN_BIT_DEPTH: u8 = 8;
+pub(in crate::vvc) const VVC_MAX_BIT_DEPTH: u8 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VvcSampledFrame {
@@ -481,6 +483,10 @@ pub(in crate::vvc) fn vvc_downshift_sample_to_u8(
     } else {
         (sample >> u32::from(bits - 8)).min(u8::MAX as u16) as u8
     }
+}
+
+fn vvc_bit_depth_is_supported(bit_depth: SampleBitDepth) -> bool {
+    (VVC_MIN_BIT_DEPTH..=VVC_MAX_BIT_DEPTH).contains(&bit_depth.bits())
 }
 
 #[cfg(test)]
@@ -1177,17 +1183,17 @@ fn validate_vvc_input_format(format: PixelFormat) -> Result<(), String> {
         return Err(format!("VVC input expects planar YUV format; got {format}"));
     };
     match chroma_sampling {
-        ChromaSampling::Cs420 if (8..=12).contains(&format.bit_depth().bits()) => Ok(()),
+        ChromaSampling::Cs420 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
         ChromaSampling::Cs422 if format.bit_depth().bits() == 8 => Ok(()),
-        ChromaSampling::Cs444 if (8..=12).contains(&format.bit_depth().bits()) => Ok(()),
+        ChromaSampling::Cs444 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
         ChromaSampling::Cs420 => Err(format!(
-            "VVC 4:2:0 input currently supports bit depths 8..12; got {format}"
+            "VVC 4:2:0 input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
         ChromaSampling::Cs422 => Err(format!(
             "VVC 4:2:2 input currently supports only 8-bit compatibility input; got {format}"
         )),
         ChromaSampling::Cs444 => Err(format!(
-            "VVC 4:4:4 palette input currently supports bit depths 8..12; got {format}"
+            "VVC 4:4:4 palette input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
         ChromaSampling::Monochrome => Err(format!(
             "VVC monochrome input is not wired yet; got {format}"
