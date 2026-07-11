@@ -1,7 +1,7 @@
 use super::super::VvcSample;
 use super::{
     VvcQuantizedTransformBlock, VvcTransformComponent, VvcTuTransformBlock,
-    VVC_CHROMA_AC_POSITIONS_2X2,
+    VVC_CHROMA_AC_POSITIONS_4X4,
 };
 use crate::picture::SampleBitDepth;
 
@@ -315,10 +315,11 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
     coeff_levels[0] = quantize_vvc_chroma_residual_dc(residuals, width, height, bit_depth);
     let mut ac_coeffs = [0; 15];
     if residuals_have_ac_energy(residuals) {
-        // H.266 7.3.11.10 transform_unit() can carry all chroma AC
-        // coefficients. The current lossy 4:2:0 path keeps a 2x2
-        // low-frequency coefficient group for hardware cost control.
-        for (x, y) in VVC_CHROMA_AC_POSITIONS_2X2 {
+        // H.266 7.3.11.10 transform_unit() can carry the full 4x4 chroma
+        // coefficient group. Keep the stored residual shape ready for the
+        // lossless transform-skip path even when the lossy quantizer selects
+        // only a small subset of nonzero levels.
+        for (x, y) in VVC_CHROMA_AC_POSITIONS_4X4 {
             if x < usize::from(width) && y < usize::from(height) {
                 let coeff_index = y * usize::from(width) + x;
                 let level = quantize_direct_chroma_ac_coeff(residuals, width, x, y);

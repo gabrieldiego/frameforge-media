@@ -127,7 +127,7 @@ fn quantized_chroma_coeff_levels(
     let mut levels = vec![0; width * height];
     levels[0] = dc_level;
     for (slot, level) in ac_levels.iter().enumerate() {
-        let (x, y) = super::VVC_CHROMA_AC_POSITIONS_2X2[slot];
+        let (x, y) = super::VVC_CHROMA_AC_POSITIONS_4X4[slot];
         if x < width && y < height {
             levels[y * width + x] = *level;
         }

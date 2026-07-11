@@ -7,7 +7,7 @@ use super::{VvcCabacContext, VvcCabacContexts, VvcCabacEncoder};
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
     VvcResidualComponent, VvcSliceSyntaxConfig, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
-    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_2X2,
+    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
     VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
     VVC_LUMA_AC_COEFFS_PER_TU,
 };
@@ -636,7 +636,7 @@ impl VvcCtuCabacGenerator {
         let mut coeff_levels = vec![0; width * height];
         coeff_levels[0] = dc_level;
         for (slot, level) in ac_levels.iter().enumerate() {
-            let (x, y) = VVC_CHROMA_AC_POSITIONS_2X2[slot];
+            let (x, y) = VVC_CHROMA_AC_POSITIONS_4X4[slot];
             if x < width && y < height {
                 coeff_levels[y * width + x] = *level;
             }
