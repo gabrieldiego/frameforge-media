@@ -18,6 +18,8 @@ const AV2_LUMA_DPCM_PALETTE_SYNTAX_BONUS: usize = 3072;
 const AV2_CHROMA_BDPCM_NONZERO_COST: usize = 124;
 const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 20000;
 const AV2_ENABLE_LUMA_DPCM_444: bool = true;
+const AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT: usize = 5;
+const AV2_LUMA_DIRECTIONAL_MODE_COUNT: usize = 56;
 const AV2_LUMA_JOINT_MODE_V: usize = 22;
 const AV2_LUMA_JOINT_MODE_H: usize = 50;
 const AV2_LUMA_PALETTE_BLOCK_SAMPLES: usize =
@@ -1433,6 +1435,7 @@ impl Av2LumaModeSyntax {
 pub(crate) fn av2_luma_mode_syntax_for_block(
     bottom_left_mode: Option<Av2LumaIntraMode>,
     above_right_mode: Option<Av2LumaIntraMode>,
+    large_block: bool,
 ) -> Av2LumaModeSyntax {
     let left_directional = bottom_left_mode.filter(|mode| mode.is_directional());
     let above_right_directional = above_right_mode.filter(|mode| mode.is_directional());
@@ -1441,22 +1444,107 @@ pub(crate) fn av2_luma_mode_syntax_for_block(
 
     // AV2 v1.0.0 get_y_mode_idx_ctx()/get_y_intra_mode_set(), mirrored from
     // AVM reconintra.c: the entropy context counts directional bottom-left and
-    // above-right modes, and the mode list appends bottom-left first. For fixed
-    // 8x8 leaves there are no large-block derived angles, so FrameForge's DC/V/H
-    // subset only needs to swap V/H when H is the first directional neighbor.
-    let first_directional = left_directional.or(above_right_directional);
-    if first_directional.map_or(false, |mode| mode.joint_mode() == AV2_LUMA_JOINT_MODE_H) {
-        Av2LumaModeSyntax {
-            context,
-            vertical_index: 6,
-            horizontal_index: 5,
+    // above-right modes, and the mode list appends bottom-left first. Large
+    // blocks also insert derived directional neighbors before the default
+    // directional list, so V/H cannot be represented by fixed indices.
+    let mut selected = [false; 61];
+    for entry in selected
+        .iter_mut()
+        .take(AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT)
+    {
+        *entry = true;
+    }
+    let mut mode_index = AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT;
+    let mut vertical_index = None;
+    let mut horizontal_index = None;
+    let mut add_mode = |joint_mode: usize,
+                        mode_index: &mut usize,
+                        vertical_index: &mut Option<u8>,
+                        horizontal_index: &mut Option<u8>| {
+        if selected[joint_mode] {
+            return;
         }
-    } else {
-        Av2LumaModeSyntax {
-            context,
-            vertical_index: Av2LumaIntraMode::Vertical.mode_index() as u8,
-            horizontal_index: Av2LumaIntraMode::Horizontal.mode_index() as u8,
+        selected[joint_mode] = true;
+        if joint_mode == AV2_LUMA_JOINT_MODE_V {
+            *vertical_index = Some(*mode_index as u8);
+        } else if joint_mode == AV2_LUMA_JOINT_MODE_H {
+            *horizontal_index = Some(*mode_index as u8);
         }
+        *mode_index += 1;
+    };
+
+    let mut neighbor_joint_modes = [
+        left_directional.map(|mode| mode.joint_mode()),
+        above_right_directional.map(|mode| mode.joint_mode()),
+    ];
+    let mut directional_count = usize::from(neighbor_joint_modes[0].is_some())
+        + usize::from(neighbor_joint_modes[1].is_some());
+    if directional_count == 2 && neighbor_joint_modes[0] == neighbor_joint_modes[1] {
+        directional_count = 1;
+    }
+    if directional_count == 1 && neighbor_joint_modes[0].is_none() {
+        neighbor_joint_modes[0] = neighbor_joint_modes[1];
+    }
+
+    for joint_mode in neighbor_joint_modes
+        .iter()
+        .copied()
+        .take(directional_count)
+        .flatten()
+    {
+        add_mode(
+            joint_mode,
+            &mut mode_index,
+            &mut vertical_index,
+            &mut horizontal_index,
+        );
+    }
+
+    if large_block {
+        for offset in 0..4 {
+            for joint_mode in neighbor_joint_modes
+                .iter()
+                .copied()
+                .take(directional_count)
+                .flatten()
+            {
+                let left_derived = (joint_mode - offset
+                    + (AV2_LUMA_DIRECTIONAL_MODE_COUNT - AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT - 1))
+                    % AV2_LUMA_DIRECTIONAL_MODE_COUNT
+                    + AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT;
+                add_mode(
+                    left_derived,
+                    &mut mode_index,
+                    &mut vertical_index,
+                    &mut horizontal_index,
+                );
+                let right_derived = (joint_mode + offset
+                    - (AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT - 1))
+                    % AV2_LUMA_DIRECTIONAL_MODE_COUNT
+                    + AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT;
+                add_mode(
+                    right_derived,
+                    &mut mode_index,
+                    &mut vertical_index,
+                    &mut horizontal_index,
+                );
+            }
+        }
+    }
+
+    for joint_mode in [AV2_LUMA_JOINT_MODE_V, AV2_LUMA_JOINT_MODE_H] {
+        add_mode(
+            joint_mode,
+            &mut mode_index,
+            &mut vertical_index,
+            &mut horizontal_index,
+        );
+    }
+
+    Av2LumaModeSyntax {
+        context,
+        vertical_index: vertical_index.expect("V mode is present in AV2 luma mode list"),
+        horizontal_index: horizontal_index.expect("H mode is present in AV2 luma mode list"),
     }
 }
 

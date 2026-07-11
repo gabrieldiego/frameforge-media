@@ -476,6 +476,9 @@ const DEFAULT_Y_MODE_SET_CDF: [u16; 8] = [
     5,
     6,
 ];
+const AV2_LUMA_FIRST_MODE_COUNT: usize = 13;
+const AV2_LUMA_SECOND_MODE_COUNT: usize = 16;
+const AV2_LUMA_MODE_SET_COUNT: usize = 4;
 const DEFAULT_Y_MODE_IDX_CTX0_CDF: [u16; 12] = [
     AVM_CDF_PROB_TOP - 15175,
     AVM_CDF_PROB_TOP - 20075,
@@ -520,6 +523,11 @@ const DEFAULT_Y_MODE_IDX_CDFS: [[u16; 12]; 3] = [
         4,
         5,
     ],
+];
+const DEFAULT_Y_MODE_IDX_OFFSET_CDFS: [[u16; 10]; 3] = [
+    avm_cdf6(12743, 18172, 20194, 23648, 26419, 0, -1, -1),
+    avm_cdf6(8976, 16084, 20827, 24595, 28496, 1, 0, 0),
+    avm_cdf6(8784, 14556, 19710, 24903, 28724, 1, 0, 0),
 ];
 const DEFAULT_UV_MODE_CTX0_CDF: [u16; 12] = [
     AVM_CDF_PROB_TOP - 9363,
@@ -1298,6 +1306,7 @@ struct Av2Black444TilePlan {
 enum Av2PartitionPolicy {
     Fixed8x8Leaves,
     LargestLosslessLeaves,
+    LosslessLeafLimit { max_size: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1488,7 +1497,11 @@ impl Av2LumaModeContext {
         let above_right_mode = row_mi
             .checked_sub(1)
             .and_then(|row| self.mode_at_mi(row, col_mi + block_size.mi_width().saturating_sub(1)));
-        av2_luma_mode_syntax_for_block(bottom_left_mode, above_right_mode)
+        av2_luma_mode_syntax_for_block(
+            bottom_left_mode,
+            above_right_mode,
+            block_size.width * block_size.height > 64,
+        )
     }
 
     fn mode_at_mi(&self, row_mi: usize, col_mi: usize) -> Option<Av2LumaIntraMode> {
@@ -1728,6 +1741,8 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
     let mut best: Option<(Av2EntropyPayload, Vec<u8>)> = None;
     for partition_policy in [
         Av2PartitionPolicy::LargestLosslessLeaves,
+        Av2PartitionPolicy::LosslessLeafLimit { max_size: 32 },
+        Av2PartitionPolicy::LosslessLeafLimit { max_size: 16 },
         Av2PartitionPolicy::Fixed8x8Leaves,
     ] {
         let mut candidate_recon = recon.to_vec();
@@ -1906,6 +1921,16 @@ impl Av2Black444TilePlan {
                     visible_rows_mi,
                     visible_cols_mi,
                 ),
+                Av2PartitionPolicy::LosslessLeafLimit { max_size } => {
+                    choose_lossless_leaf_limit_partition(
+                        row_mi,
+                        col_mi,
+                        block_size,
+                        visible_rows_mi,
+                        visible_cols_mi,
+                        max_size,
+                    )
+                }
             }
         };
         self.decisions.push(Av2TileDecision {
@@ -2802,6 +2827,71 @@ fn choose_largest_lossless_partition(
     choose_8x8_leaf_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
 }
 
+fn choose_lossless_leaf_limit_partition(
+    row_mi: usize,
+    col_mi: usize,
+    block_size: Av2MvpBlockSize,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    max_size: usize,
+) -> Av2MvpPartition {
+    assert!(
+        matches!(max_size, 8 | 16 | 32),
+        "AV2 lossless leaf limits are expected to be 8, 16, or 32"
+    );
+    if !block_size.is_partition_point() {
+        return Av2MvpPartition::None;
+    }
+
+    let allowed = allowed_partitions(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi);
+    if let Some(forced) =
+        forced_boundary_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+    {
+        if allowed.contains(forced) {
+            return forced;
+        }
+    }
+    if let Some(only_allowed) = allowed.only() {
+        return only_allowed;
+    }
+    if block_size.width <= max_size && block_size.height <= max_size && allowed.none {
+        return Av2MvpPartition::None;
+    }
+
+    if block_size.width == block_size.height {
+        if block_size.height > max_size && allowed.horz {
+            return Av2MvpPartition::Horz;
+        }
+        if block_size.width > max_size && allowed.vert {
+            return Av2MvpPartition::Vert;
+        }
+    } else if block_size.width > block_size.height {
+        if block_size.width > max_size && allowed.vert {
+            return Av2MvpPartition::Vert;
+        }
+        if block_size.height > max_size && allowed.horz {
+            return Av2MvpPartition::Horz;
+        }
+    } else {
+        if block_size.height > max_size && allowed.horz {
+            return Av2MvpPartition::Horz;
+        }
+        if block_size.width > max_size && allowed.vert {
+            return Av2MvpPartition::Vert;
+        }
+    }
+
+    if allowed.none {
+        Av2MvpPartition::None
+    } else if allowed.horz {
+        Av2MvpPartition::Horz
+    } else if allowed.vert {
+        Av2MvpPartition::Vert
+    } else {
+        Av2MvpPartition::None
+    }
+}
+
 fn choose_luma_palette_partition(
     row_mi: usize,
     col_mi: usize,
@@ -3482,31 +3572,69 @@ fn write_intra_luma_mode(
         return;
     }
 
-    let mut mode_set_cdf = DEFAULT_Y_MODE_SET_CDF;
     // AV2 v1.0.0 write_intra_luma_mode()/read_intra_luma_mode() calls
     // get_y_mode_idx_ctx()/get_y_intra_mode_set() before mapping y_mode_idx
-    // to a predictor. The palette analyzer stores the 8x8 mode-set index and
-    // directional-neighbor context so H/V leaves can seed later contexts
-    // without desynchronizing the reference decoder.
+    // to a predictor. Large blocks may move H/V beyond the first mode set
+    // after neighbor-derived directional modes are inserted.
+    let mode_index = usize::from(mode_index);
+    let mode_set_index = if mode_index < AV2_LUMA_FIRST_MODE_COUNT {
+        0
+    } else {
+        1 + (mode_index - AV2_LUMA_FIRST_MODE_COUNT) / AV2_LUMA_SECOND_MODE_COUNT
+    };
+    let mut mode_set_cdf = DEFAULT_Y_MODE_SET_CDF;
     writer.write_symbol(
         "tile.intra.y_mode_set_index",
-        0,
+        mode_set_index,
         &mut mode_set_cdf,
-        4,
+        AV2_LUMA_MODE_SET_COUNT,
         false,
     );
+    if mode_set_index != 0 {
+        writer.write_literal(
+            mode.symbol_name(),
+            (mode_index
+                - AV2_LUMA_FIRST_MODE_COUNT
+                - (mode_set_index - 1) * AV2_LUMA_SECOND_MODE_COUNT) as u32,
+            4,
+        );
+        if let Some(size_group) = decision.block_size.fsc_size_group() {
+            let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
+            writer.write_symbol(
+                "tile.intra.fsc_mode",
+                usize::from(use_fsc),
+                &mut fsc_cdf,
+                2,
+                false,
+            );
+        }
+        return;
+    }
 
     let mode_context = mode_context.min(2);
+    let mode_set_low = mode_index.min(7);
     let mut mode_idx_cdf = DEFAULT_Y_MODE_IDX_CDFS[usize::from(mode_context)];
     writer.write_symbol_with_cdf_key(
         mode.symbol_name(),
         "tile.intra.y_mode_idx",
         usize::from(mode_context),
-        usize::from(mode_index),
+        mode_set_low,
         &mut mode_idx_cdf,
         8,
         false,
     );
+    if mode_set_low == 7 {
+        let mut offset_cdf = DEFAULT_Y_MODE_IDX_OFFSET_CDFS[usize::from(mode_context)];
+        writer.write_symbol_with_cdf_key(
+            mode.symbol_name(),
+            "tile.intra.y_mode_idx_offset",
+            usize::from(mode_context),
+            mode_index - mode_set_low,
+            &mut offset_cdf,
+            6,
+            false,
+        );
+    }
 
     if let Some(size_group) = decision.block_size.fsc_size_group() {
         let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
@@ -5017,7 +5145,13 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             visible_cols_mi,
             self.chroma_format,
         );
-        let fsc_allowed = decision.block_size.fsc_size_group().is_some();
+        // The AVM path validates 32-wide/high transform-coded leaves, but
+        // 32-wide/high FSC/IDTX leaves can corrupt natural-content tiles with
+        // the current coefficient writer. Keep FSC to smaller leaves until the
+        // 32xN IDTX path is audited end to end.
+        let fsc_allowed = decision.block_size.fsc_size_group().is_some()
+            && decision.block_size.width < 32
+            && decision.block_size.height < 32;
         let mut best = (Av2LosslessSubsampledModeDecision::default(), usize::MAX);
 
         for use_fsc in [false, true] {
