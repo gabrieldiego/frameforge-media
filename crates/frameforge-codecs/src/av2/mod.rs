@@ -33,7 +33,7 @@ const AV2_PROFILE_BITS: u8 = 5;
 const AV2_LEVEL_BITS: u8 = 5;
 const AV2_SEQUENCE_PROFILE_MAIN_422_10_IP1: u8 = 3;
 const AV2_SEQUENCE_PROFILE_MAIN_444_10_IP1: u8 = 4;
-const AV2_SEQUENCE_LEVEL_2_0: u8 = 0;
+const AV2_SEQUENCE_LEVEL_MAX: u8 = 31;
 const AV2_CHROMA_FORMAT_420: u32 = 0;
 const AV2_CHROMA_FORMAT_444: u32 = 2;
 const AV2_CHROMA_FORMAT_422: u32 = 3;
@@ -54,6 +54,7 @@ const AV2_MAX_TILE_COLS: usize = 64;
 const AV2_MAX_TILE_ROWS: usize = 64;
 const AV2_TILE_WIDTH_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_TILE_AREA_SCALING_LEVEL_2_0_TIER_0: usize = 4;
+const AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2ChromaFormat {
@@ -741,6 +742,23 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
         expected_len,
         "AV2 subsampled lossless input length must match geometry"
     );
+    let ibc = if AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC {
+        ibc::build_local_ibc_subsampled(
+            frame,
+            geometry,
+            stream_format.chroma_format,
+            stream_format.bit_depth,
+        )
+        .ok()
+        .filter(|ibc| ibc.stats().selected_copy_blocks() > 0)
+    } else {
+        None
+    };
+    let profile = if ibc.is_some() {
+        Av2Black444MvpProfile::current().with_local_ibc_candidates()
+    } else {
+        Av2Black444MvpProfile::current()
+    };
     let mut reconstruction = vec![0; expected_len];
     let mut out = Vec::new();
     append_obu(
@@ -751,7 +769,7 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
     append_obu(
         &mut out,
         Av2ObuType::SequenceHeader,
-        &av2_mvp_sequence_header_payload(geometry, Av2Black444MvpProfile::current(), stream_format),
+        &av2_mvp_sequence_header_payload(geometry, profile, stream_format),
     );
     append_obu(
         &mut out,
@@ -761,6 +779,8 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
             stream_format,
             frame,
             &mut reconstruction,
+            profile,
+            ibc.as_ref(),
         ),
     );
     (out, reconstruction)
@@ -1235,7 +1255,7 @@ fn av2_mvp_sequence_header_payload(
     writer.write_flag("sequence_header.single_picture_header_flag", true);
     writer.write_literal(
         "sequence_header.seq_max_level_idx",
-        AV2_SEQUENCE_LEVEL_2_0 as u64,
+        u64::from(av2_sequence_level_for_geometry(geometry)),
         AV2_LEVEL_BITS,
     );
     writer.write_uvlc(
@@ -1274,6 +1294,30 @@ fn av2_mvp_sequence_header_payload(
     writer.write_flag("sequence_header.seq_extension_present_flag", false);
     writer.trailing_bits();
     writer.finish()
+}
+
+fn av2_sequence_level_for_geometry(geometry: Av2VideoGeometry) -> u8 {
+    const LEVELS: &[(u8, usize, usize, usize)] = &[
+        (0, 147_456, 640, 640),
+        (1, 278_784, 880, 880),
+        (2, 665_856, 1360, 1360),
+        (3, 1_065_024, 1720, 1720),
+        (4, 2_359_296, 2560, 2560),
+        (6, 8_912_896, 4975, 4975),
+        (10, 35_651_584, 9951, 9951),
+        (14, 142_606_336, 19902, 19902),
+        (18, 570_425_344, 39804, 39804),
+    ];
+    let picture_size = geometry.width * geometry.height;
+    LEVELS
+        .iter()
+        .find_map(|&(level, max_picture_size, max_width, max_height)| {
+            (picture_size <= max_picture_size
+                && geometry.width <= max_width
+                && geometry.height <= max_height)
+                .then_some(level)
+        })
+        .unwrap_or(AV2_SEQUENCE_LEVEL_MAX)
 }
 
 fn av2_frame_dimension_bits(dimension: usize) -> u8 {
@@ -1573,11 +1617,14 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
     stream_format: Av2StreamFormat,
     frame: &[u8],
     reconstruction: &mut [u8],
+    profile: Av2Black444MvpProfile,
+    ibc: Option<&Av2LocalIbc444>,
 ) -> Av2SyntaxPayload {
     let tile_layout = Av2TileLayout::try_single_for_geometry(geometry)
         .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry));
-    let profile = Av2Black444MvpProfile::current();
-    let mut payload = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
+    let allow_intrabc = ibc.is_some();
+    let mut payload =
+        av2_mvp_444_closed_loop_key_header_payload(allow_intrabc, allow_intrabc, &tile_layout);
     let tile_payloads: Vec<_> = tile_layout
         .regions
         .iter()
@@ -1590,6 +1637,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
                 stream_format.bit_depth,
                 frame,
                 reconstruction,
+                ibc,
             )
         })
         .collect();

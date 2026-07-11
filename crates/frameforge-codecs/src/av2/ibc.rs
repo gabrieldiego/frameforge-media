@@ -2,7 +2,7 @@ use super::palette::Av2LumaPalette444;
 use super::tile::{
     av2_luma_palette_leaf_order_for_region, av2_mvp_8x8_leaf_order_for_region, Av2MvpLeafRegion,
 };
-use super::Av2VideoGeometry;
+use super::{Av2ChromaFormat, Av2VideoGeometry};
 use crate::picture::{Picture, PixelFormat, SampleBitDepth};
 
 pub(crate) const AV2_IBC_HASH_BLOCK_SIZE: usize = 8;
@@ -137,7 +137,7 @@ pub(crate) fn build_local_ibc_444(
     frame: &[u8],
     geometry: Av2VideoGeometry,
 ) -> Result<Av2LocalIbc444, String> {
-    build_local_ibc_444_with_palette(frame, geometry, None)
+    build_local_ibc_with_palette(frame, geometry, Av2ChromaFormat::Yuv444, None)
 }
 
 pub(crate) fn build_local_ibc_444_for_palette(
@@ -145,23 +145,57 @@ pub(crate) fn build_local_ibc_444_for_palette(
     geometry: Av2VideoGeometry,
     palette: &Av2LumaPalette444,
 ) -> Result<Av2LocalIbc444, String> {
-    build_local_ibc_444_with_palette(frame, geometry, Some(palette))
+    build_local_ibc_with_palette(frame, geometry, Av2ChromaFormat::Yuv444, Some(palette))
 }
 
-fn build_local_ibc_444_with_palette(
+pub(crate) fn build_local_ibc_subsampled(
     frame: &[u8],
     geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+) -> Result<Av2LocalIbc444, String> {
+    assert!(
+        matches!(
+            chroma_format,
+            Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+        ),
+        "AV2 subsampled IBC expects 4:2:0 or 4:2:2 input"
+    );
+    build_local_ibc(frame, geometry, chroma_format, bit_depth, None)
+}
+
+fn build_local_ibc_with_palette(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
     palette: Option<&Av2LumaPalette444>,
 ) -> Result<Av2LocalIbc444, String> {
     let bit_depth = palette
         .map(Av2LumaPalette444::bit_depth)
         .unwrap_or_else(|| SampleBitDepth::new(8).expect("8-bit depth is supported"));
-    let format = PixelFormat::yuv444(bit_depth.bits())
-        .expect("validated AV2 bit depth must map to a YUV444 pixel format");
+    build_local_ibc(frame, geometry, chroma_format, bit_depth, palette)
+}
+
+fn build_local_ibc(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    palette: Option<&Av2LumaPalette444>,
+) -> Result<Av2LocalIbc444, String> {
+    if palette.is_some() {
+        assert_eq!(
+            chroma_format,
+            Av2ChromaFormat::Yuv444,
+            "AV2 palette IBC expects 4:4:4 input"
+        );
+    }
+    let format = PixelFormat::planar_yuv(chroma_format.chroma_sampling(), bit_depth);
     let expected_len = Picture::expected_len(geometry.width, geometry.height, format);
     if frame.len() != expected_len {
         return Err(format!(
-            "AV2 IBC input length mismatch: expected {expected_len} byte(s), got {}",
+            "AV2 {:?} IBC input length mismatch: expected {expected_len} byte(s), got {}",
+            chroma_format,
             frame.len()
         ));
     }
@@ -189,7 +223,7 @@ fn build_local_ibc_444_with_palette(
             let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
             let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
             blocks[block_y * blocks_wide + block_x].hash =
-                hash_yuv444_8x8(frame, geometry, bit_depth, x0, y0);
+                hash_planar_yuv_8x8(frame, geometry, chroma_format, bit_depth, x0, y0);
         }
     }
 
@@ -536,37 +570,91 @@ fn mark_local_ibc_intra_leaf(
     }
 }
 
-fn hash_yuv444_8x8(
+fn hash_planar_yuv_8x8(
     frame: &[u8],
     geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     x0: usize,
     y0: usize,
 ) -> u32 {
-    let plane_len = geometry.width * geometry.height;
+    let y_len = geometry.width * geometry.height;
+    let sub_x = match chroma_format {
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
+        Av2ChromaFormat::Yuv444 => 1,
+    };
+    let sub_y = match chroma_format {
+        Av2ChromaFormat::Yuv420 => 2,
+        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
+    };
+    let c_width = geometry.width / sub_x;
+    let c_height = geometry.height / sub_y;
+    let c_len = c_width * c_height;
     let bytes_per_sample = bit_depth.bytes_per_sample();
-    let plane_bytes = plane_len * bytes_per_sample;
+    let y_bytes = y_len * bytes_per_sample;
+    let c_bytes = c_len * bytes_per_sample;
     let mut hash = AV2_IBC_HASH_OFFSET;
-    for plane in 0..3 {
-        let base = plane * plane_bytes;
-        for local_y in 0..AV2_IBC_HASH_BLOCK_SIZE {
-            let row = y0 + local_y;
-            let row_start = base + (row * geometry.width + x0) * bytes_per_sample;
-            let row_bytes = AV2_IBC_HASH_BLOCK_SIZE * bytes_per_sample;
-            for (chunk_index, packet) in frame[row_start..row_start + row_bytes]
-                .chunks(8)
-                .enumerate()
-            {
-                // Keep the hash mixer multiplier-free and packet-shaped so
-                // the AV2 RTL can hash one ingress packet with a shallow XOR
-                // network instead of serial xorshift rounds.
-                hash = mix_ibc_hash_packet(
-                    hash,
-                    packet,
-                    plane as u32,
-                    (local_y * row_bytes + chunk_index * 8) as u32,
-                );
-            }
+
+    hash = hash_plane_region(
+        &frame[..y_bytes],
+        hash,
+        0,
+        geometry.width,
+        x0,
+        y0,
+        AV2_IBC_HASH_BLOCK_SIZE,
+        AV2_IBC_HASH_BLOCK_SIZE,
+        bytes_per_sample,
+    );
+    let chroma_width = AV2_IBC_HASH_BLOCK_SIZE / sub_x;
+    let chroma_height = AV2_IBC_HASH_BLOCK_SIZE / sub_y;
+    for (plane, plane_data) in [
+        (1, &frame[y_bytes..y_bytes + c_bytes]),
+        (2, &frame[y_bytes + c_bytes..y_bytes + 2 * c_bytes]),
+    ] {
+        hash = hash_plane_region(
+            plane_data,
+            hash,
+            plane,
+            c_width,
+            x0 / sub_x,
+            y0 / sub_y,
+            chroma_width,
+            chroma_height,
+            bytes_per_sample,
+        );
+    }
+    hash
+}
+
+fn hash_plane_region(
+    plane_data: &[u8],
+    mut hash: u32,
+    plane: u32,
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+    bytes_per_sample: usize,
+) -> u32 {
+    for local_y in 0..height {
+        let row = y0 + local_y;
+        let row_start = (row * stride + x0) * bytes_per_sample;
+        let row_bytes = width * bytes_per_sample;
+        for (chunk_index, packet) in plane_data[row_start..row_start + row_bytes]
+            .chunks(8)
+            .enumerate()
+        {
+            // Keep the hash mixer multiplier-free and packet-shaped so the AV2
+            // RTL can hash one ingress packet with a shallow XOR network
+            // instead of serial xorshift rounds.
+            hash = mix_ibc_hash_packet(
+                hash,
+                packet,
+                plane,
+                (local_y * row_bytes + chunk_index * 8) as u32,
+            );
         }
     }
     hash

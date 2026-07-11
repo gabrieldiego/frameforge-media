@@ -1520,20 +1520,21 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         );
         let mut mode = Av2LosslessSubsampledModeDecision::default();
 
-        let mut best_luma = (mode.luma_intra_mode, mode.luma_bdpcm_horz, usize::MAX);
-        for (luma_intra_mode, luma_bdpcm_horz, syntax_penalty) in [
+        let luma_candidates = [
             (Av2LumaIntraMode::Dc, None, 0usize),
             (Av2LumaIntraMode::Horizontal, None, 32usize),
             (Av2LumaIntraMode::Vertical, None, 32usize),
             (Av2LumaIntraMode::Horizontal, Some(true), 64usize),
             (Av2LumaIntraMode::Vertical, Some(false), 64usize),
-        ] {
+        ];
+        let mut best_luma = (mode.luma_intra_mode, mode.luma_bdpcm_horz, usize::MAX);
+        for (luma_intra_mode, luma_bdpcm_horz, syntax_penalty) in luma_candidates {
             let candidate = Av2LosslessSubsampledModeDecision {
                 luma_intra_mode,
                 luma_bdpcm_horz,
                 ..mode
             };
-            let score = self.luma_leaf_coefficient_score(
+            let score = self.luma_leaf_sampled_coefficient_score(
                 decision,
                 txb_width,
                 txb_height,
@@ -1547,22 +1548,25 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode.luma_intra_mode = best_luma.0;
         mode.luma_bdpcm_horz = best_luma.1;
 
-        let mut best_chroma = (mode.chroma_use_bdpcm, mode.chroma_intra_mode, usize::MAX);
-        for (chroma_use_bdpcm, chroma_intra_mode, syntax_penalty) in [
+        let chroma_candidates = [
             (false, Av2ChromaIntraMode::Horizontal, 0usize),
             (false, Av2ChromaIntraMode::Vertical, 0usize),
             (false, Av2ChromaIntraMode::Dc, 0usize),
             (true, Av2ChromaIntraMode::Horizontal, 64usize),
             (true, Av2ChromaIntraMode::Vertical, 64usize),
-        ] {
+        ];
+        let mut best_chroma = (mode.chroma_use_bdpcm, mode.chroma_intra_mode, usize::MAX);
+        for (chroma_use_bdpcm, chroma_intra_mode, syntax_penalty) in chroma_candidates {
             let candidate = Av2LosslessSubsampledModeDecision {
                 chroma_use_bdpcm,
                 chroma_intra_mode,
                 ..mode
             };
-            let score =
-                self.chroma_leaf_coefficient_score(chroma_span, candidate, coded_mi_context)
-                    + syntax_penalty;
+            let score = self.chroma_leaf_sampled_coefficient_score(
+                chroma_span,
+                candidate,
+                coded_mi_context,
+            ) + syntax_penalty;
             if score < best_chroma.2 {
                 best_chroma = (chroma_use_bdpcm, chroma_intra_mode, score);
             }
@@ -1570,6 +1574,86 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode.chroma_use_bdpcm = best_chroma.0;
         mode.chroma_intra_mode = best_chroma.1;
         mode
+    }
+
+    fn luma_leaf_sampled_coefficient_score(
+        &self,
+        decision: Av2TileDecision,
+        txb_width: usize,
+        txb_height: usize,
+        mode: Av2LosslessSubsampledModeDecision,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> usize {
+        let mut score = 0usize;
+        let (leaf_x0, leaf_y0) = self.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
+        let leaf_width = txb_width * TX4X4_SIZE;
+        let leaf_height = txb_height * TX4X4_SIZE;
+        let row_step = fast_leaf_sample_step(txb_height, AV2_FAST_LUMA_SAMPLE_GRID);
+        let col_step = fast_leaf_sample_step(txb_width, AV2_FAST_LUMA_SAMPLE_GRID);
+        for row in (0..txb_height).step_by(row_step) {
+            let abs_row = decision.row + row;
+            for col in (0..txb_width).step_by(col_step) {
+                let abs_col = decision.col + col;
+                let (x0, y0) = self.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
+                let coefficients = self.tx4x4_coefficients_for_mode_score(
+                    Av2LosslessPlane::Y,
+                    x0,
+                    y0,
+                    mode,
+                    leaf_x0,
+                    leaf_y0,
+                    leaf_width,
+                    leaf_height,
+                    coded_mi_context,
+                );
+                let kind = if mode.use_fsc {
+                    Av2CoefficientProxyKind::LumaIdtx
+                } else {
+                    Av2CoefficientProxyKind::LumaTransform
+                };
+                score += coefficient_proxy_score(&coefficients, kind);
+            }
+        }
+        score
+    }
+
+    fn chroma_leaf_sampled_coefficient_score(
+        &self,
+        chroma_span: Av2ChromaTx4x4Span,
+        mode: Av2LosslessSubsampledModeDecision,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> usize {
+        let mut score = 0usize;
+        let row_step = fast_leaf_sample_step(chroma_span.height, AV2_FAST_CHROMA_SAMPLE_GRID);
+        let col_step = fast_leaf_sample_step(chroma_span.width, AV2_FAST_CHROMA_SAMPLE_GRID);
+        for plane in [Av2LosslessPlane::U, Av2LosslessPlane::V] {
+            let (leaf_x0, leaf_y0) = self.txb_origin(plane, chroma_span.col, chroma_span.row);
+            let leaf_width = chroma_span.width * TX4X4_SIZE;
+            let leaf_height = chroma_span.height * TX4X4_SIZE;
+            for row in (0..chroma_span.height).step_by(row_step) {
+                let abs_row = chroma_span.row + row;
+                for col in (0..chroma_span.width).step_by(col_step) {
+                    let abs_col = chroma_span.col + col;
+                    let (x0, y0) = self.txb_origin(plane, abs_col, abs_row);
+                    let coefficients = self.tx4x4_coefficients_for_mode_score(
+                        plane,
+                        x0,
+                        y0,
+                        mode,
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_width,
+                        leaf_height,
+                        coded_mi_context,
+                    );
+                    score += coefficient_proxy_score(
+                        &coefficients,
+                        Av2CoefficientProxyKind::ChromaTransform,
+                    );
+                }
+            }
+        }
+        score
     }
 
     fn luma_leaf_coefficient_score(
@@ -1664,6 +1748,57 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             }
         }
     }
+
+    fn copy_source_to_recon_leaf(
+        &mut self,
+        decision: Av2TileDecision,
+        visible_rows_mi: usize,
+        visible_cols_mi: usize,
+    ) {
+        let txb_width = decision
+            .block_size
+            .tx4x4_width()
+            .min(visible_cols_mi.saturating_sub(decision.col));
+        let txb_height = decision
+            .block_size
+            .tx4x4_height()
+            .min(visible_rows_mi.saturating_sub(decision.row));
+        for row in 0..txb_height {
+            let abs_row = decision.row + row;
+            for col in 0..txb_width {
+                let abs_col = decision.col + col;
+                let (x0, y0) = self.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
+                self.copy_source_to_recon_txb(Av2LosslessPlane::Y, x0, y0);
+            }
+        }
+
+        let chroma_span = chroma_tx4x4_span(
+            decision,
+            visible_rows_mi,
+            visible_cols_mi,
+            self.chroma_format,
+        );
+        for plane in [Av2LosslessPlane::U, Av2LosslessPlane::V] {
+            for row in 0..chroma_span.height {
+                let abs_row = chroma_span.row + row;
+                for col in 0..chroma_span.width {
+                    let abs_col = chroma_span.col + col;
+                    let (x0, y0) = self.txb_origin(plane, abs_col, abs_row);
+                    self.copy_source_to_recon_txb(plane, x0, y0);
+                }
+            }
+        }
+    }
+}
+
+const AV2_FAST_LUMA_SAMPLE_GRID: usize = 8;
+const AV2_FAST_CHROMA_SAMPLE_GRID: usize = 4;
+
+fn fast_leaf_sample_step(txb_count: usize, sample_grid: usize) -> usize {
+    if txb_count <= 2 {
+        return txb_count.max(1);
+    }
+    txb_count.div_ceil(sample_grid).max(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -132,6 +132,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
     bit_depth: SampleBitDepth,
     source: &[u8],
     recon: &mut [u8],
+    ibc: Option<&Av2LocalIbc444>,
 ) -> Av2EntropyPayload {
     debug_assert!(matches!(
         chroma_format,
@@ -146,8 +147,13 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
             bit_depth,
             source,
             recon,
-            Av2PartitionPolicy::LargestLosslessLeaves,
+            if ibc.is_some() {
+                Av2PartitionPolicy::Fixed8x8Leaves
+            } else {
+                Av2PartitionPolicy::LargestLosslessLeaves
+            },
             Av2LosslessSubsampledModeSearch::FastScreenContent,
+            ibc,
         );
     }
 
@@ -169,6 +175,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
             &mut candidate_recon,
             partition_policy,
             Av2LosslessSubsampledModeSearch::Exhaustive,
+            None,
         );
         let replace = best.as_ref().is_none_or(|(best_payload, _)| {
             (payload.bytes.len(), payload.symbol_bits)
@@ -224,6 +231,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     recon: &mut [u8],
     partition_policy: Av2PartitionPolicy,
     mode_search: Av2LosslessSubsampledModeSearch,
+    ibc: Option<&Av2LocalIbc444>,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_partition_policy(
         region,
@@ -231,8 +239,8 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         chroma_format,
         partition_policy,
         false,
-        false,
-        None,
+        ibc.is_some(),
+        ibc,
         None,
     );
     let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
@@ -968,6 +976,54 @@ impl Av2Black444TilePlan {
                         );
                     }
                 }
+                Av2TileDecisionKind::IntrabcFlag(use_intrabc) => {
+                    write_intrabc_flag(writer, *decision, &intrabc_context, use_intrabc);
+                }
+                Av2TileDecisionKind::IntrabcCopy {
+                    drl_idx,
+                    explicit_dv,
+                } => {
+                    write_intrabc_copy(
+                        writer,
+                        *decision,
+                        &intrabc_context,
+                        self.profile_max_ref_bv_count(),
+                        drl_idx,
+                        explicit_dv,
+                    );
+                    intrabc_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        true,
+                        true,
+                    );
+                    txb_contexts.clear_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    luma_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        Av2LumaIntraMode::Dc,
+                    );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        false,
+                    );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
+                    lossless.copy_source_to_recon_leaf(
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                }
                 Av2TileDecisionKind::IntraLumaMode {
                     mode: _,
                     use_dpcm_y: _,
@@ -1064,12 +1120,10 @@ impl Av2Black444TilePlan {
                     );
                     coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
-                Av2TileDecisionKind::IntrabcFlag(_)
-                | Av2TileDecisionKind::IntrabcCopy { .. }
-                | Av2TileDecisionKind::LumaPaletteModeInfo
+                Av2TileDecisionKind::LumaPaletteModeInfo
                 | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {
-                    unreachable!("AV2 subsampled lossless path disables palette and IntraBC")
+                    unreachable!("AV2 subsampled lossless path disables palette")
                 }
             }
         }
