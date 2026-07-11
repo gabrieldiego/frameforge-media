@@ -5,6 +5,7 @@ use crate::picture::{ChromaSampling, Picture, PixelFormat, SampleBitDepth};
 mod decision;
 pub mod entropy;
 mod ibc;
+mod intra_prediction;
 mod palette;
 mod syntax;
 mod tile;
