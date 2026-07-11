@@ -28,6 +28,9 @@ const AV2_LUMA_PALETTE_BLOCK_SAMPLES: usize =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2LumaIntraMode {
     Dc,
+    Smooth,
+    SmoothVertical,
+    SmoothHorizontal,
     Paeth,
     Vertical,
     Horizontal,
@@ -60,6 +63,9 @@ impl Av2LumaIntraMode {
     pub(crate) fn mode_index(self) -> usize {
         match self {
             Self::Dc => 0,
+            Self::Smooth => 1,
+            Self::SmoothVertical => 2,
+            Self::SmoothHorizontal => 3,
             Self::Paeth => 4,
             Self::Vertical => 5,
             Self::Horizontal => 6,
@@ -73,6 +79,7 @@ impl Av2LumaIntraMode {
     fn joint_mode(self) -> usize {
         match self {
             Self::Dc => 0,
+            Self::Smooth | Self::SmoothVertical | Self::SmoothHorizontal => 0,
             Self::Paeth => 0,
             Self::Vertical => AV2_LUMA_JOINT_MODE_V,
             Self::Horizontal => AV2_LUMA_JOINT_MODE_H,
@@ -82,6 +89,9 @@ impl Av2LumaIntraMode {
     pub(crate) fn symbol_name(self) -> &'static str {
         match self {
             Self::Dc => "tile.intra.y_mode_idx_dc",
+            Self::Smooth => "tile.intra.y_mode_idx_smooth",
+            Self::SmoothVertical => "tile.intra.y_mode_idx_smooth_v",
+            Self::SmoothHorizontal => "tile.intra.y_mode_idx_smooth_h",
             Self::Paeth => "tile.intra.y_mode_idx_paeth",
             Self::Vertical => "tile.intra.y_mode_idx_v",
             Self::Horizontal => "tile.intra.y_mode_idx_h",
@@ -1430,6 +1440,9 @@ impl Av2LumaModeSyntax {
     pub(crate) fn index_for(self, mode: Av2LumaIntraMode) -> u8 {
         match mode {
             Av2LumaIntraMode::Dc => 0,
+            Av2LumaIntraMode::Smooth => 1,
+            Av2LumaIntraMode::SmoothVertical => 2,
+            Av2LumaIntraMode::SmoothHorizontal => 3,
             Av2LumaIntraMode::Paeth => 4,
             Av2LumaIntraMode::Vertical => self.vertical_index,
             Av2LumaIntraMode::Horizontal => self.horizontal_index,
@@ -1587,6 +1600,11 @@ fn luma_intra_prediction_sample(
         Av2LumaIntraMode::Dc => {
             let local_index = local_y * AV2_LUMA_PALETTE_BLOCK_SIZE + local_x;
             block.colors[usize::from(block.indices[local_index])]
+        }
+        Av2LumaIntraMode::Smooth
+        | Av2LumaIntraMode::SmoothVertical
+        | Av2LumaIntraMode::SmoothHorizontal => {
+            unreachable!("the 4:4:4 palette path does not select smooth luma prediction")
         }
         Av2LumaIntraMode::Paeth => {
             unreachable!("the 4:4:4 palette path does not select Paeth luma prediction")

@@ -2487,6 +2487,8 @@ impl Av2Black444TilePlan {
             Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut intrabc_context =
             Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut coded_mi_context =
+            Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut fsc_mode_context =
@@ -2520,6 +2522,7 @@ impl Av2Black444TilePlan {
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        &coded_mi_context,
                     );
                     let coded_luma_mode = mode.coded_luma_mode();
                     let mode_syntax = luma_mode_context.syntax_for_leaf(
@@ -2562,6 +2565,7 @@ impl Av2Black444TilePlan {
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        &coded_mi_context,
                     );
                     write_intra_chroma_mode(
                         writer,
@@ -2578,6 +2582,7 @@ impl Av2Black444TilePlan {
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &mut txb_contexts,
+                        &coded_mi_context,
                         lossless,
                     );
                     intrabc_context.update_leaf(
@@ -2587,6 +2592,7 @@ impl Av2Black444TilePlan {
                         false,
                         false,
                     );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
                 Av2TileDecisionKind::IntrabcFlag(_)
                 | Av2TileDecisionKind::IntrabcCopy { .. }
@@ -3742,7 +3748,11 @@ fn chroma_uv_mode_index(luma_mode: Av2LumaIntraMode, chroma_mode: Av2ChromaIntra
     let luma_directional = match luma_mode {
         Av2LumaIntraMode::Vertical => Some(1usize),
         Av2LumaIntraMode::Horizontal => Some(2usize),
-        Av2LumaIntraMode::Dc | Av2LumaIntraMode::Paeth => None,
+        Av2LumaIntraMode::Dc
+        | Av2LumaIntraMode::Smooth
+        | Av2LumaIntraMode::SmoothVertical
+        | Av2LumaIntraMode::SmoothHorizontal
+        | Av2LumaIntraMode::Paeth => None,
     };
     if let Some(mode_id) = luma_directional {
         if target == mode_id {
@@ -4639,6 +4649,9 @@ impl Av2LosslessSubsampledModeDecision {
 fn chroma_mode_for_luma_mode(mode: Av2LumaIntraMode) -> Av2ChromaIntraMode {
     match mode {
         Av2LumaIntraMode::Dc => Av2ChromaIntraMode::Dc,
+        Av2LumaIntraMode::Smooth => Av2ChromaIntraMode::Smooth,
+        Av2LumaIntraMode::SmoothVertical => Av2ChromaIntraMode::SmoothVertical,
+        Av2LumaIntraMode::SmoothHorizontal => Av2ChromaIntraMode::SmoothHorizontal,
         Av2LumaIntraMode::Paeth => Av2ChromaIntraMode::Paeth,
         Av2LumaIntraMode::Vertical => Av2ChromaIntraMode::Vertical,
         Av2LumaIntraMode::Horizontal => Av2ChromaIntraMode::Horizontal,
@@ -4718,6 +4731,26 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 self.region.origin_y / chroma_subsample_y(self.chroma_format),
             ),
         }
+    }
+
+    fn plane_subsampling(&self, plane: Av2LosslessPlane) -> (usize, usize) {
+        match plane {
+            Av2LosslessPlane::Y => (1, 1),
+            Av2LosslessPlane::U | Av2LosslessPlane::V => (
+                chroma_subsample_x(self.chroma_format),
+                chroma_subsample_y(self.chroma_format),
+            ),
+        }
+    }
+
+    fn coded_mi_for_plane_sample(
+        &self,
+        plane: Av2LosslessPlane,
+        x: usize,
+        y: usize,
+    ) -> (usize, usize) {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        ((y * sub_y) / MI_SIZE, (x * sub_x) / MI_SIZE)
     }
 
     fn txb_origin(&self, plane: Av2LosslessPlane, col: usize, row: usize) -> (usize, usize) {
@@ -4820,6 +4853,14 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             x0,
             y0,
             Av2LosslessSubsampledModeDecision::default(),
+            x0,
+            y0,
+            TX4X4_SIZE,
+            TX4X4_SIZE,
+            &Av2CodedMiContext::new(
+                self.geometry.height.div_ceil(MI_SIZE),
+                self.geometry.width.div_ceil(MI_SIZE),
+            ),
         )
     }
 
@@ -4829,6 +4870,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         x0: usize,
         y0: usize,
         mode: Av2LosslessSubsampledModeDecision,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> [i32; TX4X4_SAMPLES] {
         let residual = match plane {
             Av2LosslessPlane::Y => {
@@ -4840,6 +4886,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         x0,
                         y0,
                         chroma_mode_for_luma_mode(mode.luma_intra_mode),
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_width,
+                        leaf_height,
+                        coded_mi_context,
                     )
                 }
             }
@@ -4847,7 +4898,17 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 if mode.chroma_use_bdpcm {
                     self.dpcm_residual4x4(plane, x0, y0, mode.chroma_intra_mode.is_horizontal())
                 } else {
-                    self.intra_residual4x4(plane, x0, y0, mode.chroma_intra_mode)
+                    self.intra_residual4x4(
+                        plane,
+                        x0,
+                        y0,
+                        mode.chroma_intra_mode,
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_width,
+                        leaf_height,
+                        coded_mi_context,
+                    )
                 }
             }
         };
@@ -4866,6 +4927,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode: Av2LosslessSubsampledModeDecision,
         leaf_x0: usize,
         leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> [i32; TX4X4_SAMPLES] {
         let residual = match plane {
             Av2LosslessPlane::Y => {
@@ -4879,6 +4943,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         chroma_mode_for_luma_mode(mode.luma_intra_mode),
                         leaf_x0,
                         leaf_y0,
+                        leaf_width,
+                        leaf_height,
+                        coded_mi_context,
                     )
                 }
             }
@@ -4900,6 +4967,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         mode.chroma_intra_mode,
                         leaf_x0,
                         leaf_y0,
+                        leaf_width,
+                        leaf_height,
+                        coded_mi_context,
                     )
                 }
             }
@@ -4917,9 +4987,32 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         x0: usize,
         y0: usize,
         mode: Av2ChromaIntraMode,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> [i32; TX4X4_SAMPLES] {
         let dc_predictor =
             (mode == Av2ChromaIntraMode::Dc).then(|| self.dc_predictor(plane, x0, y0));
+        let smooth_edges = matches!(
+            mode,
+            Av2ChromaIntraMode::Smooth
+                | Av2ChromaIntraMode::SmoothVertical
+                | Av2ChromaIntraMode::SmoothHorizontal
+        )
+        .then(|| {
+            self.smooth_edges(
+                plane,
+                x0,
+                y0,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+                coded_mi_context,
+            )
+        });
         let mut residual = [0i32; TX4X4_SAMPLES];
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
@@ -4927,6 +5020,20 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     Av2ChromaIntraMode::Dc => dc_predictor.expect("DC predictor is precomputed"),
                     Av2ChromaIntraMode::Horizontal => self.h_predictor(plane, x0, y0, local_y),
                     Av2ChromaIntraMode::Vertical => self.v_predictor(plane, x0, y0, local_x),
+                    Av2ChromaIntraMode::Smooth
+                    | Av2ChromaIntraMode::SmoothVertical
+                    | Av2ChromaIntraMode::SmoothHorizontal => {
+                        let (above, left) =
+                            smooth_edges.expect("smooth predictor edges are precomputed");
+                        av2_highbd_smooth_intra_predictor(
+                            mode,
+                            above,
+                            left,
+                            local_x,
+                            local_y,
+                            self.bit_depth,
+                        )
+                    }
                     Av2ChromaIntraMode::Paeth => {
                         let left = self.h_predictor(plane, x0, y0, local_y);
                         let above = self.v_predictor(plane, x0, y0, local_x);
@@ -4983,9 +5090,30 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode: Av2ChromaIntraMode,
         leaf_x0: usize,
         leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> [i32; TX4X4_SAMPLES] {
         let dc_predictor = (mode == Av2ChromaIntraMode::Dc)
             .then(|| self.dc_predictor_for_score(plane, x0, y0, leaf_x0, leaf_y0));
+        let smooth_edges = matches!(
+            mode,
+            Av2ChromaIntraMode::Smooth
+                | Av2ChromaIntraMode::SmoothVertical
+                | Av2ChromaIntraMode::SmoothHorizontal
+        )
+        .then(|| {
+            self.smooth_edges_for_score(
+                plane,
+                x0,
+                y0,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+                coded_mi_context,
+            )
+        });
         let mut residual = [0i32; TX4X4_SAMPLES];
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
@@ -4996,6 +5124,20 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     }
                     Av2ChromaIntraMode::Vertical => {
                         self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0)
+                    }
+                    Av2ChromaIntraMode::Smooth
+                    | Av2ChromaIntraMode::SmoothVertical
+                    | Av2ChromaIntraMode::SmoothHorizontal => {
+                        let (above, left) =
+                            smooth_edges.expect("smooth predictor edges are precomputed");
+                        av2_highbd_smooth_intra_predictor(
+                            mode,
+                            above,
+                            left,
+                            local_x,
+                            local_y,
+                            self.bit_depth,
+                        )
                     }
                     Av2ChromaIntraMode::Paeth => {
                         let left =
@@ -5130,6 +5272,176 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
     }
 
+    fn smooth_edges(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> ([Av2Sample; TX4X4_SIZE + 1], [Av2Sample; TX4X4_SIZE + 1]) {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); TX4X4_SIZE + 1];
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); TX4X4_SIZE + 1];
+
+        if have_top {
+            for local_x in 0..TX4X4_SIZE {
+                above[local_x] = self.recon_sample(plane, x0 + local_x, y0 - 1);
+            }
+        } else if have_left {
+            above[..TX4X4_SIZE].fill(self.recon_sample(plane, x0 - 1, y0));
+        }
+
+        if have_left {
+            for local_y in 0..TX4X4_SIZE {
+                left[local_y] = self.recon_sample(plane, x0 - 1, y0 + local_y);
+            }
+        } else if have_top {
+            left[..TX4X4_SIZE].fill(self.recon_sample(plane, x0, y0 - 1));
+        }
+
+        let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+        let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+        let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+        let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+        let top_right_x = x0 + TX4X4_SIZE;
+        let superblock_top_row = y0 % plane_sb_height == 0;
+        let external_top_right_coded = have_top && y0 == leaf_y0 && top_right_x < plane_width && {
+            let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, top_right_x, y0 - 1);
+            superblock_top_row
+                || (top_right_x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
+        };
+        if have_top
+            && top_right_x < plane_width
+            && (top_right_x < leaf_x0 + leaf_width || external_top_right_coded)
+        {
+            above[TX4X4_SIZE] = self.recon_sample(plane, top_right_x, y0 - 1);
+        } else {
+            above[TX4X4_SIZE] = above[TX4X4_SIZE - 1];
+        }
+
+        let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+        let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+        let bottom_left_y = y0 + TX4X4_SIZE;
+        let superblock_left_col = x0 % plane_sb_width == 0;
+        let external_bottom_left_coded =
+            have_left && x0 == leaf_x0 && bottom_left_y < sb_bottom && {
+                let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x0 - 1, bottom_left_y);
+                superblock_left_col || coded_mi_context.is_coded(row_mi, col_mi)
+            };
+        if have_left
+            && x0 == leaf_x0
+            && bottom_left_y < plane_height
+            && (bottom_left_y < leaf_y0 + leaf_height || external_bottom_left_coded)
+        {
+            left[TX4X4_SIZE] = self.recon_sample(plane, x0 - 1, bottom_left_y);
+        } else {
+            left[TX4X4_SIZE] = left[TX4X4_SIZE - 1];
+        }
+
+        (above, left)
+    }
+
+    fn smooth_edges_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> ([Av2Sample; TX4X4_SIZE + 1], [Av2Sample; TX4X4_SIZE + 1]) {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); TX4X4_SIZE + 1];
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); TX4X4_SIZE + 1];
+
+        if have_top {
+            for local_x in 0..TX4X4_SIZE {
+                above[local_x] =
+                    self.neighbor_sample_for_score(plane, x0 + local_x, y0 - 1, leaf_x0, leaf_y0);
+            }
+        } else if have_left {
+            above[..TX4X4_SIZE].fill(self.neighbor_sample_for_score(
+                plane,
+                x0 - 1,
+                y0,
+                leaf_x0,
+                leaf_y0,
+            ));
+        }
+
+        if have_left {
+            for local_y in 0..TX4X4_SIZE {
+                left[local_y] =
+                    self.neighbor_sample_for_score(plane, x0 - 1, y0 + local_y, leaf_x0, leaf_y0);
+            }
+        } else if have_top {
+            left[..TX4X4_SIZE].fill(self.neighbor_sample_for_score(
+                plane,
+                x0,
+                y0 - 1,
+                leaf_x0,
+                leaf_y0,
+            ));
+        }
+
+        let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+        let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+        let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+        let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+        let top_right_x = x0 + TX4X4_SIZE;
+        let superblock_top_row = y0 % plane_sb_height == 0;
+        let external_top_right_coded = have_top && y0 == leaf_y0 && top_right_x < plane_width && {
+            let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, top_right_x, y0 - 1);
+            superblock_top_row
+                || (top_right_x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
+        };
+        if have_top
+            && top_right_x < plane_width
+            && (top_right_x < leaf_x0 + leaf_width || external_top_right_coded)
+        {
+            above[TX4X4_SIZE] =
+                self.neighbor_sample_for_score(plane, top_right_x, y0 - 1, leaf_x0, leaf_y0);
+        } else {
+            above[TX4X4_SIZE] = above[TX4X4_SIZE - 1];
+        }
+
+        let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+        let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+        let bottom_left_y = y0 + TX4X4_SIZE;
+        let superblock_left_col = x0 % plane_sb_width == 0;
+        let external_bottom_left_coded =
+            have_left && x0 == leaf_x0 && bottom_left_y < sb_bottom && {
+                let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x0 - 1, bottom_left_y);
+                superblock_left_col || coded_mi_context.is_coded(row_mi, col_mi)
+            };
+        if have_left
+            && x0 == leaf_x0
+            && bottom_left_y < plane_height
+            && (bottom_left_y < leaf_y0 + leaf_height || external_bottom_left_coded)
+        {
+            left[TX4X4_SIZE] =
+                self.neighbor_sample_for_score(plane, x0 - 1, bottom_left_y, leaf_x0, leaf_y0);
+        } else {
+            left[TX4X4_SIZE] = left[TX4X4_SIZE - 1];
+        }
+
+        (above, left)
+    }
+
     fn above_left_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         let have_left = x0 > tile_origin_x;
@@ -5187,6 +5499,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         decision: Av2TileDecision,
         visible_rows_mi: usize,
         visible_cols_mi: usize,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> Av2LosslessSubsampledModeDecision {
         let txb_width = decision
             .block_size
@@ -5217,6 +5530,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             }
             let luma_candidates = [
                 (Av2LumaIntraMode::Dc, None, 0usize),
+                (Av2LumaIntraMode::Smooth, None, 160usize),
+                (Av2LumaIntraMode::SmoothVertical, None, 160usize),
+                (Av2LumaIntraMode::SmoothHorizontal, None, 160usize),
                 (Av2LumaIntraMode::Paeth, None, 128usize),
                 (Av2LumaIntraMode::Horizontal, None, 32usize),
                 (Av2LumaIntraMode::Vertical, None, 32usize),
@@ -5227,6 +5543,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 (false, Av2ChromaIntraMode::Horizontal, 0usize),
                 (false, Av2ChromaIntraMode::Vertical, 0usize),
                 (false, Av2ChromaIntraMode::Dc, 0usize),
+                (false, Av2ChromaIntraMode::Smooth, 160usize),
+                (false, Av2ChromaIntraMode::SmoothVertical, 160usize),
+                (false, Av2ChromaIntraMode::SmoothHorizontal, 160usize),
                 (false, Av2ChromaIntraMode::Paeth, 128usize),
                 (true, Av2ChromaIntraMode::Horizontal, 64usize),
                 (true, Av2ChromaIntraMode::Vertical, 64usize),
@@ -5244,12 +5563,17 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         use_fsc,
                     };
                     let fsc_syntax_penalty = usize::from(use_fsc) * 96;
-                    let score = self
-                        .luma_leaf_coefficient_score(decision, txb_width, txb_height, mode)
-                        + self.chroma_leaf_coefficient_score(chroma_span, mode)
-                        + luma_syntax_penalty
-                        + chroma_syntax_penalty
-                        + fsc_syntax_penalty;
+                    let score =
+                        self.luma_leaf_coefficient_score(
+                            decision,
+                            txb_width,
+                            txb_height,
+                            mode,
+                            coded_mi_context,
+                        ) + self.chroma_leaf_coefficient_score(chroma_span, mode, coded_mi_context)
+                            + luma_syntax_penalty
+                            + chroma_syntax_penalty
+                            + fsc_syntax_penalty;
                     if score < best.1 {
                         best = (mode, score);
                     }
@@ -5266,9 +5590,12 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         txb_width: usize,
         txb_height: usize,
         mode: Av2LosslessSubsampledModeDecision,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> usize {
         let mut score = 0usize;
         let (leaf_x0, leaf_y0) = self.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
+        let leaf_width = txb_width * TX4X4_SIZE;
+        let leaf_height = txb_height * TX4X4_SIZE;
         for row in 0..txb_height {
             let abs_row = decision.row + row;
             for col in 0..txb_width {
@@ -5281,6 +5608,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     mode,
                     leaf_x0,
                     leaf_y0,
+                    leaf_width,
+                    leaf_height,
+                    coded_mi_context,
                 );
                 let kind = if mode.use_fsc {
                     Av2CoefficientProxyKind::LumaIdtx
@@ -5297,17 +5627,29 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         &self,
         chroma_span: Av2ChromaTx4x4Span,
         mode: Av2LosslessSubsampledModeDecision,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> usize {
         let mut score = 0usize;
         for plane in [Av2LosslessPlane::U, Av2LosslessPlane::V] {
             let (leaf_x0, leaf_y0) = self.txb_origin(plane, chroma_span.col, chroma_span.row);
+            let leaf_width = chroma_span.width * TX4X4_SIZE;
+            let leaf_height = chroma_span.height * TX4X4_SIZE;
             for row in 0..chroma_span.height {
                 let abs_row = chroma_span.row + row;
                 for col in 0..chroma_span.width {
                     let abs_col = chroma_span.col + col;
                     let (x0, y0) = self.txb_origin(plane, abs_col, abs_row);
-                    let coefficients = self
-                        .tx4x4_coefficients_for_mode_score(plane, x0, y0, mode, leaf_x0, leaf_y0);
+                    let coefficients = self.tx4x4_coefficients_for_mode_score(
+                        plane,
+                        x0,
+                        y0,
+                        mode,
+                        leaf_x0,
+                        leaf_y0,
+                        leaf_width,
+                        leaf_height,
+                        coded_mi_context,
+                    );
                     score += coefficient_proxy_score(
                         &coefficients,
                         Av2CoefficientProxyKind::ChromaTransform,
@@ -5458,9 +5800,15 @@ fn write_lossless_subsampled_residual_coefficients(
     visible_rows_mi: usize,
     visible_cols_mi: usize,
     contexts: &mut Av2TxbEntropyContexts,
+    coded_mi_context: &Av2CodedMiContext,
     lossless: &mut Av2LosslessSubsampledTileState<'_>,
 ) {
-    let mode = lossless.mode_decision_for_leaf(decision, visible_rows_mi, visible_cols_mi);
+    let mode = lossless.mode_decision_for_leaf(
+        decision,
+        visible_rows_mi,
+        visible_cols_mi,
+        coded_mi_context,
+    );
     let txb_width = decision
         .block_size
         .tx4x4_width()
@@ -5472,6 +5820,10 @@ fn write_lossless_subsampled_residual_coefficients(
     if mode.use_fsc {
         write_lossless_tx_size_4x4(writer, decision.block_size);
     }
+    let (luma_leaf_x0, luma_leaf_y0) =
+        lossless.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
+    let luma_leaf_width = txb_width * TX4X4_SIZE;
+    let luma_leaf_height = txb_height * TX4X4_SIZE;
     for row in 0..txb_height {
         let abs_row = decision.row + row;
         for col in 0..txb_width {
@@ -5480,8 +5832,17 @@ fn write_lossless_subsampled_residual_coefficients(
                 luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
-            let coefficients =
-                lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::Y, x0, y0, mode);
+            let coefficients = lossless.tx4x4_coefficients_for_mode(
+                Av2LosslessPlane::Y,
+                x0,
+                y0,
+                mode,
+                luma_leaf_x0,
+                luma_leaf_y0,
+                luma_leaf_width,
+                luma_leaf_height,
+                coded_mi_context,
+            );
             let (context, _) = if mode.use_fsc {
                 write_luma_palette_fsc_txb(writer, &coefficients)
             } else {
@@ -5499,6 +5860,10 @@ fn write_lossless_subsampled_residual_coefficients(
         visible_cols_mi,
         lossless.chroma_format,
     );
+    let (chroma_leaf_x0, chroma_leaf_y0) =
+        lossless.txb_origin(Av2LosslessPlane::U, chroma_span.col, chroma_span.row);
+    let chroma_leaf_width = chroma_span.width * TX4X4_SIZE;
+    let chroma_leaf_height = chroma_span.height * TX4X4_SIZE;
     let mut last_u_txb_nonzero = false;
     for row in 0..chroma_span.height {
         let abs_row = chroma_span.row + row;
@@ -5508,8 +5873,17 @@ fn write_lossless_subsampled_residual_coefficients(
                 chroma_txb_skip_base_context(contexts.u_above[abs_col], contexts.u_left[abs_row])
                     + 6;
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::U, abs_col, abs_row);
-            let coefficients =
-                lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::U, x0, y0, mode);
+            let coefficients = lossless.tx4x4_coefficients_for_mode(
+                Av2LosslessPlane::U,
+                x0,
+                y0,
+                mode,
+                chroma_leaf_x0,
+                chroma_leaf_y0,
+                chroma_leaf_width,
+                chroma_leaf_height,
+                coded_mi_context,
+            );
             let (context, nonzero) = write_chroma_bdpcm_txb(
                 writer,
                 Av2ChromaPlane::U,
@@ -5536,8 +5910,17 @@ fn write_lossless_subsampled_residual_coefficients(
                 decision.block_size,
             );
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::V, abs_col, abs_row);
-            let coefficients =
-                lossless.tx4x4_coefficients_for_mode(Av2LosslessPlane::V, x0, y0, mode);
+            let coefficients = lossless.tx4x4_coefficients_for_mode(
+                Av2LosslessPlane::V,
+                x0,
+                y0,
+                mode,
+                chroma_leaf_x0,
+                chroma_leaf_y0,
+                chroma_leaf_width,
+                chroma_leaf_height,
+                coded_mi_context,
+            );
             let (context, _) = write_chroma_bdpcm_txb(
                 writer,
                 Av2ChromaPlane::V,
