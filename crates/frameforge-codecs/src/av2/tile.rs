@@ -5020,6 +5020,63 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     Av2ChromaIntraMode::Dc => dc_predictor.expect("DC predictor is precomputed"),
                     Av2ChromaIntraMode::Horizontal => self.h_predictor(plane, x0, y0, local_y),
                     Av2ChromaIntraMode::Vertical => self.v_predictor(plane, x0, y0, local_x),
+                    Av2ChromaIntraMode::Directional45 => {
+                        let above = self.directional_above_edge(
+                            plane,
+                            x0,
+                            y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            coded_mi_context,
+                        );
+                        above[local_y + local_x + 1]
+                    }
+                    Av2ChromaIntraMode::Directional67 => {
+                        let above = self.directional_above_edge(
+                            plane,
+                            x0,
+                            y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            coded_mi_context,
+                        );
+                        directional_interpolate(above, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional135 => {
+                        let edges = self.directional_d135_edges(plane, x0, y0);
+                        if local_x >= local_y {
+                            let offset = local_x - local_y;
+                            if offset == 0 {
+                                edges.above_left
+                            } else {
+                                edges.above[offset - 1]
+                            }
+                        } else {
+                            edges.left[local_y - local_x - 1]
+                        }
+                    }
+                    Av2ChromaIntraMode::Directional113 => {
+                        let edges = self.directional_d135_edges(plane, x0, y0);
+                        zone2_directional_predictor(edges, 24, 170, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional157 => {
+                        let edges = self.directional_d135_edges(plane, x0, y0);
+                        zone2_directional_predictor(edges, 170, 24, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional203 => {
+                        let left = self.directional_left_edge(
+                            plane,
+                            x0,
+                            y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_height,
+                            coded_mi_context,
+                        );
+                        directional_interpolate(left, local_y, local_x)
+                    }
                     Av2ChromaIntraMode::Smooth
                     | Av2ChromaIntraMode::SmoothVertical
                     | Av2ChromaIntraMode::SmoothHorizontal => {
@@ -5039,9 +5096,6 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         let above = self.v_predictor(plane, x0, y0, local_x);
                         let above_left = self.above_left_predictor(plane, x0, y0);
                         paeth_predictor(left, above, above_left)
-                    }
-                    _ => {
-                        unreachable!("subsampled lossless scorer only uses DC/H/V/Paeth predictors")
                     }
                 };
                 residual[local_y * TX4X4_SIZE + local_x] =
@@ -5125,6 +5179,66 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     Av2ChromaIntraMode::Vertical => {
                         self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0)
                     }
+                    Av2ChromaIntraMode::Directional45 => {
+                        let above = self.directional_above_edge_for_score(
+                            plane,
+                            x0,
+                            y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            coded_mi_context,
+                        );
+                        above[local_y + local_x + 1]
+                    }
+                    Av2ChromaIntraMode::Directional67 => {
+                        let above = self.directional_above_edge_for_score(
+                            plane,
+                            x0,
+                            y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            coded_mi_context,
+                        );
+                        directional_interpolate(above, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional135 => {
+                        let edges =
+                            self.directional_d135_edges_for_score(plane, x0, y0, leaf_x0, leaf_y0);
+                        if local_x >= local_y {
+                            let offset = local_x - local_y;
+                            if offset == 0 {
+                                edges.above_left
+                            } else {
+                                edges.above[offset - 1]
+                            }
+                        } else {
+                            edges.left[local_y - local_x - 1]
+                        }
+                    }
+                    Av2ChromaIntraMode::Directional113 => {
+                        let edges =
+                            self.directional_d135_edges_for_score(plane, x0, y0, leaf_x0, leaf_y0);
+                        zone2_directional_predictor(edges, 24, 170, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional157 => {
+                        let edges =
+                            self.directional_d135_edges_for_score(plane, x0, y0, leaf_x0, leaf_y0);
+                        zone2_directional_predictor(edges, 170, 24, local_x, local_y)
+                    }
+                    Av2ChromaIntraMode::Directional203 => {
+                        let left = self.directional_left_edge_for_score(
+                            plane,
+                            x0,
+                            y0,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_height,
+                            coded_mi_context,
+                        );
+                        directional_interpolate(left, local_y, local_x)
+                    }
                     Av2ChromaIntraMode::Smooth
                     | Av2ChromaIntraMode::SmoothVertical
                     | Av2ChromaIntraMode::SmoothHorizontal => {
@@ -5147,9 +5261,6 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         let above_left =
                             self.above_left_predictor_for_score(plane, x0, y0, leaf_x0, leaf_y0);
                         paeth_predictor(left, above, above_left)
-                    }
-                    _ => {
-                        unreachable!("subsampled lossless scorer only uses DC/H/V/Paeth predictors")
                     }
                 };
                 residual[local_y * TX4X4_SIZE + local_x] =
@@ -5269,6 +5380,272 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             self.neighbor_sample_for_score(plane, x0 - 1, y0, leaf_x0, leaf_y0)
         } else {
             av2_lossless_v_pred_above_edge(self.bit_depth)
+        }
+    }
+
+    fn directional_above_edge(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [Av2Sample; 8] {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, _) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); 8];
+        if have_top {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+            let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+            let superblock_top_row = y0 % plane_sb_height == 0;
+            for index in 0..above.len() {
+                let x = x0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_top_right_coded = overhang && y0 == leaf_y0 && x < plane_width && {
+                    let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x, y0 - 1);
+                    superblock_top_row
+                        || (x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
+                };
+                if x < plane_width
+                    && (!overhang || x < leaf_x0 + leaf_width || external_top_right_coded)
+                {
+                    above[index] = self.recon_sample(plane, x, y0 - 1);
+                } else if index > 0 {
+                    above[index] = above[index - 1];
+                }
+            }
+        } else if have_left {
+            above.fill(self.recon_sample(plane, x0 - 1, y0));
+        }
+        above
+    }
+
+    fn directional_above_edge_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [Av2Sample; 8] {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, _) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); 8];
+        if have_top {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+            let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+            let superblock_top_row = y0 % plane_sb_height == 0;
+            for index in 0..above.len() {
+                let x = x0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_top_right_coded = overhang && y0 == leaf_y0 && x < plane_width && {
+                    let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x, y0 - 1);
+                    superblock_top_row
+                        || (x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
+                };
+                if x < plane_width
+                    && (!overhang || x < leaf_x0 + leaf_width || external_top_right_coded)
+                {
+                    above[index] =
+                        self.neighbor_sample_for_score(plane, x, y0 - 1, leaf_x0, leaf_y0);
+                } else if index > 0 {
+                    above[index] = above[index - 1];
+                }
+            }
+        } else if have_left {
+            above.fill(self.neighbor_sample_for_score(plane, x0 - 1, y0, leaf_x0, leaf_y0));
+        }
+        above
+    }
+
+    fn directional_left_edge(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [Av2Sample; 8] {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (_, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); 8];
+        if have_left {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+            let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+            let superblock_left_col = x0 % plane_sb_width == 0;
+            for index in 0..left.len() {
+                let y = y0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_bottom_left_coded = overhang && x0 == leaf_x0 && y < sb_bottom && {
+                    let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x0 - 1, y);
+                    superblock_left_col || coded_mi_context.is_coded(row_mi, col_mi)
+                };
+                if y < plane_height
+                    && (!overhang
+                        || (x0 == leaf_x0
+                            && (y < leaf_y0 + leaf_height || external_bottom_left_coded)))
+                {
+                    left[index] = self.recon_sample(plane, x0 - 1, y);
+                } else if index > 0 {
+                    left[index] = left[index - 1];
+                }
+            }
+        } else if have_top {
+            left.fill(self.recon_sample(plane, x0, y0 - 1));
+        }
+        left
+    }
+
+    fn directional_left_edge_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [Av2Sample; 8] {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (_, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); 8];
+        if have_left {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+            let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+            let superblock_left_col = x0 % plane_sb_width == 0;
+            for index in 0..left.len() {
+                let y = y0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_bottom_left_coded = overhang && x0 == leaf_x0 && y < sb_bottom && {
+                    let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x0 - 1, y);
+                    superblock_left_col || coded_mi_context.is_coded(row_mi, col_mi)
+                };
+                if y < plane_height
+                    && (!overhang
+                        || (x0 == leaf_x0
+                            && (y < leaf_y0 + leaf_height || external_bottom_left_coded)))
+                {
+                    left[index] =
+                        self.neighbor_sample_for_score(plane, x0 - 1, y, leaf_x0, leaf_y0);
+                } else if index > 0 {
+                    left[index] = left[index - 1];
+                }
+            }
+        } else if have_top {
+            left.fill(self.neighbor_sample_for_score(plane, x0, y0 - 1, leaf_x0, leaf_y0));
+        }
+        left
+    }
+
+    fn directional_d135_edges(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+    ) -> ChromaD135Edges {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); 4];
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); 4];
+        if have_top {
+            for local_x in 0..4 {
+                above[local_x] = self.recon_sample(plane, x0 + local_x, y0 - 1);
+            }
+        } else if have_left {
+            above.fill(self.recon_sample(plane, x0 - 1, y0));
+        }
+        if have_left {
+            for local_y in 0..4 {
+                left[local_y] = self.recon_sample(plane, x0 - 1, y0 + local_y);
+            }
+        } else if have_top {
+            left.fill(self.recon_sample(plane, x0, y0 - 1));
+        }
+        let above_left = if have_top && have_left {
+            self.recon_sample(plane, x0 - 1, y0 - 1)
+        } else if have_top {
+            above[0]
+        } else if have_left {
+            left[0]
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        };
+        ChromaD135Edges {
+            above_left,
+            above,
+            left,
+        }
+    }
+
+    fn directional_d135_edges_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+    ) -> ChromaD135Edges {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); 4];
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); 4];
+        if have_top {
+            for local_x in 0..4 {
+                above[local_x] =
+                    self.neighbor_sample_for_score(plane, x0 + local_x, y0 - 1, leaf_x0, leaf_y0);
+            }
+        } else if have_left {
+            above.fill(self.neighbor_sample_for_score(plane, x0 - 1, y0, leaf_x0, leaf_y0));
+        }
+        if have_left {
+            for local_y in 0..4 {
+                left[local_y] =
+                    self.neighbor_sample_for_score(plane, x0 - 1, y0 + local_y, leaf_x0, leaf_y0);
+            }
+        } else if have_top {
+            left.fill(self.neighbor_sample_for_score(plane, x0, y0 - 1, leaf_x0, leaf_y0));
+        }
+        let above_left = if have_top && have_left {
+            self.neighbor_sample_for_score(plane, x0 - 1, y0 - 1, leaf_x0, leaf_y0)
+        } else if have_top {
+            above[0]
+        } else if have_left {
+            left[0]
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        };
+        ChromaD135Edges {
+            above_left,
+            above,
+            left,
         }
     }
 
@@ -5530,9 +5907,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             }
             let luma_candidates = [
                 (Av2LumaIntraMode::Dc, None, 0usize),
-                (Av2LumaIntraMode::Smooth, None, 160usize),
-                (Av2LumaIntraMode::SmoothVertical, None, 160usize),
-                (Av2LumaIntraMode::SmoothHorizontal, None, 160usize),
+                (Av2LumaIntraMode::Smooth, None, 192usize),
+                (Av2LumaIntraMode::SmoothVertical, None, 192usize),
+                (Av2LumaIntraMode::SmoothHorizontal, None, 192usize),
                 (Av2LumaIntraMode::Paeth, None, 128usize),
                 (Av2LumaIntraMode::Horizontal, None, 32usize),
                 (Av2LumaIntraMode::Vertical, None, 32usize),
@@ -5543,9 +5920,15 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 (false, Av2ChromaIntraMode::Horizontal, 0usize),
                 (false, Av2ChromaIntraMode::Vertical, 0usize),
                 (false, Av2ChromaIntraMode::Dc, 0usize),
-                (false, Av2ChromaIntraMode::Smooth, 160usize),
-                (false, Av2ChromaIntraMode::SmoothVertical, 160usize),
-                (false, Av2ChromaIntraMode::SmoothHorizontal, 160usize),
+                (false, Av2ChromaIntraMode::Directional45, 192usize),
+                (false, Av2ChromaIntraMode::Directional135, 192usize),
+                (false, Av2ChromaIntraMode::Directional67, 192usize),
+                (false, Av2ChromaIntraMode::Directional203, 192usize),
+                (false, Av2ChromaIntraMode::Directional113, 192usize),
+                (false, Av2ChromaIntraMode::Directional157, 192usize),
+                (false, Av2ChromaIntraMode::Smooth, 192usize),
+                (false, Av2ChromaIntraMode::SmoothVertical, 192usize),
+                (false, Av2ChromaIntraMode::SmoothHorizontal, 192usize),
                 (false, Av2ChromaIntraMode::Paeth, 128usize),
                 (true, Av2ChromaIntraMode::Horizontal, 64usize),
                 (true, Av2ChromaIntraMode::Vertical, 64usize),
