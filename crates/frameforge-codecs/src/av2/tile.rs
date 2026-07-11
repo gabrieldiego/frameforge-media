@@ -1725,11 +1725,52 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
         chroma_format,
         Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
     ));
+    let mut best: Option<(Av2EntropyPayload, Vec<u8>)> = None;
+    for partition_policy in [
+        Av2PartitionPolicy::LargestLosslessLeaves,
+        Av2PartitionPolicy::Fixed8x8Leaves,
+    ] {
+        let mut candidate_recon = recon.to_vec();
+        let payload = av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
+            region,
+            profile,
+            geometry,
+            chroma_format,
+            bit_depth,
+            source,
+            &mut candidate_recon,
+            partition_policy,
+        );
+        let replace = best.as_ref().is_none_or(|(best_payload, _)| {
+            (payload.bytes.len(), payload.symbol_bits)
+                < (best_payload.bytes.len(), best_payload.symbol_bits)
+        });
+        if replace {
+            best = Some((payload, candidate_recon));
+        }
+    }
+
+    let (payload, candidate_recon) =
+        best.expect("AV2 subsampled lossless has fixed partition candidates");
+    recon.copy_from_slice(&candidate_recon);
+    payload
+}
+
+fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    recon: &mut [u8],
+    partition_policy: Av2PartitionPolicy,
+) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_partition_policy(
         region,
         profile,
         chroma_format,
-        Av2PartitionPolicy::LargestLosslessLeaves,
+        partition_policy,
         false,
         false,
         None,
@@ -2421,6 +2462,8 @@ impl Av2Black444TilePlan {
             Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut intrabc_context =
             Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut luma_mode_context =
+            Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut fsc_mode_context =
             Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         for decision in &self.decisions {
@@ -2454,18 +2497,29 @@ impl Av2Black444TilePlan {
                         self.visible_cols_mi,
                     );
                     let coded_luma_mode = mode.coded_luma_mode();
+                    let mode_syntax = luma_mode_context.syntax_for_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
                     let fsc_context =
                         fsc_mode_context.context(decision.row, decision.col, decision.block_size);
                     write_intra_luma_mode(
                         writer,
                         *decision,
                         coded_luma_mode,
-                        0,
-                        coded_luma_mode.mode_index() as u8,
+                        mode_syntax.context,
+                        mode_syntax.index_for(coded_luma_mode),
                         mode.luma_bdpcm_horz.is_some(),
                         mode.luma_bdpcm_horz.unwrap_or(false),
                         mode.use_fsc,
                         fsc_context,
+                    );
+                    luma_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        coded_luma_mode,
                     );
                     fsc_mode_context.update_leaf(
                         decision.row,
