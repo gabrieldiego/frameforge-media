@@ -107,8 +107,7 @@ fn choose_luma_palette_partition(
     block_size: Av2MvpBlockSize,
     visible_rows_mi: usize,
     visible_cols_mi: usize,
-    tile_origin_x: usize,
-    tile_origin_y: usize,
+    partition_policy: Av2PartitionPolicy,
     palette: Option<&Av2LumaPalette444>,
 ) -> Av2MvpPartition {
     if block_size.is_partition_point() {
@@ -121,16 +120,10 @@ fn choose_luma_palette_partition(
                 return forced;
             }
         }
-        if AV2_ENABLE_LUMA_PALETTE_REGION_MERGE
-            && allowed.none
-            && palette.is_some_and(|palette| {
-                luma_palette_region_mergeable(
-                    palette,
-                    tile_origin_x + col_mi * MI_SIZE,
-                    tile_origin_y + row_mi * MI_SIZE,
-                    block_size,
-                )
-            })
+        if allowed.none
+            && luma_palette_partition_policy_allows_leaf(partition_policy, block_size)
+            && palette.is_some()
+            && luma_palette_region_mergeable(block_size)
         {
             return Av2MvpPartition::None;
         }
@@ -138,106 +131,23 @@ fn choose_luma_palette_partition(
     choose_8x8_leaf_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
 }
 
-fn luma_palette_region_mergeable(
-    palette: &Av2LumaPalette444,
-    x0: usize,
-    y0: usize,
+fn luma_palette_partition_policy_allows_leaf(
+    partition_policy: Av2PartitionPolicy,
     block_size: Av2MvpBlockSize,
 ) -> bool {
-    if block_size.width < MVP_LEAF_BLOCK_SIZE || block_size.height < MVP_LEAF_BLOCK_SIZE {
-        return false;
-    }
-    if luma_palette_region_has_adjacent_copy(palette, x0, y0, block_size) {
-        return false;
-    }
-
-    let base_colors = palette.colors_for_block(x0, y0);
-    let base_chroma_use_bdpcm = palette.chroma_use_bdpcm_for_block(x0, y0);
-    let base_chroma_mode = palette.chroma_intra_mode_for_block(x0, y0);
-    for local_y in (0..block_size.height).step_by(MVP_LEAF_BLOCK_SIZE) {
-        for local_x in (0..block_size.width).step_by(MVP_LEAF_BLOCK_SIZE) {
-            let child_x = x0 + local_x;
-            let child_y = y0 + local_y;
-            if palette.luma_mode_for_block(child_x, child_y) != Av2LumaIntraMode::Dc
-                || palette
-                    .luma_bdpcm_horz_for_block(child_x, child_y)
-                    .is_some()
-                || palette.colors_for_block(child_x, child_y) != base_colors
-                || palette.chroma_use_bdpcm_for_block(child_x, child_y) != base_chroma_use_bdpcm
-                || palette.chroma_intra_mode_for_block(child_x, child_y) != base_chroma_mode
-            {
-                return false;
-            }
+    match partition_policy {
+        Av2PartitionPolicy::Fixed8x8Leaves => {
+            block_size.width == MVP_LEAF_BLOCK_SIZE && block_size.height == MVP_LEAF_BLOCK_SIZE
+        }
+        Av2PartitionPolicy::LargestLosslessLeaves => true,
+        Av2PartitionPolicy::LosslessLeafLimit { max_size } => {
+            block_size.width <= max_size && block_size.height <= max_size
         }
     }
-    true
 }
 
-fn luma_palette_region_has_adjacent_copy(
-    palette: &Av2LumaPalette444,
-    x0: usize,
-    y0: usize,
-    block_size: Av2MvpBlockSize,
-) -> bool {
-    if block_size.width == MVP_LEAF_BLOCK_SIZE && block_size.height == MVP_LEAF_BLOCK_SIZE {
-        return false;
-    }
-
-    for local_y in (0..block_size.height).step_by(MVP_LEAF_BLOCK_SIZE) {
-        for local_x in (0..block_size.width).step_by(MVP_LEAF_BLOCK_SIZE) {
-            let child_x = x0 + local_x;
-            let child_y = y0 + local_y;
-            let left_in_same_tile = child_x % MVP_SUPERBLOCK_SIZE != 0;
-            if left_in_same_tile
-                && luma_palette_8x8_blocks_match(
-                    palette,
-                    child_x,
-                    child_y,
-                    child_x - MVP_LEAF_BLOCK_SIZE,
-                    child_y,
-                )
-            {
-                return true;
-            }
-            let above_in_same_tile = child_y % MVP_SUPERBLOCK_SIZE != 0;
-            if above_in_same_tile
-                && luma_palette_8x8_blocks_match(
-                    palette,
-                    child_x,
-                    child_y,
-                    child_x,
-                    child_y - MVP_LEAF_BLOCK_SIZE,
-                )
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn luma_palette_8x8_blocks_match(
-    palette: &Av2LumaPalette444,
-    x0: usize,
-    y0: usize,
-    ref_x0: usize,
-    ref_y0: usize,
-) -> bool {
-    for local_y in 0..MVP_LEAF_BLOCK_SIZE {
-        for local_x in 0..MVP_LEAF_BLOCK_SIZE {
-            let x = x0 + local_x;
-            let y = y0 + local_y;
-            let ref_x = ref_x0 + local_x;
-            let ref_y = ref_y0 + local_y;
-            if palette.y_sample(x, y) != palette.y_sample(ref_x, ref_y)
-                || palette.u_sample(x, y) != palette.u_sample(ref_x, ref_y)
-                || palette.v_sample(x, y) != palette.v_sample(ref_x, ref_y)
-            {
-                return false;
-            }
-        }
-    }
-    true
+fn luma_palette_region_mergeable(block_size: Av2MvpBlockSize) -> bool {
+    block_size.width >= MVP_LEAF_BLOCK_SIZE && block_size.height >= MVP_LEAF_BLOCK_SIZE
 }
 
 fn choose_8x8_leaf_partition(

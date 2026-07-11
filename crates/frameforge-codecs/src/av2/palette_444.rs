@@ -23,6 +23,42 @@ pub(crate) struct Av2LumaPalette444 {
     blocks_high: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av2LumaPaletteRegion {
+    colors: Vec<Av2Sample>,
+}
+
+impl Av2LumaPaletteRegion {
+    fn from_colors(colors: &[Av2Sample]) -> Self {
+        Self {
+            colors: colors.to_vec(),
+        }
+    }
+
+    pub(crate) fn colors(&self) -> &[Av2Sample] {
+        &self.colors
+    }
+
+    pub(crate) fn color_count(&self) -> usize {
+        self.colors.len()
+    }
+
+    pub(crate) fn index_for_sample(&self, sample: Av2Sample) -> u8 {
+        self.colors.binary_search(&sample).unwrap_or_else(|_| {
+            self.colors
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, &color)| sample.abs_diff(color))
+                .map(|(index, _)| index)
+                .expect("AV2 palette region must have at least one color")
+        }) as u8
+    }
+
+    pub(crate) fn prediction_for_sample(&self, sample: Av2Sample) -> Av2Sample {
+        self.colors[usize::from(self.index_for_sample(sample))]
+    }
+}
+
 impl Av2LumaPalette444 {
     pub(crate) fn bit_depth(&self) -> SampleBitDepth {
         self.bit_depth
@@ -32,8 +68,68 @@ impl Av2LumaPalette444 {
         &self.block_for_origin(x0, y0).colors
     }
 
-    pub(crate) fn color_count_for_block(&self, x0: usize, y0: usize) -> usize {
-        self.colors_for_block(x0, y0).len()
+    fn quantized_region_palette(
+        &self,
+        x0: usize,
+        y0: usize,
+        width: usize,
+        height: usize,
+    ) -> Av2LumaPaletteRegion {
+        assert!(x0 + width <= self.width && y0 + height <= self.height);
+        let mut colors = Vec::with_capacity(AV2_LUMA_PALETTE_MAX_COLORS);
+        let value_count = usize::from(self.bit_depth.max_sample()) + 1;
+        let mut counts = vec![0usize; value_count];
+        let mut first_positions = vec![usize::MAX; value_count];
+        let mut sample_index = 0usize;
+        for y in y0..y0 + height {
+            for x in x0..x0 + width {
+                let sample = self.y_sample(x, y);
+                let sample_index_by_value = usize::from(sample);
+                counts[sample_index_by_value] += 1;
+                first_positions[sample_index_by_value] =
+                    first_positions[sample_index_by_value].min(sample_index);
+                if !colors.contains(&sample) && colors.len() < AV2_LUMA_PALETTE_MAX_COLORS {
+                    colors.push(sample);
+                }
+                sample_index += 1;
+            }
+        }
+        if colors.is_empty() {
+            colors.push(0);
+        }
+
+        let unique_colors = counts.iter().filter(|&&count| count != 0).count();
+        let target_colors = unique_colors
+            .clamp(AV2_LUMA_PALETTE_MIN_COLORS, AV2_LUMA_PALETTE_MAX_COLORS)
+            .min(AV2_LUMA_PALETTE_SOFT_MAX_COLORS);
+
+        let mut colors = if unique_colors > target_colors {
+            quantized_luma_palette_values(&counts, &first_positions, target_colors)
+        } else {
+            colors
+        };
+        while colors.len() < target_colors {
+            let filler = (0..=self.bit_depth.max_sample())
+                .find(|sample| !colors.contains(sample))
+                .expect("AV2 bit depth range must contain at least two samples");
+            colors.push(filler);
+        }
+        colors.sort_unstable();
+        Av2LumaPaletteRegion { colors }
+    }
+
+    pub(crate) fn syntax_region_palette(
+        &self,
+        x0: usize,
+        y0: usize,
+        width: usize,
+        height: usize,
+    ) -> Av2LumaPaletteRegion {
+        if width == AV2_LUMA_PALETTE_BLOCK_SIZE && height == AV2_LUMA_PALETTE_BLOCK_SIZE {
+            Av2LumaPaletteRegion::from_colors(self.colors_for_block(x0, y0))
+        } else {
+            self.quantized_region_palette(x0, y0, width, height)
+        }
     }
 
     pub(crate) fn luma_mode_for_block(&self, x0: usize, y0: usize) -> Av2LumaIntraMode {
@@ -474,15 +570,22 @@ impl Av2LumaPalette444 {
         }
     }
 
-    pub(crate) fn index_at(&self, x: usize, y: usize) -> u8 {
-        assert!(x < self.width && y < self.height);
-        let block = self.block_for_origin(
-            (x / AV2_LUMA_PALETTE_BLOCK_SIZE) * AV2_LUMA_PALETTE_BLOCK_SIZE,
-            (y / AV2_LUMA_PALETTE_BLOCK_SIZE) * AV2_LUMA_PALETTE_BLOCK_SIZE,
-        );
-        let local_x = x % AV2_LUMA_PALETTE_BLOCK_SIZE;
-        let local_y = y % AV2_LUMA_PALETTE_BLOCK_SIZE;
-        block.indices[local_y * AV2_LUMA_PALETTE_BLOCK_SIZE + local_x]
+    pub(crate) fn region_index_at(
+        &self,
+        region: &Av2LumaPaletteRegion,
+        x: usize,
+        y: usize,
+    ) -> u8 {
+        region.index_for_sample(self.y_sample(x, y))
+    }
+
+    pub(crate) fn region_prediction_sample(
+        &self,
+        region: &Av2LumaPaletteRegion,
+        x: usize,
+        y: usize,
+    ) -> Av2Sample {
+        region.prediction_for_sample(self.y_sample(x, y))
     }
 
     pub(crate) fn y_sample(&self, x: usize, y: usize) -> Av2Sample {

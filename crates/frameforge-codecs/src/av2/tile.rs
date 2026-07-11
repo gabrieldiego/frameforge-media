@@ -11,8 +11,8 @@ use crate::av2::intra_prediction::{
 };
 use crate::av2::palette::{
     av2_luma_mode_syntax_for_block, Av2ChromaIntraMode, Av2LumaDirectionalMode, Av2LumaIntraMode,
-    Av2LumaModeSyntax, Av2LumaPalette444, AV2_LUMA_PALETTE_BLOCK_SIZE, AV2_LUMA_PALETTE_MAX_COLORS,
-    AV2_LUMA_PALETTE_MIN_COLORS,
+    Av2LumaModeSyntax, Av2LumaPalette444, Av2LumaPaletteRegion, AV2_LUMA_PALETTE_BLOCK_SIZE,
+    AV2_LUMA_PALETTE_MAX_COLORS, AV2_LUMA_PALETTE_MIN_COLORS,
 };
 use crate::picture::SampleBitDepth;
 use frameforge_core::{read_planar_sample, write_planar_sample};

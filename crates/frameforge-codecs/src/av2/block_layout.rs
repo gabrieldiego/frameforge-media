@@ -209,8 +209,7 @@ fn append_luma_palette_leaf_order(
         block_size,
         visible_rows_mi,
         visible_cols_mi,
-        tile_origin_x,
-        tile_origin_y,
+        Av2PartitionPolicy::Fixed8x8Leaves,
         Some(palette),
     );
     match partition {

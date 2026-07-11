@@ -51,10 +51,46 @@ pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region(
     palette: &Av2LumaPalette444,
     ibc: &Av2LocalIbc444,
 ) -> Av2EntropyPayload {
-    let plan = Av2Black444TilePlan::for_region(
+    let mut best: Option<Av2EntropyPayload> = None;
+    for partition_policy in [
+        Av2PartitionPolicy::LargestLosslessLeaves,
+        Av2PartitionPolicy::LosslessLeafLimit { max_size: 32 },
+        Av2PartitionPolicy::LosslessLeafLimit { max_size: 16 },
+        Av2PartitionPolicy::Fixed8x8Leaves,
+    ] {
+        let payload = av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
+            region,
+            profile,
+            allow_intrabc,
+            palette,
+            ibc,
+            partition_policy,
+        );
+        let replace = best.as_ref().is_none_or(|best_payload| {
+            (payload.bytes.len(), payload.symbol_bits)
+                < (best_payload.bytes.len(), best_payload.symbol_bits)
+        });
+        if replace {
+            best = Some(payload);
+        }
+    }
+
+    best.expect("AV2 4:4:4 palette has fixed partition candidates")
+}
+
+fn av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    allow_intrabc: bool,
+    palette: &Av2LumaPalette444,
+    ibc: &Av2LocalIbc444,
+    partition_policy: Av2PartitionPolicy,
+) -> Av2EntropyPayload {
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
         region,
         profile,
         Av2ChromaFormat::Yuv444,
+        partition_policy,
         true,
         allow_intrabc,
         Some(ibc),
@@ -268,8 +304,7 @@ impl Av2Black444TilePlan {
                 block_size,
                 visible_rows_mi,
                 visible_cols_mi,
-                self.origin_x,
-                self.origin_y,
+                self.partition_policy,
                 palette,
             )
         } else {
@@ -377,10 +412,21 @@ impl Av2Black444TilePlan {
         let y0 = self.origin_y + row_mi * MI_SIZE;
         let ibc_copy = ibc.and_then(|ibc| ibc.candidate_copy(x0, y0));
         let ibc_drl_idx = ibc_copy.map(|copy| copy.drl_idx());
-        let luma_mode = palette
-            .map(|palette| palette.luma_mode_for_block(x0, y0))
-            .unwrap_or(Av2LumaIntraMode::Dc);
-        let luma_bdpcm_horz = palette.and_then(|palette| palette.luma_bdpcm_horz_for_block(x0, y0));
+        let merged_luma_palette_leaf = self.luma_palette
+            && (block_size.width > AV2_LUMA_PALETTE_BLOCK_SIZE
+                || block_size.height > AV2_LUMA_PALETTE_BLOCK_SIZE);
+        let luma_mode = if merged_luma_palette_leaf {
+            Av2LumaIntraMode::Dc
+        } else {
+            palette
+                .map(|palette| palette.luma_mode_for_block(x0, y0))
+                .unwrap_or(Av2LumaIntraMode::Dc)
+        };
+        let luma_bdpcm_horz = if merged_luma_palette_leaf {
+            None
+        } else {
+            palette.and_then(|palette| palette.luma_bdpcm_horz_for_block(x0, y0))
+        };
         let chroma_intra_mode = palette
             .map(|palette| palette.chroma_intra_mode_for_block(x0, y0))
             .unwrap_or(Av2ChromaIntraMode::Horizontal);

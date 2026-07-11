@@ -269,6 +269,8 @@ fn write_luma_palette_residual_coefficients(
     let leaf_y0 = tile_origin_y + decision.row * MI_SIZE;
     let leaf_width = decision.block_size.width;
     let leaf_height = decision.block_size.height;
+    let luma_region = (!use_fsc && luma_bdpcm_horz.is_none())
+        .then(|| palette.syntax_region_palette(leaf_x0, leaf_y0, leaf_width, leaf_height));
     if use_fsc {
         write_lossless_tx_size_4x4(writer, decision.block_size);
     }
@@ -293,7 +295,14 @@ fn write_luma_palette_residual_coefficients(
                     horz,
                 )
             } else {
-                luma_palette_tx4x4_coefficients(palette, txb_x0, txb_y0)
+                luma_palette_tx4x4_coefficients(
+                    palette,
+                    luma_region
+                        .as_ref()
+                        .expect("luma palette residual needs a region palette"),
+                    txb_x0,
+                    txb_y0,
+                )
             };
             let (context, _) = if use_fsc {
                 write_luma_palette_fsc_txb(writer, &coefficients)
@@ -530,6 +539,7 @@ fn dc_delta_level(delta: i16) -> u16 {
 
 fn luma_palette_tx4x4_coefficients(
     palette: &Av2LumaPalette444,
+    region: &Av2LumaPaletteRegion,
     x0: usize,
     y0: usize,
 ) -> [i32; TX4X4_SAMPLES] {
@@ -539,7 +549,7 @@ fn luma_palette_tx4x4_coefficients(
         for local_x in 0..TX4X4_SIZE {
             let x = x0 + local_x;
             let original = i32::from(palette.y_sample(x, y));
-            let predicted = i32::from(palette.luma_prediction_sample(x, y));
+            let predicted = i32::from(palette.region_prediction_sample(region, x, y));
             residual[local_y * TX4X4_SIZE + local_x] = original - predicted;
         }
     }
@@ -576,6 +586,12 @@ fn luma_palette_fsc_is_rate_worthy(
     chroma_intra_mode: Av2ChromaIntraMode,
 ) -> bool {
     let coded_mi_context = Av2CodedMiContext::new(PARTITION_CONTEXT_DIM, PARTITION_CONTEXT_DIM);
+    let region = palette.syntax_region_palette(
+        leaf_x0,
+        leaf_y0,
+        AV2_LUMA_PALETTE_BLOCK_SIZE,
+        AV2_LUMA_PALETTE_BLOCK_SIZE,
+    );
     let mut fsc_score = 96usize;
     let mut transform_score = 0usize;
 
@@ -589,7 +605,7 @@ fn luma_palette_fsc_is_rate_worthy(
                 Av2CoefficientProxyKind::LumaIdtx,
             );
             transform_score += coefficient_proxy_score(
-                &luma_palette_tx4x4_coefficients(palette, txb_x0, txb_y0),
+                &luma_palette_tx4x4_coefficients(palette, &region, txb_x0, txb_y0),
                 Av2CoefficientProxyKind::LumaTransform,
             );
 

@@ -13,7 +13,9 @@ fn write_luma_palette_mode_info(
     );
     let x0 = tile_origin_x + decision.col * MI_SIZE;
     let y0 = tile_origin_y + decision.row * MI_SIZE;
-    let colors = palette.colors_for_block(x0, y0);
+    let region =
+        palette.syntax_region_palette(x0, y0, decision.block_size.width, decision.block_size.height);
+    let colors = region.colors();
     assert!(
         (AV2_LUMA_PALETTE_MIN_COLORS..=AV2_LUMA_PALETTE_MAX_COLORS).contains(&colors.len()),
         "AV2 palette size must be within the spec range"
@@ -151,9 +153,12 @@ fn write_luma_palette_color_map(
 ) {
     let x0 = tile_origin_x + decision.col * MI_SIZE;
     let y0 = tile_origin_y + decision.row * MI_SIZE;
-    let colors = palette.color_count_for_block(x0, y0);
+    let region =
+        palette.syntax_region_palette(x0, y0, decision.block_size.width, decision.block_size.height);
+    let colors = region.color_count();
     let vertical_scan = choose_luma_palette_map_vertical_for_region(
         palette,
+        &region,
         x0,
         y0,
         decision.block_size.width,
@@ -178,8 +183,15 @@ fn write_luma_palette_color_map(
         decision.block_size.width
     };
     for outer in 0..outer_limit {
-        let identity_row_flag =
-            palette_identity_row_flag(palette, x0, y0, vertical_scan, outer, inner_limit);
+        let identity_row_flag = palette_identity_row_flag(
+            palette,
+            &region,
+            x0,
+            y0,
+            vertical_scan,
+            outer,
+            inner_limit,
+        );
         let ctx = if outer == 0 {
             3
         } else {
@@ -201,11 +213,12 @@ fn write_luma_palette_color_map(
                 writer.write_uniform(
                     "tile.palette.y_color_index_first",
                     colors as u32,
-                    u32::from(palette.index_at(x0 + col, y0 + row)),
+                    u32::from(palette.region_index_at(&region, x0 + col, y0 + row)),
                 );
             } else if identity_row_flag != 2 && (identity_row_flag != 1 || inner == 0) {
                 let (color_ctx, color_token) = palette_color_index_context(
                     palette,
+                    &region,
                     x0,
                     y0,
                     row,
@@ -231,6 +244,7 @@ fn write_luma_palette_color_map(
 
 fn choose_luma_palette_map_vertical_for_region(
     palette: &Av2LumaPalette444,
+    region: &Av2LumaPaletteRegion,
     x0: usize,
     y0: usize,
     width: usize,
@@ -240,20 +254,23 @@ fn choose_luma_palette_map_vertical_for_region(
         return false;
     }
 
-    let horizontal_rate = luma_palette_color_map_rate_q8(palette, x0, y0, width, height, false);
-    let vertical_rate = luma_palette_color_map_rate_q8(palette, x0, y0, width, height, true);
+    let horizontal_rate =
+        luma_palette_color_map_rate_q8(palette, region, x0, y0, width, height, false);
+    let vertical_rate =
+        luma_palette_color_map_rate_q8(palette, region, x0, y0, width, height, true);
     vertical_rate <= horizontal_rate
 }
 
 fn luma_palette_color_map_rate_q8(
     palette: &Av2LumaPalette444,
+    region: &Av2LumaPaletteRegion,
     x0: usize,
     y0: usize,
     width: usize,
     height: usize,
     vertical_scan: bool,
 ) -> u32 {
-    let colors = palette.color_count_for_block(x0, y0);
+    let colors = region.color_count();
     let mut rate = 0u32;
     let mut prev_identity_row_flag = 0usize;
     let outer_limit = if vertical_scan { width } else { height };
@@ -261,7 +278,7 @@ fn luma_palette_color_map_rate_q8(
 
     for outer in 0..outer_limit {
         let identity_row_flag =
-            palette_identity_row_flag(palette, x0, y0, vertical_scan, outer, inner_limit);
+            palette_identity_row_flag(palette, region, x0, y0, vertical_scan, outer, inner_limit);
         let ctx = if outer == 0 {
             3
         } else {
@@ -280,7 +297,7 @@ fn luma_palette_color_map_rate_q8(
             if identity_row_flag != 2 && (identity_row_flag != 1 || inner == 0) {
                 let (row, col) = palette_map_coordinate(vertical_scan, outer, inner);
                 let (color_ctx, color_token) =
-                    palette_color_index_context(palette, x0, y0, row, col, width);
+                    palette_color_index_context(palette, region, x0, y0, row, col, width);
                 rate = rate.saturating_add(cdf_symbol_rate_q8(
                     &DEFAULT_PALETTE_Y_COLOR_INDEX_CDFS[colors - AV2_LUMA_PALETTE_MIN_COLORS]
                         [color_ctx],
@@ -310,6 +327,7 @@ fn cdf_symbol_rate_q8(cdf: &[u16], symbol: usize, nsymbs: usize) -> u32 {
 
 fn palette_identity_row_flag(
     palette: &Av2LumaPalette444,
+    region: &Av2LumaPaletteRegion,
     x0: usize,
     y0: usize,
     vertical_scan: bool,
@@ -320,7 +338,8 @@ fn palette_identity_row_flag(
         && (0..inner_limit).all(|inner| {
             let (row, col) = palette_map_coordinate(vertical_scan, outer, inner);
             let (prev_row, prev_col) = palette_map_coordinate(vertical_scan, outer - 1, inner);
-            palette.index_at(x0 + col, y0 + row) == palette.index_at(x0 + prev_col, y0 + prev_row)
+            palette.region_index_at(region, x0 + col, y0 + row)
+                == palette.region_index_at(region, x0 + prev_col, y0 + prev_row)
         })
     {
         return 2;
@@ -328,7 +347,8 @@ fn palette_identity_row_flag(
     if (1..inner_limit).all(|inner| {
         let (row, col) = palette_map_coordinate(vertical_scan, outer, inner);
         let (prev_row, prev_col) = palette_map_coordinate(vertical_scan, outer, inner - 1);
-        palette.index_at(x0 + col, y0 + row) == palette.index_at(x0 + prev_col, y0 + prev_row)
+        palette.region_index_at(region, x0 + col, y0 + row)
+            == palette.region_index_at(region, x0 + prev_col, y0 + prev_row)
     }) {
         1
     } else {
@@ -346,6 +366,7 @@ fn palette_map_coordinate(vertical_scan: bool, outer: usize, inner: usize) -> (u
 
 fn palette_color_index_context(
     palette: &Av2LumaPalette444,
+    region: &Av2LumaPaletteRegion,
     x0: usize,
     y0: usize,
     row: usize,
@@ -359,9 +380,9 @@ fn palette_color_index_context(
     let color_index_ctx;
 
     if row > 0 && col > 0 {
-        let left = palette.index_at(x0 + col - 1, y0 + row);
-        let top_left = palette.index_at(x0 + col - 1, y0 + row - 1);
-        let top = palette.index_at(x0 + col, y0 + row - 1);
+        let left = palette.region_index_at(region, x0 + col - 1, y0 + row);
+        let top_left = palette.region_index_at(region, x0 + col - 1, y0 + row - 1);
+        let top = palette.region_index_at(region, x0 + col, y0 + row - 1);
         if left == top_left && left == top {
             color_index_ctx = 4;
             swap_palette_color_order(
@@ -446,9 +467,9 @@ fn palette_color_index_context(
     } else {
         color_index_ctx = 0;
         let neighbor = if col == 0 {
-            palette.index_at(x0 + col, y0 + row - 1)
+            palette.region_index_at(region, x0 + col, y0 + row - 1)
         } else {
-            palette.index_at(x0 + col - 1, y0 + row)
+            palette.region_index_at(region, x0 + col - 1, y0 + row)
         };
         swap_palette_color_order(
             &mut color_order,
@@ -460,14 +481,14 @@ fn palette_color_index_context(
     }
 
     let mut write_idx = color_count;
-    let color_count = palette.color_count_for_block(x0, y0);
+    let color_count = region.color_count();
     for read_idx in 0..color_count {
         if !color_status[read_idx] {
             color_order[write_idx] = read_idx as u8;
             write_idx += 1;
         }
     }
-    let current_color = palette.index_at(x0 + col, y0 + row);
+    let current_color = palette.region_index_at(region, x0 + col, y0 + row);
     let color_token = color_order
         .iter()
         .take(color_count)
