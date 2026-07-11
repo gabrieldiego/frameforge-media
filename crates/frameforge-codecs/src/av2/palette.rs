@@ -20,8 +20,19 @@ const AV2_CHROMA_BDPCM_LEVEL_SCALE: usize = 20000;
 const AV2_ENABLE_LUMA_DPCM_444: bool = true;
 const AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT: usize = 5;
 const AV2_LUMA_DIRECTIONAL_MODE_COUNT: usize = 56;
+const AV2_LUMA_JOINT_MODE_D45: usize = 8;
+const AV2_LUMA_JOINT_MODE_D67: usize = 15;
 const AV2_LUMA_JOINT_MODE_V: usize = 22;
+const AV2_LUMA_JOINT_MODE_D113: usize = 29;
+const AV2_LUMA_JOINT_MODE_D135: usize = 36;
+const AV2_LUMA_JOINT_MODE_D157: usize = 43;
 const AV2_LUMA_JOINT_MODE_H: usize = 50;
+const AV2_LUMA_JOINT_MODE_D203: usize = 57;
+const AV2_LUMA_DEFAULT_DIRECTIONAL_MODE_LIST: [usize; AV2_LUMA_DIRECTIONAL_MODE_COUNT] = [
+    22, 50, 8, 15, 29, 36, 43, 57, 20, 24, 48, 52, 6, 10, 13, 17, 27, 31, 34, 38, 41, 45, 55, 59,
+    21, 23, 49, 51, 7, 9, 14, 16, 28, 30, 35, 37, 42, 44, 56, 58, 19, 25, 47, 53, 5, 11, 12, 18,
+    26, 32, 33, 39, 40, 46, 54, 60,
+];
 const AV2_LUMA_PALETTE_BLOCK_SAMPLES: usize =
     AV2_LUMA_PALETTE_BLOCK_SIZE * AV2_LUMA_PALETTE_BLOCK_SIZE;
 
@@ -32,8 +43,14 @@ pub(crate) enum Av2LumaIntraMode {
     SmoothVertical,
     SmoothHorizontal,
     Paeth,
+    Directional45,
+    Directional67,
     Vertical,
+    Directional113,
+    Directional135,
+    Directional157,
     Horizontal,
+    Directional203,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +84,29 @@ impl Av2LumaIntraMode {
             Self::SmoothVertical => 2,
             Self::SmoothHorizontal => 3,
             Self::Paeth => 4,
-            Self::Vertical => 5,
-            Self::Horizontal => 6,
+            Self::Directional45 => 5,
+            Self::Directional67 => 6,
+            Self::Vertical => 7,
+            Self::Directional113 => 8,
+            Self::Directional135 => 9,
+            Self::Directional157 => 10,
+            Self::Horizontal => 11,
+            Self::Directional203 => 12,
         }
     }
 
     fn is_directional(self) -> bool {
-        matches!(self, Self::Vertical | Self::Horizontal)
+        matches!(
+            self,
+            Self::Directional45
+                | Self::Directional67
+                | Self::Vertical
+                | Self::Directional113
+                | Self::Directional135
+                | Self::Directional157
+                | Self::Horizontal
+                | Self::Directional203
+        )
     }
 
     fn joint_mode(self) -> usize {
@@ -81,8 +114,14 @@ impl Av2LumaIntraMode {
             Self::Dc => 0,
             Self::Smooth | Self::SmoothVertical | Self::SmoothHorizontal => 0,
             Self::Paeth => 0,
+            Self::Directional45 => AV2_LUMA_JOINT_MODE_D45,
+            Self::Directional67 => AV2_LUMA_JOINT_MODE_D67,
             Self::Vertical => AV2_LUMA_JOINT_MODE_V,
+            Self::Directional113 => AV2_LUMA_JOINT_MODE_D113,
+            Self::Directional135 => AV2_LUMA_JOINT_MODE_D135,
+            Self::Directional157 => AV2_LUMA_JOINT_MODE_D157,
             Self::Horizontal => AV2_LUMA_JOINT_MODE_H,
+            Self::Directional203 => AV2_LUMA_JOINT_MODE_D203,
         }
     }
 
@@ -93,8 +132,14 @@ impl Av2LumaIntraMode {
             Self::SmoothVertical => "tile.intra.y_mode_idx_smooth_v",
             Self::SmoothHorizontal => "tile.intra.y_mode_idx_smooth_h",
             Self::Paeth => "tile.intra.y_mode_idx_paeth",
+            Self::Directional45 => "tile.intra.y_mode_idx_d45",
+            Self::Directional67 => "tile.intra.y_mode_idx_d67",
             Self::Vertical => "tile.intra.y_mode_idx_v",
+            Self::Directional113 => "tile.intra.y_mode_idx_d113",
+            Self::Directional135 => "tile.intra.y_mode_idx_d135",
+            Self::Directional157 => "tile.intra.y_mode_idx_d157",
             Self::Horizontal => "tile.intra.y_mode_idx_h",
+            Self::Directional203 => "tile.intra.y_mode_idx_d203",
         }
     }
 }
@@ -1432,8 +1477,14 @@ fn choose_luma_intra_mode(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Av2LumaModeSyntax {
     pub(crate) context: u8,
+    d45_index: u8,
+    d67_index: u8,
     vertical_index: u8,
+    d113_index: u8,
+    d135_index: u8,
+    d157_index: u8,
     horizontal_index: u8,
+    d203_index: u8,
 }
 
 impl Av2LumaModeSyntax {
@@ -1444,8 +1495,14 @@ impl Av2LumaModeSyntax {
             Av2LumaIntraMode::SmoothVertical => 2,
             Av2LumaIntraMode::SmoothHorizontal => 3,
             Av2LumaIntraMode::Paeth => 4,
+            Av2LumaIntraMode::Directional45 => self.d45_index,
+            Av2LumaIntraMode::Directional67 => self.d67_index,
             Av2LumaIntraMode::Vertical => self.vertical_index,
+            Av2LumaIntraMode::Directional113 => self.d113_index,
+            Av2LumaIntraMode::Directional135 => self.d135_index,
+            Av2LumaIntraMode::Directional157 => self.d157_index,
             Av2LumaIntraMode::Horizontal => self.horizontal_index,
+            Av2LumaIntraMode::Directional203 => self.d203_index,
         }
     }
 }
@@ -1473,20 +1530,38 @@ pub(crate) fn av2_luma_mode_syntax_for_block(
         *entry = true;
     }
     let mut mode_index = AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT;
+    let mut d45_index = None;
+    let mut d67_index = None;
     let mut vertical_index = None;
+    let mut d113_index = None;
+    let mut d135_index = None;
+    let mut d157_index = None;
     let mut horizontal_index = None;
+    let mut d203_index = None;
     let mut add_mode = |joint_mode: usize,
                         mode_index: &mut usize,
+                        d45_index: &mut Option<u8>,
+                        d67_index: &mut Option<u8>,
                         vertical_index: &mut Option<u8>,
-                        horizontal_index: &mut Option<u8>| {
+                        d113_index: &mut Option<u8>,
+                        d135_index: &mut Option<u8>,
+                        d157_index: &mut Option<u8>,
+                        horizontal_index: &mut Option<u8>,
+                        d203_index: &mut Option<u8>| {
         if selected[joint_mode] {
             return;
         }
         selected[joint_mode] = true;
-        if joint_mode == AV2_LUMA_JOINT_MODE_V {
-            *vertical_index = Some(*mode_index as u8);
-        } else if joint_mode == AV2_LUMA_JOINT_MODE_H {
-            *horizontal_index = Some(*mode_index as u8);
+        match joint_mode {
+            AV2_LUMA_JOINT_MODE_D45 => *d45_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_D67 => *d67_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_V => *vertical_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_D113 => *d113_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_D135 => *d135_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_D157 => *d157_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_H => *horizontal_index = Some(*mode_index as u8),
+            AV2_LUMA_JOINT_MODE_D203 => *d203_index = Some(*mode_index as u8),
+            _ => {}
         }
         *mode_index += 1;
     };
@@ -1513,8 +1588,14 @@ pub(crate) fn av2_luma_mode_syntax_for_block(
         add_mode(
             joint_mode,
             &mut mode_index,
+            &mut d45_index,
+            &mut d67_index,
             &mut vertical_index,
+            &mut d113_index,
+            &mut d135_index,
+            &mut d157_index,
             &mut horizontal_index,
+            &mut d203_index,
         );
     }
 
@@ -1533,8 +1614,14 @@ pub(crate) fn av2_luma_mode_syntax_for_block(
                 add_mode(
                     left_derived,
                     &mut mode_index,
+                    &mut d45_index,
+                    &mut d67_index,
                     &mut vertical_index,
+                    &mut d113_index,
+                    &mut d135_index,
+                    &mut d157_index,
                     &mut horizontal_index,
+                    &mut d203_index,
                 );
                 let right_derived = (joint_mode + offset
                     - (AV2_LUMA_NON_DIRECTIONAL_MODE_COUNT - 1))
@@ -1543,26 +1630,44 @@ pub(crate) fn av2_luma_mode_syntax_for_block(
                 add_mode(
                     right_derived,
                     &mut mode_index,
+                    &mut d45_index,
+                    &mut d67_index,
                     &mut vertical_index,
+                    &mut d113_index,
+                    &mut d135_index,
+                    &mut d157_index,
                     &mut horizontal_index,
+                    &mut d203_index,
                 );
             }
         }
     }
 
-    for joint_mode in [AV2_LUMA_JOINT_MODE_V, AV2_LUMA_JOINT_MODE_H] {
+    for joint_mode in AV2_LUMA_DEFAULT_DIRECTIONAL_MODE_LIST {
         add_mode(
             joint_mode,
             &mut mode_index,
+            &mut d45_index,
+            &mut d67_index,
             &mut vertical_index,
+            &mut d113_index,
+            &mut d135_index,
+            &mut d157_index,
             &mut horizontal_index,
+            &mut d203_index,
         );
     }
 
     Av2LumaModeSyntax {
         context,
+        d45_index: d45_index.expect("D45 mode is present in AV2 luma mode list"),
+        d67_index: d67_index.expect("D67 mode is present in AV2 luma mode list"),
         vertical_index: vertical_index.expect("V mode is present in AV2 luma mode list"),
+        d113_index: d113_index.expect("D113 mode is present in AV2 luma mode list"),
+        d135_index: d135_index.expect("D135 mode is present in AV2 luma mode list"),
+        d157_index: d157_index.expect("D157 mode is present in AV2 luma mode list"),
         horizontal_index: horizontal_index.expect("H mode is present in AV2 luma mode list"),
+        d203_index: d203_index.expect("D203 mode is present in AV2 luma mode list"),
     }
 }
 
@@ -1606,8 +1711,14 @@ fn luma_intra_prediction_sample(
         | Av2LumaIntraMode::SmoothHorizontal => {
             unreachable!("the 4:4:4 palette path does not select smooth luma prediction")
         }
-        Av2LumaIntraMode::Paeth => {
-            unreachable!("the 4:4:4 palette path does not select Paeth luma prediction")
+        Av2LumaIntraMode::Paeth
+        | Av2LumaIntraMode::Directional45
+        | Av2LumaIntraMode::Directional67
+        | Av2LumaIntraMode::Directional113
+        | Av2LumaIntraMode::Directional135
+        | Av2LumaIntraMode::Directional157
+        | Av2LumaIntraMode::Directional203 => {
+            unreachable!("the 4:4:4 palette path does not select this luma prediction mode")
         }
         // AV2 v1.0.0 Section 5.20.7 residual syntax uses 4x4 TXBs here, and
         // AVM calls av2_predict_intra_block() for each TXB. The second 4x4 in

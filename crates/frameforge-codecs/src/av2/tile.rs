@@ -3716,7 +3716,14 @@ fn write_lossless_tx_size_4x4(writer: &mut Av2EntropyWriter, block_size: Av2MvpB
 fn luma_mode_is_directional(mode: Av2LumaIntraMode) -> bool {
     matches!(
         mode,
-        Av2LumaIntraMode::Vertical | Av2LumaIntraMode::Horizontal
+        Av2LumaIntraMode::Directional45
+            | Av2LumaIntraMode::Directional67
+            | Av2LumaIntraMode::Vertical
+            | Av2LumaIntraMode::Directional113
+            | Av2LumaIntraMode::Directional135
+            | Av2LumaIntraMode::Directional157
+            | Av2LumaIntraMode::Horizontal
+            | Av2LumaIntraMode::Directional203
     )
 }
 
@@ -3746,8 +3753,14 @@ fn chroma_uv_mode_index(luma_mode: Av2LumaIntraMode, chroma_mode: Av2ChromaIntra
     let target = chroma_uv_mode_id(chroma_mode);
     let mut index = 0usize;
     let luma_directional = match luma_mode {
+        Av2LumaIntraMode::Directional45 => Some(3usize),
+        Av2LumaIntraMode::Directional67 => Some(8usize),
         Av2LumaIntraMode::Vertical => Some(1usize),
+        Av2LumaIntraMode::Directional113 => Some(5usize),
+        Av2LumaIntraMode::Directional135 => Some(4usize),
+        Av2LumaIntraMode::Directional157 => Some(6usize),
         Av2LumaIntraMode::Horizontal => Some(2usize),
+        Av2LumaIntraMode::Directional203 => Some(7usize),
         Av2LumaIntraMode::Dc
         | Av2LumaIntraMode::Smooth
         | Av2LumaIntraMode::SmoothVertical
@@ -4653,8 +4666,14 @@ fn chroma_mode_for_luma_mode(mode: Av2LumaIntraMode) -> Av2ChromaIntraMode {
         Av2LumaIntraMode::SmoothVertical => Av2ChromaIntraMode::SmoothVertical,
         Av2LumaIntraMode::SmoothHorizontal => Av2ChromaIntraMode::SmoothHorizontal,
         Av2LumaIntraMode::Paeth => Av2ChromaIntraMode::Paeth,
+        Av2LumaIntraMode::Directional45 => Av2ChromaIntraMode::Directional45,
+        Av2LumaIntraMode::Directional67 => Av2ChromaIntraMode::Directional67,
         Av2LumaIntraMode::Vertical => Av2ChromaIntraMode::Vertical,
+        Av2LumaIntraMode::Directional113 => Av2ChromaIntraMode::Directional113,
+        Av2LumaIntraMode::Directional135 => Av2ChromaIntraMode::Directional135,
+        Av2LumaIntraMode::Directional157 => Av2ChromaIntraMode::Directional157,
         Av2LumaIntraMode::Horizontal => Av2ChromaIntraMode::Horizontal,
+        Av2LumaIntraMode::Directional203 => Av2ChromaIntraMode::Directional203,
     }
 }
 
@@ -5021,6 +5040,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     Av2ChromaIntraMode::Horizontal => self.h_predictor(plane, x0, y0, local_y),
                     Av2ChromaIntraMode::Vertical => self.v_predictor(plane, x0, y0, local_x),
                     Av2ChromaIntraMode::Directional45 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let above = self.directional_above_edge(
                             plane,
                             x0,
@@ -5033,6 +5064,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         above[local_y + local_x + 1]
                     }
                     Av2ChromaIntraMode::Directional67 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let above = self.directional_above_edge(
                             plane,
                             x0,
@@ -5045,6 +5088,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         directional_interpolate(above, local_x, local_y)
                     }
                     Av2ChromaIntraMode::Directional135 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let edges = self.directional_d135_edges(plane, x0, y0);
                         if local_x >= local_y {
                             let offset = local_x - local_y;
@@ -5058,14 +5113,50 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         }
                     }
                     Av2ChromaIntraMode::Directional113 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let edges = self.directional_d135_edges(plane, x0, y0);
                         zone2_directional_predictor(edges, 24, 170, local_x, local_y)
                     }
                     Av2ChromaIntraMode::Directional157 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let edges = self.directional_d135_edges(plane, x0, y0);
                         zone2_directional_predictor(edges, 170, 24, local_x, local_y)
                     }
                     Av2ChromaIntraMode::Directional203 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let left = self.directional_left_edge(
                             plane,
                             x0,
@@ -5180,6 +5271,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         self.v_predictor_for_score(plane, x0, y0, local_x, leaf_x0, leaf_y0)
                     }
                     Av2ChromaIntraMode::Directional45 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4_for_score(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let above = self.directional_above_edge_for_score(
                             plane,
                             x0,
@@ -5192,6 +5295,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         above[local_y + local_x + 1]
                     }
                     Av2ChromaIntraMode::Directional67 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4_for_score(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let above = self.directional_above_edge_for_score(
                             plane,
                             x0,
@@ -5204,6 +5319,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         directional_interpolate(above, local_x, local_y)
                     }
                     Av2ChromaIntraMode::Directional135 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4_for_score(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let edges =
                             self.directional_d135_edges_for_score(plane, x0, y0, leaf_x0, leaf_y0);
                         if local_x >= local_y {
@@ -5218,16 +5345,52 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         }
                     }
                     Av2ChromaIntraMode::Directional113 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4_for_score(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let edges =
                             self.directional_d135_edges_for_score(plane, x0, y0, leaf_x0, leaf_y0);
                         zone2_directional_predictor(edges, 24, 170, local_x, local_y)
                     }
                     Av2ChromaIntraMode::Directional157 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4_for_score(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let edges =
                             self.directional_d135_edges_for_score(plane, x0, y0, leaf_x0, leaf_y0);
                         zone2_directional_predictor(edges, 170, 24, local_x, local_y)
                     }
                     Av2ChromaIntraMode::Directional203 => {
+                        if plane == Av2LosslessPlane::Y {
+                            return self.luma_directional_idif_residual4x4_for_score(
+                                x0,
+                                y0,
+                                mode,
+                                leaf_x0,
+                                leaf_y0,
+                                leaf_width,
+                                leaf_height,
+                                coded_mi_context,
+                            );
+                        }
                         let left = self.directional_left_edge_for_score(
                             plane,
                             x0,
@@ -5381,6 +5544,319 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         } else {
             av2_lossless_v_pred_above_edge(self.bit_depth)
         }
+    }
+
+    fn luma_directional_idif_residual4x4(
+        &self,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let edge_sample = |plane, x, y| self.recon_sample(plane, x, y);
+        let source_sample = |plane, x, y| self.source_sample(plane, x, y);
+        self.luma_directional_idif_residual4x4_with(
+            x0,
+            y0,
+            mode,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+            coded_mi_context,
+            edge_sample,
+            source_sample,
+        )
+    }
+
+    fn luma_directional_idif_residual4x4_for_score(
+        &self,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let edge_sample =
+            |plane, x, y| self.neighbor_sample_for_score(plane, x, y, leaf_x0, leaf_y0);
+        let source_sample = |plane, x, y| self.source_sample(plane, x, y);
+        self.luma_directional_idif_residual4x4_with(
+            x0,
+            y0,
+            mode,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+            coded_mi_context,
+            edge_sample,
+            source_sample,
+        )
+    }
+
+    fn luma_directional_idif_residual4x4_with<EdgeSample, SourceSample>(
+        &self,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+        edge_sample: EdgeSample,
+        source_sample: SourceSample,
+    ) -> [i32; TX4X4_SAMPLES]
+    where
+        EdgeSample: Fn(Av2LosslessPlane, usize, usize) -> Av2Sample,
+        SourceSample: Fn(Av2LosslessPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(Av2LosslessPlane::Y);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let base = av2_lossless_dc_predictor(self.bit_depth);
+
+        let constant_predictor = match mode {
+            Av2ChromaIntraMode::Directional45 | Av2ChromaIntraMode::Directional67 if !have_top => {
+                Some(if have_left {
+                    edge_sample(Av2LosslessPlane::Y, x0 - 1, y0)
+                } else {
+                    base.saturating_sub(1)
+                })
+            }
+            Av2ChromaIntraMode::Directional203 if !have_left => Some(if have_top {
+                edge_sample(Av2LosslessPlane::Y, x0, y0 - 1)
+            } else {
+                base.saturating_add(1)
+            }),
+            _ => None,
+        };
+
+        let edges = constant_predictor.is_none().then(|| {
+            self.luma_directional_idif_edges_with(
+                x0,
+                y0,
+                mode,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+                coded_mi_context,
+                &edge_sample,
+            )
+        });
+
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let predictor = constant_predictor.unwrap_or_else(|| {
+                    luma_directional_idif_predictor(
+                        mode,
+                        edges.expect("IDIF edges are precomputed"),
+                        local_x,
+                        local_y,
+                        self.bit_depth,
+                    )
+                });
+                residual[local_y * TX4X4_SIZE + local_x] = i32::from(source_sample(
+                    Av2LosslessPlane::Y,
+                    x0 + local_x,
+                    y0 + local_y,
+                )) - i32::from(predictor);
+            }
+        }
+        residual
+    }
+
+    fn luma_directional_idif_edges_with<EdgeSample>(
+        &self,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+        edge_sample: &EdgeSample,
+    ) -> DirectionalIdifEdges
+    where
+        EdgeSample: Fn(Av2LosslessPlane, usize, usize) -> Av2Sample,
+    {
+        let above_core = self.directional_above_edge_with(
+            Av2LosslessPlane::Y,
+            x0,
+            y0,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            coded_mi_context,
+            edge_sample,
+        );
+        let left_core = self.directional_left_edge_with(
+            Av2LosslessPlane::Y,
+            x0,
+            y0,
+            leaf_x0,
+            leaf_y0,
+            leaf_height,
+            coded_mi_context,
+            edge_sample,
+        );
+        let above_left = self.above_left_predictor_with(Av2LosslessPlane::Y, x0, y0, edge_sample);
+        let mut edges = DirectionalIdifEdges::new(self.bit_depth);
+        edges.set_above(-2, above_left);
+        edges.set_above(-1, above_left);
+        edges.set_left(-2, above_left);
+        edges.set_left(-1, above_left);
+        for index in 0..8 {
+            edges.set_above(index as i32, above_core[index]);
+            edges.set_left(index as i32, left_core[index]);
+        }
+        if matches!(
+            mode,
+            Av2ChromaIntraMode::Directional113
+                | Av2ChromaIntraMode::Directional135
+                | Av2ChromaIntraMode::Directional157
+        ) {
+            for index in TX4X4_SIZE..8 {
+                edges.set_above(index as i32, above_core[TX4X4_SIZE - 1]);
+                edges.set_left(index as i32, left_core[TX4X4_SIZE - 1]);
+            }
+        }
+        edges.set_above(8, edges.above(7));
+        edges.set_above(9, edges.above(7));
+        edges.set_left(8, edges.left(7));
+        edges.set_left(9, edges.left(7));
+        edges
+    }
+
+    fn above_left_predictor_with<EdgeSample>(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        edge_sample: &EdgeSample,
+    ) -> Av2Sample
+    where
+        EdgeSample: Fn(Av2LosslessPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if have_left && have_top {
+            edge_sample(plane, x0 - 1, y0 - 1)
+        } else if have_top {
+            edge_sample(plane, x0, y0 - 1)
+        } else if have_left {
+            edge_sample(plane, x0 - 1, y0)
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        }
+    }
+
+    fn directional_above_edge_with<EdgeSample>(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        coded_mi_context: &Av2CodedMiContext,
+        edge_sample: &EdgeSample,
+    ) -> [Av2Sample; 8]
+    where
+        EdgeSample: Fn(Av2LosslessPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, _) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); 8];
+        if have_top {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+            let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+            let superblock_top_row = y0 % plane_sb_height == 0;
+            for index in 0..above.len() {
+                let x = x0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_top_right_coded = overhang && y0 == leaf_y0 && x < plane_width && {
+                    let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x, y0 - 1);
+                    superblock_top_row
+                        || (x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
+                };
+                if x < plane_width
+                    && (!overhang || x < leaf_x0 + leaf_width || external_top_right_coded)
+                {
+                    above[index] = edge_sample(plane, x, y0 - 1);
+                } else if index > 0 {
+                    above[index] = above[index - 1];
+                }
+            }
+        } else if have_left {
+            above.fill(edge_sample(plane, x0 - 1, y0));
+        }
+        above
+    }
+
+    fn directional_left_edge_with<EdgeSample>(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+        edge_sample: &EdgeSample,
+    ) -> [Av2Sample; 8]
+    where
+        EdgeSample: Fn(Av2LosslessPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (_, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); 8];
+        if have_left {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+            let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+            let superblock_left_col = x0 % plane_sb_width == 0;
+            for index in 0..left.len() {
+                let y = y0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_bottom_left_coded = overhang && x0 == leaf_x0 && y < sb_bottom && {
+                    let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, x0 - 1, y);
+                    superblock_left_col || coded_mi_context.is_coded(row_mi, col_mi)
+                };
+                if y < plane_height
+                    && (!overhang
+                        || (x0 == leaf_x0
+                            && (y < leaf_y0 + leaf_height || external_bottom_left_coded)))
+                {
+                    left[index] = edge_sample(plane, x0 - 1, y);
+                } else if index > 0 {
+                    left[index] = left[index - 1];
+                }
+            }
+        } else if have_top {
+            left.fill(edge_sample(plane, x0, y0 - 1));
+        }
+        left
     }
 
     fn directional_above_edge(
@@ -5911,8 +6387,14 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 (Av2LumaIntraMode::SmoothVertical, None, 192usize),
                 (Av2LumaIntraMode::SmoothHorizontal, None, 192usize),
                 (Av2LumaIntraMode::Paeth, None, 128usize),
+                (Av2LumaIntraMode::Directional45, None, 192usize),
+                (Av2LumaIntraMode::Directional67, None, 192usize),
                 (Av2LumaIntraMode::Horizontal, None, 32usize),
                 (Av2LumaIntraMode::Vertical, None, 32usize),
+                (Av2LumaIntraMode::Directional113, None, 192usize),
+                (Av2LumaIntraMode::Directional135, None, 192usize),
+                (Av2LumaIntraMode::Directional157, None, 192usize),
+                (Av2LumaIntraMode::Directional203, None, 192usize),
                 (Av2LumaIntraMode::Horizontal, Some(true), 64usize),
                 (Av2LumaIntraMode::Vertical, Some(false), 64usize),
             ];
@@ -7262,6 +7744,211 @@ fn chroma_d45_above_edge(
         above.fill(chroma_sample(palette, plane, txb_x0 - 1, txb_y0));
     }
     above
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectionalIdifEdges {
+    above: [Av2Sample; 12],
+    left: [Av2Sample; 12],
+}
+
+impl DirectionalIdifEdges {
+    const OFFSET: i32 = 2;
+
+    fn new(bit_depth: SampleBitDepth) -> Self {
+        Self {
+            above: [av2_lossless_v_pred_above_edge(bit_depth); 12],
+            left: [av2_lossless_h_pred_left_edge(bit_depth); 12],
+        }
+    }
+
+    fn above(self, index: i32) -> Av2Sample {
+        self.above[(index + Self::OFFSET) as usize]
+    }
+
+    fn left(self, index: i32) -> Av2Sample {
+        self.left[(index + Self::OFFSET) as usize]
+    }
+
+    fn set_above(&mut self, index: i32, sample: Av2Sample) {
+        self.above[(index + Self::OFFSET) as usize] = sample;
+    }
+
+    fn set_left(&mut self, index: i32, sample: Av2Sample) {
+        self.left[(index + Self::OFFSET) as usize] = sample;
+    }
+}
+
+const AV2_DR_INTERP_FILTER_BITS: u32 = 7;
+const AV2_DR_INTERP_FILTER: [[i32; 4]; 32] = [
+    [0, 128, 0, 0],
+    [-2, 127, 4, -1],
+    [-3, 125, 8, -2],
+    [-5, 123, 13, -3],
+    [-6, 121, 17, -4],
+    [-7, 118, 22, -5],
+    [-9, 116, 27, -6],
+    [-9, 112, 32, -7],
+    [-10, 109, 37, -8],
+    [-11, 106, 41, -8],
+    [-11, 102, 46, -9],
+    [-12, 98, 52, -10],
+    [-12, 94, 56, -10],
+    [-12, 90, 61, -11],
+    [-12, 85, 66, -11],
+    [-12, 81, 71, -12],
+    [-12, 76, 76, -12],
+    [-12, 71, 81, -12],
+    [-11, 66, 85, -12],
+    [-11, 61, 90, -12],
+    [-10, 56, 94, -12],
+    [-10, 52, 98, -12],
+    [-9, 46, 102, -11],
+    [-8, 41, 106, -11],
+    [-8, 37, 109, -10],
+    [-7, 32, 112, -9],
+    [-6, 27, 116, -9],
+    [-5, 22, 118, -7],
+    [-4, 17, 121, -6],
+    [-3, 13, 123, -5],
+    [-2, 8, 125, -3],
+    [-1, 4, 127, -2],
+];
+
+fn luma_directional_idif_predictor(
+    mode: Av2ChromaIntraMode,
+    edges: DirectionalIdifEdges,
+    local_x: usize,
+    local_y: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    match mode {
+        Av2ChromaIntraMode::Directional45 => {
+            luma_directional_idif_zone1(edges, 64, local_x, local_y, bit_depth)
+        }
+        Av2ChromaIntraMode::Directional67 => {
+            luma_directional_idif_zone1(edges, 24, local_x, local_y, bit_depth)
+        }
+        Av2ChromaIntraMode::Directional113 => {
+            luma_directional_idif_zone2(edges, 24, 170, local_x, local_y, bit_depth)
+        }
+        Av2ChromaIntraMode::Directional135 => {
+            luma_directional_idif_zone2(edges, 64, 64, local_x, local_y, bit_depth)
+        }
+        Av2ChromaIntraMode::Directional157 => {
+            luma_directional_idif_zone2(edges, 170, 24, local_x, local_y, bit_depth)
+        }
+        Av2ChromaIntraMode::Directional203 => {
+            luma_directional_idif_zone3(edges, 24, local_x, local_y, bit_depth)
+        }
+        _ => unreachable!("IDIF is only used for luma directional modes"),
+    }
+}
+
+fn luma_directional_idif_zone1(
+    edges: DirectionalIdifEdges,
+    dx: i32,
+    local_x: usize,
+    local_y: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    let projected_x = dx * (local_y as i32 + 1);
+    let base = (projected_x >> 6) + local_x as i32;
+    let shift = ((projected_x & 0x3f) >> 1) as usize;
+    if base <= 7 {
+        luma_directional_idif_filter_above(edges, base, shift, bit_depth)
+    } else {
+        edges.above(7)
+    }
+}
+
+fn luma_directional_idif_zone2(
+    edges: DirectionalIdifEdges,
+    dx: i32,
+    dy: i32,
+    local_x: usize,
+    local_y: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    let projected_x = ((local_x as i32) << 6) - (local_y as i32 + 1) * dx;
+    let base_x = projected_x >> 6;
+    if base_x >= -1 {
+        let shift = ((projected_x & 0x3f) >> 1) as usize;
+        return luma_directional_idif_filter_above(edges, base_x, shift, bit_depth);
+    }
+
+    let projected_y = ((local_y as i32) << 6) - (local_x as i32 + 1) * dy;
+    let base_y = projected_y >> 6;
+    debug_assert!(base_y >= -1);
+    let shift = ((projected_y & 0x3f) >> 1) as usize;
+    luma_directional_idif_filter_left(edges, base_y, shift, bit_depth)
+}
+
+fn luma_directional_idif_zone3(
+    edges: DirectionalIdifEdges,
+    dy: i32,
+    local_x: usize,
+    local_y: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    let projected_y = dy * (local_x as i32 + 1);
+    let base = (projected_y >> 6) + local_y as i32;
+    let shift = ((projected_y & 0x3f) >> 1) as usize;
+    if base <= 7 {
+        luma_directional_idif_filter_left(edges, base, shift, bit_depth)
+    } else {
+        edges.left(7)
+    }
+}
+
+fn luma_directional_idif_filter_above(
+    edges: DirectionalIdifEdges,
+    base: i32,
+    shift: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    luma_directional_idif_filter(
+        [
+            edges.above(base - 1),
+            edges.above(base),
+            edges.above(base + 1),
+            edges.above(base + 2),
+        ],
+        shift,
+        bit_depth,
+    )
+}
+
+fn luma_directional_idif_filter_left(
+    edges: DirectionalIdifEdges,
+    base: i32,
+    shift: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    luma_directional_idif_filter(
+        [
+            edges.left(base - 1),
+            edges.left(base),
+            edges.left(base + 1),
+            edges.left(base + 2),
+        ],
+        shift,
+        bit_depth,
+    )
+}
+
+fn luma_directional_idif_filter(
+    refs: [Av2Sample; 4],
+    shift: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    let filter = AV2_DR_INTERP_FILTER[shift];
+    let value = filter[0] * i32::from(refs[0])
+        + filter[1] * i32::from(refs[1])
+        + filter[2] * i32::from(refs[2])
+        + filter[3] * i32::from(refs[3]);
+    let rounded = (value + (1 << (AV2_DR_INTERP_FILTER_BITS - 1))) >> AV2_DR_INTERP_FILTER_BITS;
+    rounded.clamp(0, i32::from(bit_depth.max_sample())) as Av2Sample
 }
 
 #[derive(Debug, Clone, Copy)]
