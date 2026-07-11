@@ -178,12 +178,19 @@ fn count_vvc_picture_nals(infos: &[VvcNalInfo]) -> usize {
 }
 
 fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
+    let luma_negative = y < VVC_LUMA_DC_BASE as u8 && luma_rem != 0;
+    let luma_dc_level = if luma_negative {
+        -(luma_rem as i16)
+    } else {
+        luma_rem as i16
+    };
     VvcQuantizedColor {
         y,
         u: 0,
         v: 0,
         luma_tu_remainders: [luma_rem; MAX_VVC_LUMA_TUS],
-        luma_tu_negative: [y < VVC_LUMA_DC_BASE as u8 && luma_rem != 0; MAX_VVC_LUMA_TUS],
+        luma_tu_negative: [luma_negative; MAX_VVC_LUMA_TUS],
+        luma_tu_dc_levels: [luma_dc_level; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         luma_tu_count: 1,
         chroma_tu_count: 0,
@@ -1073,6 +1080,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             luma_tu_count: 0,
             luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
+            luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
@@ -1120,8 +1128,7 @@ fn vvc_ctu_cabac_generator_is_embedded_in_ctu_body() {
     let mut manual = VvcCabacEncoder::new();
     let mut ctu = VvcCtuCabacGenerator::new(
         params.luma_tu_count,
-        params.luma_tu_abs_levels,
-        params.luma_tu_negative,
+        params.luma_tu_dc_levels,
         params.luma_tu_ac_levels,
         params.chroma_tu_count,
         params.cb_tu_dc_levels,
@@ -1211,6 +1218,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             luma_tu_count: 0,
             luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
+            luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,

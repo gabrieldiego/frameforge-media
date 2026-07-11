@@ -1425,7 +1425,7 @@ fn vvc_ctu_partition_params(
         chroma_sampling,
     };
     let chroma_tu_count = vvc_chroma_420_transform_nodes(shape).len();
-    let (luma_tu_count, luma_tu_abs_levels, luma_tu_negative, luma_tu_ac_levels) =
+    let (luma_tu_count, luma_tu_abs_levels, luma_tu_negative, luma_tu_dc_levels, luma_tu_ac_levels) =
         vvc_luma_residual_arrays_for_geometry(coded, chroma_sampling, color);
     Some(VvcCtuPartitionParams {
         root_width: VVC_CTU_SIZE,
@@ -1437,6 +1437,7 @@ fn vvc_ctu_partition_params(
         luma_tu_count,
         luma_tu_abs_levels,
         luma_tu_negative,
+        luma_tu_dc_levels,
         luma_tu_ac_levels,
         cb_dc_abs_level: color.cb_rem,
         cb_dc_negative: color.u < 128 && color.cb_rem != 0,
@@ -1455,17 +1456,20 @@ fn vvc_luma_residual_arrays_for_geometry(
     usize,
     [u8; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
+    [i16; MAX_VVC_LUMA_TUS],
     [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
 ) {
     let mut luma_tu_count = color.luma_tu_count;
     let mut luma_tu_abs_levels = color.luma_tu_remainders;
     let mut luma_tu_negative = color.luma_tu_negative;
+    let mut luma_tu_dc_levels = color.luma_tu_dc_levels;
     let mut luma_tu_ac_levels = color.luma_tu_ac_levels;
     if color.luma_tu_count > 1 {
         return (
             luma_tu_count,
             luma_tu_abs_levels,
             luma_tu_negative,
+            luma_tu_dc_levels,
             luma_tu_ac_levels,
         );
     }
@@ -1475,12 +1479,14 @@ fn vvc_luma_residual_arrays_for_geometry(
     for idx in 0..leaf_count.min(MAX_VVC_LUMA_TUS) {
         luma_tu_abs_levels[idx] = color.luma_tu_remainders[0];
         luma_tu_negative[idx] = color.luma_tu_negative[0];
+        luma_tu_dc_levels[idx] = color.luma_tu_dc_levels[0];
         luma_tu_ac_levels[idx] = color.luma_tu_ac_levels[0];
     }
     (
         luma_tu_count,
         luma_tu_abs_levels,
         luma_tu_negative,
+        luma_tu_dc_levels,
         luma_tu_ac_levels,
     )
 }
@@ -1496,6 +1502,7 @@ fn vvc_luma_leaf_count(coded: VvcCodedGeometry, chroma_sampling: ChromaSampling)
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
         luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
+        luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         cb_dc_abs_level: 0,
         cb_dc_negative: false,

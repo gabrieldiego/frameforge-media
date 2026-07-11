@@ -142,14 +142,7 @@ fn quantized_luma_coeff_levels(
     tu_idx: usize,
 ) -> Vec<i16> {
     let mut levels = vec![0; usize::from(width) * usize::from(height)];
-    let abs_level = quantized.luma_tu_remainders[tu_idx];
-    levels[0] = if abs_level == 0 {
-        0
-    } else if quantized.luma_tu_negative[tu_idx] {
-        -(abs_level as i16)
-    } else {
-        abs_level as i16
-    };
+    levels[0] = quantized.luma_tu_dc_levels[tu_idx];
     let ac_levels = quantized.luma_tu_ac_levels[tu_idx];
     for y in 0..usize::from(height).min(4) {
         for x in 0..usize::from(width).min(4) {

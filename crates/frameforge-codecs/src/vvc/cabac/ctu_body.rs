@@ -19,8 +19,7 @@ pub(in crate::vvc) fn encode_ctu_partition_body(
 ) {
     let mut ctu = VvcCtuCabacGenerator::new(
         params.luma_tu_count,
-        params.luma_tu_abs_levels,
-        params.luma_tu_negative,
+        params.luma_tu_dc_levels,
         params.luma_tu_ac_levels,
         params.chroma_tu_count,
         params.cb_tu_dc_levels,
@@ -38,8 +37,7 @@ pub(in crate::vvc) fn encode_ctu_partition_body(
 pub(in crate::vvc) struct VvcCtuCabacGenerator {
     contexts: VvcCabacContexts,
     luma_tu_count: usize,
-    luma_tu_abs_levels: [u8; MAX_VVC_LUMA_TUS],
-    luma_tu_negative: [bool; MAX_VVC_LUMA_TUS],
+    luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
     luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     luma_tu_index: usize,
     chroma_tu_count: usize,
@@ -131,8 +129,7 @@ impl VvcChromaNeighbourState {
 impl VvcCtuCabacGenerator {
     pub(in crate::vvc) fn new(
         luma_tu_count: usize,
-        luma_tu_abs_levels: [u8; MAX_VVC_LUMA_TUS],
-        luma_tu_negative: [bool; MAX_VVC_LUMA_TUS],
+        luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         chroma_tu_count: usize,
         cb_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
@@ -144,8 +141,7 @@ impl VvcCtuCabacGenerator {
         Self {
             contexts: VvcCabacContexts::new(),
             luma_tu_count,
-            luma_tu_abs_levels,
-            luma_tu_negative,
+            luma_tu_dc_levels,
             luma_tu_ac_levels,
             luma_tu_index: 0,
             chroma_tu_count,
@@ -325,11 +321,10 @@ impl VvcCtuCabacGenerator {
             tu_idx < self.luma_tu_count,
             "missing luma TU coefficient data for coding-tree leaf {tu_idx}"
         );
-        let dc_abs_level = self.luma_tu_abs_levels[tu_idx];
-        let dc_negative = self.luma_tu_negative[tu_idx];
+        let dc_level = self.luma_tu_dc_levels[tu_idx];
         let ac_levels = self.luma_tu_ac_levels[tu_idx];
         let has_ac = ac_levels.iter().any(|level| *level != 0);
-        let cbf = dc_abs_level != 0 || has_ac;
+        let cbf = dc_level != 0 || has_ac;
         self.emit_luma_cbf(cabac, node, cbf);
         if !cbf {
             return;
@@ -340,13 +335,7 @@ impl VvcCtuCabacGenerator {
         let width = usize::from(node.width);
         let height = usize::from(node.height);
         let mut coeff_levels = vec![0; width * height];
-        coeff_levels[0] = if dc_abs_level == 0 {
-            0
-        } else if dc_negative {
-            -(dc_abs_level as i16)
-        } else {
-            dc_abs_level as i16
-        };
+        coeff_levels[0] = dc_level;
         // The current transform side exposes the first 4x4 AC positions. Keep
         // them wired through the normal residual coefficient path even when
         // they are all zero; future transform work should only change the

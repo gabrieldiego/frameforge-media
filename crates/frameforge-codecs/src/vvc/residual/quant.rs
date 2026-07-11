@@ -20,6 +20,7 @@ pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
 pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantizedColor {
     let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
+    let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_ac_levels = [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS];
     let neutral = vvc_neutral_sample(frame.format.bit_depth);
     let mut reconstructed_luma = vec![neutral; frame.geometry.luma_samples()];
@@ -64,6 +65,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantized
         luma_tu_remainders[luma_tu_count] = quantized.abs_remainder;
         luma_tu_negative[luma_tu_count] =
             quantized.reconstructed_dc_coeff < 0 && quantized.abs_remainder != 0;
+        luma_tu_dc_levels[luma_tu_count] = quantized.reconstructed_dc_coeff;
         luma_tu_ac_levels[luma_tu_count] = quantized.reconstructed_ac_coeffs;
         let coeff_levels = quantized_luma_coeff_levels(node.width, node.height, quantized);
         let reconstructed_residual = super::inverse_transform_vvc_luma_residual_levels(
@@ -197,6 +199,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantized
         v: reconstructed_cr,
         luma_tu_remainders,
         luma_tu_negative,
+        luma_tu_dc_levels,
         luma_tu_ac_levels,
         luma_tu_count,
         chroma_tu_count,
@@ -220,6 +223,7 @@ fn chroma_partition_shape(geometry: VvcVideoGeometry) -> super::super::VvcCtuPar
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
         luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
+        luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         cb_dc_abs_level: 0,
         cb_dc_negative: false,
@@ -286,6 +290,7 @@ fn vvc_luma_tu_nodes(
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
         luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
+        luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         cb_dc_abs_level: 0,
         cb_dc_negative: false,

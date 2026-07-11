@@ -38,6 +38,7 @@ pub struct VvcQuantizedColor {
     pub v: u8,
     pub(super) luma_tu_remainders: [u8; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_negative: [bool; MAX_VVC_LUMA_TUS],
+    pub(super) luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_count: usize,
     pub(super) chroma_tu_count: usize,
