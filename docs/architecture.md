@@ -40,25 +40,30 @@ Initial command families:
   one into the binary.
 - `ff filters` lists known filter stages and the Cargo feature that compiles
   each one into the binary.
-- `ff encode` is the path for one raw input, optional input metadata, zero or
-  more filters, one encoder, and one output:
+- `ff encode` is the path for one raw or Y4M input, optional input metadata,
+  zero or more filters, one encoder, and one output:
   `ff encode input.yuv --video 1920x1080:yuv444p --filter identity --encode av2:output.obu --set lossless`.
   The encode endpoint must name a codec, using `--encode codec:path`.
   Input-only options belong after the input path; output-only options belong
   after `--encode codec:path`.
 
 Raw video metadata should use the compact `WxH:pixfmt` form, for example
-`--video 1920x1080:yuv444p`, when it cannot be inferred from the raw input
-filename or needs to be overridden. File names imply metadata with
+`--video 1920x1080:yuv444p`, when it cannot be inferred from the input
+filename or Y4M header, or when it needs to be overridden. Explicit `--video`,
+`--fps`, and `--frames` options take precedence over file metadata. File names
+imply metadata with
 `*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
 `clip_1920x1080_30_1f_yuv444p8.yuv`. If a `.yuv` filename has dimensions but
-no pixel-format token, the CLI assumes `yuv420p8`. If a file input has no
-`--frames` value and no filename frame-count metadata, the CLI infers the frame
-count from the file size and encodes whole frames until EOF. If a user requests
-more frames than the file contains, the CLI clamps the encode to the complete
-frames available instead of surfacing an EOF read error from the codec model.
-Source filters must still provide `--frames` because they generate frames
-rather than ending at a file EOF.
+no pixel-format token, the CLI assumes `yuv420p8`. Y4M headers provide width,
+height, frame rate, and planar YUV pixel format; when no explicit `--video` is
+provided, Y4M header metadata takes precedence over filename metadata because
+it describes the container payload. If a file input has no `--frames` value and
+no filename frame-count metadata, the CLI infers the frame count from the raw
+file size or by scanning Y4M frame markers and encodes whole frames until EOF.
+If a user requests more frames than the file contains, the CLI clamps the
+encode to the complete frames available instead of surfacing an EOF read error
+from the codec model. Source filters must still provide `--frames` because
+they generate frames rather than ending at a file EOF.
 
 Raw planar YUV and gray inputs carry bit depth as checked numeric data rather
 than as one enum variant per depth. The public API shape is documented in

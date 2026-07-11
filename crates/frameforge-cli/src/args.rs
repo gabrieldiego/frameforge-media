@@ -21,6 +21,8 @@ pub struct EncodeArgs {
     pub video: Option<VideoSpec>,
     pub frames: Option<u32>,
     pub fps: Option<String>,
+    pub explicit_video: bool,
+    pub explicit_fps: bool,
     pub filters: Vec<String>,
     pub settings: Vec<String>,
     pub preset: Option<String>,
@@ -75,11 +77,11 @@ pub const OUTPUT_OPTIONS: &[HelpRow] = &[
 pub const INPUT_OPTIONS: &[HelpRow] = &[
     HelpRow {
         syntax: "<input>",
-        summary: "Raw input path; optional when the first filter is a source",
+        summary: "Raw .yuv or Y4M input path; optional when the first filter is a source",
     },
     HelpRow {
         syntax: "filename metadata",
-        summary: "Names imply metadata with *_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv; bare .yuv defaults to yuv420p8",
+        summary: "Names imply metadata with *_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv; Y4M headers also provide metadata",
     },
     HelpRow {
         syntax: "--video <WxH:fmt>",
@@ -211,12 +213,16 @@ fn parse_encode(mut cursor: Cursor) -> Result<Command, String> {
                 args.video = Some(parse_video_spec(
                     arg.as_str(),
                     &cursor.value(arg.as_str())?,
-                )?)
+                )?);
+                args.explicit_video = true;
             }
             "--frames" | "-n" => {
-                args.frames = Some(parse_u32(arg.as_str(), &cursor.value(arg.as_str())?)?)
+                args.frames = Some(parse_u32(arg.as_str(), &cursor.value(arg.as_str())?)?);
             }
-            "--fps" => args.fps = Some(parse_fps(arg.as_str(), &cursor.value(arg.as_str())?)?),
+            "--fps" => {
+                args.fps = Some(parse_fps(arg.as_str(), &cursor.value(arg.as_str())?)?);
+                args.explicit_fps = true;
+            }
             "--filter" | "-f" => args.filters.push(cursor.value(arg.as_str())?),
             "--set" => args
                 .settings

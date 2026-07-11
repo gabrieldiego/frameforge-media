@@ -12,6 +12,14 @@ The CLI accepts the compact `WxH:pixfmt` form:
 ff encode input.yuv --video 1920x1080:yuv420p10le --encode av2:out.obu
 ```
 
+Y4M inputs can be passed directly. The shared input reader parses the Y4M
+stream header and `FRAME` markers, then presents contiguous planar frame bytes
+to the selected codec:
+
+```sh
+ff encode input.y4m --encode av2:out.obu
+```
+
 Filename metadata may also provide the format:
 
 ```text
@@ -20,6 +28,21 @@ clip_1920x1080_30_1f_yuv444p12le.yuv
 
 If a `.yuv` filename has dimensions but no pixel-format token, the CLI defaults
 to `yuv420p8`.
+
+Explicit `--video`, `--fps`, and `--frames` options override file metadata.
+When no explicit `--video` is provided for a Y4M input, the Y4M header supplies
+width, height, and pixel format; that header takes precedence over filename
+metadata because it describes the container payload. When `--frames` is omitted,
+raw file inputs infer frame count from file size, while Y4M inputs scan `FRAME`
+markers and complete payloads.
+
+Supported Y4M chroma tags currently map to planar YUV formats:
+
+- `C420`, `C420jpeg`, `C420mpeg2`, and `C420paldv` map to `yuv420p8`.
+- `C422` maps to `yuv422p8`.
+- `C444` maps to `yuv444p8`.
+- `C420pN`, `C422pN`, and `C444pN` map to little-endian planar YUV at numeric
+  bit depths `N` from 8 through 16.
 
 ## Native Format Families
 

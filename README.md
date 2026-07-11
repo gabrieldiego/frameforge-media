@@ -132,6 +132,7 @@ ff codecs
 ff filters
 ff encode input.yuv --video 640x360:yuv444p \
   --encode av2:output.obu --set lossless
+ff encode input.y4m --encode av2:output.obu --set lossless
 ff encode --filter pattern=checker --video 64x64:yuv444p \
   --encode av2:pattern.obu
 ff encode input_640x360_30_1f_yuv444p8.yuv \
@@ -142,16 +143,20 @@ ff encode input_640x360_30_1f_yuv444p8.yuv \
 
 The commands validate command-line structure and report stage availability.
 When built with `codec-av2` or `codec-vvc`, `ff encode` can encode raw YUV
-inputs through the imported software model for that codec. Filters are still
-parsed for the future pipeline shape but are not executed yet.
+inputs and Y4M inputs through the imported software model for that codec. Y4M
+files are demuxed by the shared input reader before frames reach AV2 or VVC.
+Filters are still parsed for the future pipeline shape but are not executed
+yet.
 
 Input options, such as `--video`, `--fps`, and `--frames`, belong after the
-input path. If `--frames` and filename frame-count metadata are both omitted
-for a file input, `ff encode` processes whole frames until the raw input file
-reaches EOF. If `--frames` is larger than the number of complete frames in the
-file, `ff encode` stops at EOF instead of failing. Source filters require
-explicit `--frames` because they do not have a file EOF. Filter options come
-next. Output/encoder options, such as
+input path and override metadata inferred from filenames or Y4M headers. If
+metadata is available from a Y4M header or from the filename, the corresponding
+input option can be omitted. If `--frames` and filename frame-count metadata
+are both omitted for a file input, `ff encode` processes whole frames until the
+raw input file or Y4M stream reaches EOF. If `--frames` is larger than the
+number of complete frames in the file, `ff encode` stops at EOF instead of
+failing. Source filters require explicit `--frames` because they do not have a
+file EOF. Filter options come next. Output/encoder options, such as
 `--recon output.yuv`, `--set lossless`, `--preset`, and repeated
 `--set key[=value]`, belong after `--encode codec:output`. Bare `--set` keys
 imply `true`. Global accepted settings are listed by `ff codecs`;
@@ -163,9 +168,11 @@ source filter is `pattern=<name>`, with `black`, `checker`, `gradient`, and
 because there is no filename to infer dimensions or pixel format from.
 
 Raw video metadata uses a compact `WxH:pixfmt` spelling when it cannot be
-inferred from the input filename or needs to be overridden. File names imply
-metadata with `*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
-`input_640x360_30_1f_yuv444p8.yuv`. Short 8-bit aliases such as `yuv444p` and
+inferred from the input filename or Y4M header, or when it needs to be
+overridden. File names imply metadata with
+`*_<WxH>[_<fps>][_<frames>f][_<pixfmt>].yuv`, for example
+`input_640x360_30_1f_yuv444p8.yuv`. Y4M headers provide width, height, frame
+rate, and planar YUV pixel format. Short 8-bit aliases such as `yuv444p` and
 `yuv420p` are accepted and normalized to `yuv444p8` and `yuv420p8` internally.
 Planar YUV and gray input formats accept checked numeric bit depths from 8
 through 16, for example `yuv420p9le`, `yuv444p12le`, and `gray16le`.

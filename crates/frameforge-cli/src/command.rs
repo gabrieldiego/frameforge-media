@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -233,6 +233,274 @@ fn generated_pattern_input(job: &EncodeJob, source: &PatternSourceSpec) -> Resul
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Y4mMetadata {
+    width: usize,
+    height: usize,
+    format: PixelFormat,
+    fps: Option<String>,
+}
+
+fn is_y4m_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("y4m"))
+}
+
+fn read_y4m_file_metadata(path: &Path) -> Result<Option<Y4mMetadata>, String> {
+    if !is_y4m_path(path) {
+        return Ok(None);
+    }
+    let file = File::open(path)
+        .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    read_y4m_stream_header(&mut reader, &y4m_context(path)).map(Some)
+}
+
+fn y4m_context(path: &Path) -> String {
+    format!("Y4M input '{}'", path.display())
+}
+
+fn read_y4m_stream_header<R: BufRead>(
+    reader: &mut R,
+    context: &str,
+) -> Result<Y4mMetadata, String> {
+    let mut header = Vec::new();
+    let bytes = reader
+        .read_until(b'\n', &mut header)
+        .map_err(|err| format!("failed to read {context} header: {err}"))?;
+    if bytes == 0 {
+        return Err(format!("{context} is empty"));
+    }
+    if !header.ends_with(b"\n") {
+        return Err(format!("{context} header is missing a newline"));
+    }
+    let header = String::from_utf8(header)
+        .map_err(|_| format!("{context} header must be valid UTF-8/ASCII"))?;
+    parse_y4m_metadata(
+        header.trim_end_matches(|ch| ch == '\r' || ch == '\n'),
+        context,
+    )
+}
+
+fn parse_y4m_metadata(header: &str, context: &str) -> Result<Y4mMetadata, String> {
+    let fields = y4m_header_fields(header, context)?;
+    Ok(Y4mMetadata {
+        width: parse_y4m_positive_usize(y4m_header_tag(&fields, 'W'), "width", context)?,
+        height: parse_y4m_positive_usize(y4m_header_tag(&fields, 'H'), "height", context)?,
+        format: y4m_pixel_format(y4m_header_tag(&fields, 'C'))?,
+        fps: y4m_fps(y4m_header_tag(&fields, 'F'), context)?,
+    })
+}
+
+fn y4m_header_fields<'a>(header: &'a str, context: &str) -> Result<Vec<&'a str>, String> {
+    let fields = header.split_whitespace().collect::<Vec<_>>();
+    if fields.first() != Some(&"YUV4MPEG2") {
+        return Err(format!("{context} is not a Y4M stream"));
+    }
+    Ok(fields)
+}
+
+fn y4m_header_tag<'a>(fields: &'a [&str], tag: char) -> Option<&'a str> {
+    fields.iter().skip(1).find_map(|field| {
+        let mut chars = field.chars();
+        if chars.next() == Some(tag) {
+            Some(chars.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_y4m_positive_usize(
+    value: Option<&str>,
+    field: &str,
+    context: &str,
+) -> Result<usize, String> {
+    let value = value.ok_or_else(|| format!("{context} header is missing {field}"))?;
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("{context} {field} expects an integer, got '{value}'"))?;
+    if parsed == 0 {
+        Err(format!(
+            "{context} {field} expects a positive integer, got 0"
+        ))
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn y4m_pixel_format(chroma_tag: Option<&str>) -> Result<PixelFormat, String> {
+    let normalized = chroma_tag.unwrap_or("420").to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "420" | "420jpeg" | "420mpeg2" | "420paldv"
+    ) {
+        return Ok(PixelFormat::yuv420(8).expect("8-bit YUV must be supported"));
+    }
+    if let Some(bits) = numeric_y4m_bit_depth(&normalized, "420p") {
+        return PixelFormat::yuv420(bits)
+            .ok_or_else(|| format!("unsupported Y4M chroma format: {normalized}"));
+    }
+    if normalized == "422" {
+        return Ok(PixelFormat::yuv422(8).expect("8-bit YUV must be supported"));
+    }
+    if let Some(bits) = numeric_y4m_bit_depth(&normalized, "422p") {
+        return PixelFormat::yuv422(bits)
+            .ok_or_else(|| format!("unsupported Y4M chroma format: {normalized}"));
+    }
+    if normalized == "444" {
+        return Ok(PixelFormat::yuv444(8).expect("8-bit YUV must be supported"));
+    }
+    if let Some(bits) = numeric_y4m_bit_depth(&normalized, "444p") {
+        return PixelFormat::yuv444(bits)
+            .ok_or_else(|| format!("unsupported Y4M chroma format: {normalized}"));
+    }
+    Err(format!(
+        "unsupported Y4M chroma format: {}",
+        chroma_tag.unwrap_or("<default>")
+    ))
+}
+
+fn numeric_y4m_bit_depth(normalized: &str, prefix: &str) -> Option<u8> {
+    normalized.strip_prefix(prefix)?.parse::<u8>().ok()
+}
+
+fn y4m_fps(value: Option<&str>, context: &str) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let (num, den) = value
+        .split_once(':')
+        .ok_or_else(|| format!("{context} fps expects N:D, got '{value}'"))?;
+    let num = num
+        .parse::<u32>()
+        .map_err(|_| format!("{context} fps expects N:D, got '{value}'"))?;
+    let den = den
+        .parse::<u32>()
+        .map_err(|_| format!("{context} fps expects N:D, got '{value}'"))?;
+    if num == 0 || den == 0 {
+        return Err(format!("{context} fps expects positive N:D, got '{value}'"));
+    }
+    if den == 1 {
+        Ok(Some(num.to_string()))
+    } else {
+        Ok(Some(format!("{num}/{den}")))
+    }
+}
+
+fn validate_y4m_job_metadata(
+    metadata: &Y4mMetadata,
+    job: &EncodeJob,
+    path: &Path,
+) -> Result<(), String> {
+    if metadata.width != job.width
+        || metadata.height != job.height
+        || metadata.format != job.source_format
+    {
+        return Err(format!(
+            "Y4M input '{}' declares {}x{}:{}, but encode job expects {}x{}:{}",
+            path.display(),
+            metadata.width,
+            metadata.height,
+            metadata.format,
+            job.width,
+            job.height,
+            job.source_format
+        ));
+    }
+    Ok(())
+}
+
+struct Y4mFrameReader<R> {
+    inner: R,
+    frame_len: usize,
+    frame: Vec<u8>,
+    frame_offset: usize,
+    frames_remaining: usize,
+    frame_index: usize,
+    context: String,
+}
+
+impl<R: BufRead> Y4mFrameReader<R> {
+    fn new(mut inner: R, job: &EncodeJob, path: &Path) -> Result<Self, String> {
+        let context = y4m_context(path);
+        let metadata = read_y4m_stream_header(&mut inner, &context)?;
+        if job.validate_y4m_metadata {
+            validate_y4m_job_metadata(&metadata, job, path)?;
+        }
+        let frame_len = job
+            .source_format
+            .frame_len(job.width, job.height)
+            .ok_or_else(|| {
+                format!(
+                    "frame length overflow for {}x{}:{}",
+                    job.width, job.height, job.source_format
+                )
+            })?;
+        Ok(Self {
+            inner,
+            frame_len,
+            frame: vec![0; frame_len],
+            frame_offset: frame_len,
+            frames_remaining: job.frames,
+            frame_index: 0,
+            context,
+        })
+    }
+
+    fn fill_frame(&mut self) -> io::Result<bool> {
+        if self.frames_remaining == 0 {
+            return Ok(false);
+        }
+        let mut header = Vec::new();
+        let bytes = self.inner.read_until(b'\n', &mut header)?;
+        if bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("{} is missing frame {}", self.context, self.frame_index + 1),
+            ));
+        }
+        if !valid_y4m_frame_header(&header) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} has invalid frame marker at frame {}",
+                    self.context,
+                    self.frame_index + 1
+                ),
+            ));
+        }
+        self.inner.read_exact(&mut self.frame)?;
+        self.frame_offset = 0;
+        self.frames_remaining -= 1;
+        self.frame_index += 1;
+        Ok(true)
+    }
+}
+
+impl<R: BufRead> Read for Y4mFrameReader<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.frame_offset >= self.frame_len && !self.fill_frame()? {
+            return Ok(0);
+        }
+        let remaining = &self.frame[self.frame_offset..];
+        let count = remaining.len().min(output.len());
+        output[..count].copy_from_slice(&remaining[..count]);
+        self.frame_offset += count;
+        Ok(count)
+    }
+}
+
+fn valid_y4m_frame_header(header: &[u8]) -> bool {
+    header.ends_with(b"\n")
+        && header.starts_with(b"FRAME")
+        && header.get(5).is_some_and(|byte| byte.is_ascii_whitespace())
+}
+
 fn generate_yuv420p8(job: &EncodeJob, pattern: PatternKind) -> Vec<u8> {
     let mut out = Vec::new();
     for frame in 0..job.frames {
@@ -335,9 +603,13 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
         EncodeInput::Path(path) => {
             let file = File::open(path)
                 .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
-            let reader = BufReader::new(file).take(selected_input_byte_len(job)?);
+            let reader: Box<dyn Read> = if is_y4m_path(path) {
+                Box::new(Y4mFrameReader::new(BufReader::new(file), job, path)?)
+            } else {
+                Box::new(BufReader::new(file).take(selected_input_byte_len(job)?))
+            };
             if job.source_format == job.format {
-                Ok(Box::new(reader))
+                Ok(reader)
             } else {
                 Ok(Box::new(BitDepthConvertingReader::new(reader, job)?))
             }
@@ -554,6 +826,8 @@ struct EncodeJob {
     output: PathBuf,
     recon: Option<PathBuf>,
     frames: usize,
+    fps: Option<String>,
+    validate_y4m_metadata: bool,
     width: usize,
     height: usize,
     source_format: PixelFormat,
@@ -574,7 +848,7 @@ fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
         job.height,
         job.source_format,
         job.frames,
-        args.fps.as_deref().unwrap_or("unspecified")
+        job.fps.as_deref().unwrap_or("unspecified")
     );
     if job.source_format != job.format {
         eprintln!(
@@ -613,19 +887,11 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     };
     let output = PathBuf::from(args.output.as_deref().expect("parser requires output"));
     let recon = args.recon.as_deref().map(PathBuf::from);
-    let video = args
-        .video
-        .as_ref()
-        .ok_or_else(|| "encode requires --video WxH:pixfmt or filename metadata".to_string())?;
-    let source_format = video
-        .pixel_format
-        .as_deref()
-        .ok_or_else(|| {
-            "encode requires a pixel format in --video or the input filename".to_string()
-        })?
-        .parse::<PixelFormat>()?;
-    let width = video.width as usize;
-    let height = video.height as usize;
+    let y4m_metadata = match &input {
+        EncodeInput::Path(path) => read_y4m_file_metadata(path)?,
+        EncodeInput::Pattern(_) => None,
+    };
+    let (width, height, source_format) = resolve_video_metadata(args, y4m_metadata.as_ref())?;
     let frames = resolve_frame_count(args, &input, source_format, width, height)?;
     let codec = args.codec.as_deref().expect("parser requires codec");
     let lossless = lossless_setting_enabled(&args.settings)?;
@@ -644,12 +910,54 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         output,
         recon,
         frames,
+        fps: resolve_fps_metadata(args, y4m_metadata.as_ref()),
+        validate_y4m_metadata: y4m_metadata.is_some() && !args.explicit_video,
         width,
         height,
         source_format,
         format,
         lossless,
     })
+}
+
+fn resolve_video_metadata(
+    args: &EncodeArgs,
+    y4m_metadata: Option<&Y4mMetadata>,
+) -> Result<(usize, usize, PixelFormat), String> {
+    match (args.video.as_ref(), y4m_metadata) {
+        (Some(video), Some(metadata)) if args.explicit_video => {
+            resolve_video_spec(video, Some(metadata.format))
+        }
+        (Some(_), Some(metadata)) | (None, Some(metadata)) => {
+            Ok((metadata.width, metadata.height, metadata.format))
+        }
+        (Some(video), None) => resolve_video_spec(video, None),
+        (None, None) => Err(
+            "encode requires --video WxH:pixfmt, filename metadata, or a Y4M header".to_string(),
+        ),
+    }
+}
+
+fn resolve_video_spec(
+    video: &args::VideoSpec,
+    fallback_format: Option<PixelFormat>,
+) -> Result<(usize, usize, PixelFormat), String> {
+    let source_format = match video.pixel_format.as_deref() {
+        Some(format) => format.parse::<PixelFormat>()?,
+        None => fallback_format.ok_or_else(|| {
+            "encode requires a pixel format in --video, input filename, or Y4M header".to_string()
+        })?,
+    };
+    Ok((video.width as usize, video.height as usize, source_format))
+}
+
+fn resolve_fps_metadata(args: &EncodeArgs, y4m_metadata: Option<&Y4mMetadata>) -> Option<String> {
+    if args.explicit_fps {
+        return args.fps.clone();
+    }
+    y4m_metadata
+        .and_then(|metadata| metadata.fps.clone())
+        .or_else(|| args.fps.clone())
 }
 
 fn lossless_setting_enabled(settings: &[String]) -> Result<bool, String> {
@@ -742,19 +1050,86 @@ fn resolve_frame_count(
     if let Some(frames) = args.frames {
         return match input {
             EncodeInput::Path(path) => {
-                let available = infer_file_complete_frame_count(path, frame_len)?;
-                Ok((frames as usize).min(available))
+                if is_y4m_path(path) {
+                    infer_y4m_complete_frame_count(path, frame_len, Some(frames as usize))
+                } else {
+                    let available = infer_file_complete_frame_count(path, frame_len)?;
+                    Ok((frames as usize).min(available))
+                }
             }
             EncodeInput::Pattern(_) => Ok(frames as usize),
         };
     }
 
     match input {
-        EncodeInput::Path(path) => infer_file_frame_count_from_eof(path, frame_len),
+        EncodeInput::Path(path) => {
+            if is_y4m_path(path) {
+                infer_y4m_complete_frame_count(path, frame_len, None)
+            } else {
+                infer_file_frame_count_from_eof(path, frame_len)
+            }
+        }
         EncodeInput::Pattern(_) => {
             Err("source filters require --frames because there is no input EOF".to_string())
         }
     }
+}
+
+fn infer_y4m_complete_frame_count(
+    path: &Path,
+    frame_len: usize,
+    limit: Option<usize>,
+) -> Result<usize, String> {
+    let file = File::open(path)
+        .map_err(|err| format!("failed to open input '{}': {err}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let context = y4m_context(path);
+    read_y4m_stream_header(&mut reader, &context)?;
+    let mut frames = 0usize;
+    while limit.map_or(true, |limit| frames < limit) {
+        let mut frame_header = Vec::new();
+        let bytes = reader
+            .read_until(b'\n', &mut frame_header)
+            .map_err(|err| format!("failed to read {context} frame marker: {err}"))?;
+        if bytes == 0 {
+            break;
+        }
+        if !valid_y4m_frame_header(&frame_header) {
+            return Err(format!(
+                "{context} has invalid frame marker at frame {}",
+                frames + 1
+            ));
+        }
+        skip_exact_y4m_payload(&mut reader, frame_len, &context, frames + 1)?;
+        frames += 1;
+    }
+    if frames == 0 {
+        return Err(format!("{context} contains no complete frames"));
+    }
+    Ok(frames)
+}
+
+fn skip_exact_y4m_payload<R: Read>(
+    reader: &mut R,
+    frame_len: usize,
+    context: &str,
+    frame_number: usize,
+) -> Result<(), String> {
+    let mut remaining = frame_len;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let chunk = remaining.min(buffer.len());
+        reader
+            .read_exact(&mut buffer[..chunk])
+            .map_err(|err| match err.kind() {
+                io::ErrorKind::UnexpectedEof => {
+                    format!("{context} is too short while reading frame {frame_number}")
+                }
+                _ => format!("failed to read {context} frame {frame_number}: {err}"),
+            })?;
+        remaining -= chunk;
+    }
+    Ok(())
 }
 
 fn infer_file_complete_frame_count(path: &Path, frame_len: usize) -> Result<usize, String> {
@@ -1001,11 +1376,28 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_yuv_path(name: &str) -> PathBuf {
+        temp_input_path(name, "yuv")
+    }
+
+    fn temp_y4m_path(name: &str) -> PathBuf {
+        temp_input_path(name, "y4m")
+    }
+
+    fn temp_input_path(name: &str, extension: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before UNIX epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("frameforge_media_{name}_{unique}.yuv"))
+        std::env::temp_dir().join(format!("frameforge_media_{name}_{unique}.{extension}"))
+    }
+
+    fn write_y4m(path: &Path, header: &str, frames: &[Vec<u8>]) {
+        let mut file = File::create(path).expect("create temp y4m");
+        file.write_all(header.as_bytes()).expect("write y4m header");
+        for frame in frames {
+            file.write_all(b"FRAME\n").expect("write y4m frame marker");
+            file.write_all(frame).expect("write y4m frame");
+        }
     }
 
     #[test]
@@ -1083,6 +1475,113 @@ mod tests {
 
         let job = encode_job(&args).expect("clamp frame count");
         assert_eq!(job.frames, 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_infers_y4m_metadata_and_frames_from_header() {
+        let path = temp_y4m_path("two_frames_4x4");
+        let frame_len = PixelFormat::Yuv420p8.frame_len(4, 4).unwrap();
+        let first = vec![0x11; frame_len];
+        let second = vec![0x22; frame_len];
+        write_y4m(
+            &path,
+            "YUV4MPEG2 W4 H4 F15:1 Ip A0:0 C420jpeg XYSCSS=420JPEG\n",
+            &[first.clone(), second.clone()],
+        );
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("infer Y4M metadata");
+        assert_eq!(job.width, 4);
+        assert_eq!(job.height, 4);
+        assert_eq!(job.source_format, PixelFormat::Yuv420p8);
+        assert_eq!(job.frames, 2);
+        assert_eq!(job.fps.as_deref(), Some("15"));
+
+        let mut reader = open_job_reader(&job).expect("open Y4M reader");
+        let mut raw = Vec::new();
+        reader.read_to_end(&mut raw).expect("read raw frames");
+        let mut expected = first;
+        expected.extend(second);
+        assert_eq!(raw, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_uses_y4m_metadata_before_filename_metadata() {
+        let path = temp_y4m_path("clip_8x8_30_yuv444p8");
+        let frame_len = PixelFormat::Yuv420p8.frame_len(4, 4).unwrap();
+        write_y4m(
+            &path,
+            "YUV4MPEG2 W4 H4 F24:1 Ip A0:0 C420\n",
+            &[vec![0; frame_len]],
+        );
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv444p8".to_string()),
+            }),
+            fps: Some("30".to_string()),
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("Y4M header should win over inferred filename metadata");
+        assert_eq!(job.width, 4);
+        assert_eq!(job.height, 4);
+        assert_eq!(job.source_format, PixelFormat::Yuv420p8);
+        assert_eq!(job.fps.as_deref(), Some("24"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_allows_explicit_video_to_override_y4m_header() {
+        let path = temp_y4m_path("override_header");
+        let explicit_frame_len = PixelFormat::Yuv420p8.frame_len(4, 4).unwrap();
+        let frame = vec![0x33; explicit_frame_len];
+        write_y4m(
+            &path,
+            "YUV4MPEG2 W8 H8 F30:1 Ip A0:0 C420\n",
+            std::slice::from_ref(&frame),
+        );
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 4,
+                height: 4,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            explicit_video: true,
+            frames: Some(1),
+            fps: Some("60".to_string()),
+            explicit_fps: true,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("explicit metadata should override Y4M header");
+        assert_eq!(job.width, 4);
+        assert_eq!(job.height, 4);
+        assert_eq!(job.source_format, PixelFormat::Yuv420p8);
+        assert_eq!(job.frames, 1);
+        assert_eq!(job.fps.as_deref(), Some("60"));
+
+        let mut reader = open_job_reader(&job).expect("open overridden Y4M reader");
+        let mut raw = Vec::new();
+        reader.read_to_end(&mut raw).expect("read raw frame");
+        assert_eq!(raw, frame);
         let _ = fs::remove_file(path);
     }
 
@@ -1419,6 +1918,8 @@ mod tests {
             output: PathBuf::from("out.obu"),
             recon: None,
             frames: 1,
+            fps: None,
+            validate_y4m_metadata: false,
             width: 8,
             height: 8,
             source_format: PixelFormat::Yuv420p8,
