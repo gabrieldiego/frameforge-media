@@ -3742,7 +3742,7 @@ fn chroma_uv_mode_index(luma_mode: Av2LumaIntraMode, chroma_mode: Av2ChromaIntra
     let luma_directional = match luma_mode {
         Av2LumaIntraMode::Vertical => Some(1usize),
         Av2LumaIntraMode::Horizontal => Some(2usize),
-        Av2LumaIntraMode::Dc => None,
+        Av2LumaIntraMode::Dc | Av2LumaIntraMode::Paeth => None,
     };
     if let Some(mode_id) = luma_directional {
         if target == mode_id {
@@ -4639,6 +4639,7 @@ impl Av2LosslessSubsampledModeDecision {
 fn chroma_mode_for_luma_mode(mode: Av2LumaIntraMode) -> Av2ChromaIntraMode {
     match mode {
         Av2LumaIntraMode::Dc => Av2ChromaIntraMode::Dc,
+        Av2LumaIntraMode::Paeth => Av2ChromaIntraMode::Paeth,
         Av2LumaIntraMode::Vertical => Av2ChromaIntraMode::Vertical,
         Av2LumaIntraMode::Horizontal => Av2ChromaIntraMode::Horizontal,
     }
@@ -5216,6 +5217,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             }
             let luma_candidates = [
                 (Av2LumaIntraMode::Dc, None, 0usize),
+                (Av2LumaIntraMode::Paeth, None, 128usize),
                 (Av2LumaIntraMode::Horizontal, None, 32usize),
                 (Av2LumaIntraMode::Vertical, None, 32usize),
                 (Av2LumaIntraMode::Horizontal, Some(true), 64usize),

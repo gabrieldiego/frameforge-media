@@ -28,6 +28,7 @@ const AV2_LUMA_PALETTE_BLOCK_SAMPLES: usize =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2LumaIntraMode {
     Dc,
+    Paeth,
     Vertical,
     Horizontal,
 }
@@ -59,6 +60,7 @@ impl Av2LumaIntraMode {
     pub(crate) fn mode_index(self) -> usize {
         match self {
             Self::Dc => 0,
+            Self::Paeth => 4,
             Self::Vertical => 5,
             Self::Horizontal => 6,
         }
@@ -71,6 +73,7 @@ impl Av2LumaIntraMode {
     fn joint_mode(self) -> usize {
         match self {
             Self::Dc => 0,
+            Self::Paeth => 0,
             Self::Vertical => AV2_LUMA_JOINT_MODE_V,
             Self::Horizontal => AV2_LUMA_JOINT_MODE_H,
         }
@@ -79,6 +82,7 @@ impl Av2LumaIntraMode {
     pub(crate) fn symbol_name(self) -> &'static str {
         match self {
             Self::Dc => "tile.intra.y_mode_idx_dc",
+            Self::Paeth => "tile.intra.y_mode_idx_paeth",
             Self::Vertical => "tile.intra.y_mode_idx_v",
             Self::Horizontal => "tile.intra.y_mode_idx_h",
         }
@@ -1426,6 +1430,7 @@ impl Av2LumaModeSyntax {
     pub(crate) fn index_for(self, mode: Av2LumaIntraMode) -> u8 {
         match mode {
             Av2LumaIntraMode::Dc => 0,
+            Av2LumaIntraMode::Paeth => 4,
             Av2LumaIntraMode::Vertical => self.vertical_index,
             Av2LumaIntraMode::Horizontal => self.horizontal_index,
         }
@@ -1582,6 +1587,9 @@ fn luma_intra_prediction_sample(
         Av2LumaIntraMode::Dc => {
             let local_index = local_y * AV2_LUMA_PALETTE_BLOCK_SIZE + local_x;
             block.colors[usize::from(block.indices[local_index])]
+        }
+        Av2LumaIntraMode::Paeth => {
+            unreachable!("the 4:4:4 palette path does not select Paeth luma prediction")
         }
         // AV2 v1.0.0 Section 5.20.7 residual syntax uses 4x4 TXBs here, and
         // AVM calls av2_predict_intra_block() for each TXB. The second 4x4 in
