@@ -3,8 +3,7 @@ use crate::vvc::{
     MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE,
     VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_CHROMA_420_BT_SIZE,
     VVC_CURRENT_MAX_CHROMA_420_MTT_DEPTH, VVC_CURRENT_MAX_CHROMA_420_TT_SIZE,
-    VVC_CURRENT_MAX_LUMA_BT_SIZE, VVC_CURRENT_MAX_LUMA_LEAF_HEIGHT, VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
-    VVC_CURRENT_MAX_LUMA_MTT_DEPTH, VVC_CURRENT_MAX_LUMA_TT_SIZE,
+    VVC_CURRENT_MAX_LUMA_BT_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH, VVC_CURRENT_MAX_LUMA_TT_SIZE,
     VVC_CURRENT_MIN_CHROMA_420_QT_SIZE, VVC_CURRENT_MIN_LUMA_CB_SIZE, VVC_CURRENT_MIN_LUMA_QT_SIZE,
     VVC_LUMA_AC_COEFFS_PER_TU,
 };
@@ -16,6 +15,7 @@ pub(in crate::vvc) struct VvcCtuPartitionParams {
     pub(in crate::vvc) visible_width: usize,
     pub(in crate::vvc) visible_height: usize,
     pub(in crate::vvc) chroma_sampling: ChromaSampling,
+    pub(in crate::vvc) luma_max_leaf_size: u16,
     pub(in crate::vvc) chroma_tu_count: usize,
     pub(in crate::vvc) luma_tu_count: usize,
     pub(in crate::vvc) luma_tu_abs_levels: [u8; MAX_VVC_LUMA_TUS],
@@ -798,7 +798,7 @@ pub(in crate::vvc) enum VvcCtuCabacOp {
 
 impl VvcCtuCabacOp {
     pub(in crate::vvc) fn yuv420_ctu_partition(params: VvcCtuPartitionParams) -> Vec<Self> {
-        Self::intra_ctu_partition(params.shape(), VVC_CURRENT_MAX_LUMA_LEAF_SIZE)
+        Self::intra_ctu_partition(params.shape(), params.luma_max_leaf_size)
     }
 
     pub(in crate::vvc) fn intra_ctu_partition(
@@ -879,7 +879,7 @@ impl VvcCtuCabacOp {
             return;
         }
 
-        debug_assert!(node.width > max_leaf_size || node.height > VVC_CURRENT_MAX_LUMA_LEAF_HEIGHT);
+        debug_assert!(node.width > max_leaf_size || node.height > max_leaf_size);
         if node.mtt_depth > 0 {
             Self::append_visible_luma_mtt_subtree(
                 ops,
@@ -1087,7 +1087,7 @@ impl VvcCtuCabacOp {
     fn boundary_qt_preferred(node: VvcCodingTreeNode, max_leaf_size: u16) -> bool {
         Self::qt_flag_can_be_signaled(node)
             && node.width > max_leaf_size
-            && node.height > VVC_CURRENT_MAX_LUMA_LEAF_HEIGHT
+            && node.height > max_leaf_size
     }
 
     fn luma_split_ctx(
@@ -1252,11 +1252,9 @@ impl VvcCtuCabacOp {
 
     fn luma_leaf_allowed(node: VvcCodingTreeNode, max_leaf_size: u16) -> bool {
         // The current residual path emits one transform_unit() per luma CU
-        // leaf. Until transform-tree splitting is implemented inside larger
-        // CUs, luma leaves must stay within the supported 8x8 TB subset.
-        // Larger legal CUs will be re-enabled together with explicit TU
-        // partitioning under coding_unit().
-        node.width <= max_leaf_size && node.height <= VVC_CURRENT_MAX_LUMA_LEAF_HEIGHT
+        // leaf. Keep luma leaves within the requested square TB subset until
+        // explicit TU partitioning under coding_unit() is implemented.
+        node.width <= max_leaf_size && node.height <= max_leaf_size
     }
 
     pub(in crate::vvc) fn mtt_binary_ctx(vertical: bool, mtt_depth: u8) -> u8 {

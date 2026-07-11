@@ -2,7 +2,7 @@ use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_420_transform_nodes,
     vvc_downshift_sample_to_u8, vvc_neutral_sample, VvcCodingTreeNode, VvcCtuCabacOp,
     VvcCtuPartitionParams, VvcPictureFormat, VvcSample, VvcSampledColor, VvcSampledFrame,
-    VvcVideoGeometry, VVC_CTU_SIZE,
+    VvcVideoGeometry, VVC_CTU_SIZE, VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node, inverse_transform_vvc_chroma_residual_levels,
@@ -219,6 +219,7 @@ fn chroma_partition_shape(geometry: VvcVideoGeometry) -> super::super::VvcCtuPar
         visible_width: geometry.coded_width(),
         visible_height: geometry.coded_height(),
         chroma_sampling: crate::picture::ChromaSampling::Cs420,
+        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
         chroma_tu_count: 0,
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
@@ -286,6 +287,7 @@ fn vvc_luma_tu_nodes(
         visible_width: geometry.coded_width(),
         visible_height: geometry.coded_height(),
         chroma_sampling,
+        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
         chroma_tu_count: 0,
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],

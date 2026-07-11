@@ -124,7 +124,6 @@ pub const VVC_CODED_DIMENSION_GRANULARITY: usize = 8;
 const VVC_CTU_SIZE: usize = 64;
 const VVC_CURRENT_MIN_LUMA_CB_SIZE: u16 = 4;
 const VVC_CURRENT_MAX_LUMA_LEAF_SIZE: u16 = 8;
-const VVC_CURRENT_MAX_LUMA_LEAF_HEIGHT: u16 = VVC_CURRENT_MAX_LUMA_LEAF_SIZE;
 const VVC_CURRENT_MAX_LUMA_BT_SIZE: u16 = VVC_CURRENT_MIN_LUMA_QT_SIZE << 2;
 const VVC_CURRENT_MAX_LUMA_TT_SIZE: u16 = VVC_CURRENT_MIN_LUMA_QT_SIZE << 2;
 const VVC_CURRENT_MAX_LUMA_MTT_DEPTH: u8 = 3;
@@ -1343,7 +1342,7 @@ fn vvc_luma_partition_plan(geometry: VvcVideoGeometry) -> Vec<VvcLumaPartitionSt
         coded.height,
         VvcCodedGeometry {
             width: VVC_CURRENT_MAX_LUMA_LEAF_SIZE as usize,
-            height: VVC_CURRENT_MAX_LUMA_LEAF_HEIGHT as usize,
+            height: VVC_CURRENT_MAX_LUMA_LEAF_SIZE as usize,
         },
     );
     steps
@@ -1433,6 +1432,7 @@ fn vvc_ctu_partition_params(
         visible_width: coded.width,
         visible_height: coded.height,
         chroma_sampling,
+        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
         chroma_tu_count,
         luma_tu_count,
         luma_tu_abs_levels,
@@ -1498,6 +1498,7 @@ fn vvc_luma_leaf_count(coded: VvcCodedGeometry, chroma_sampling: ChromaSampling)
         visible_width: coded.width,
         visible_height: coded.height,
         chroma_sampling,
+        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
         chroma_tu_count: 0,
         luma_tu_count: 0,
         luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],

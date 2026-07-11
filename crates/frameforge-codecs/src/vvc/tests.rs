@@ -1076,6 +1076,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             visible_width,
             visible_height,
             chroma_sampling: ChromaSampling::Cs420,
+            luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
             chroma_tu_count: (visible_width * visible_height) / 16,
             luma_tu_count: 0,
             luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
@@ -1214,6 +1215,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             visible_width: 64,
             visible_height: 64,
             chroma_sampling,
+            luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
             chroma_tu_count: 0,
             luma_tu_count: 0,
             luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
@@ -1314,6 +1316,33 @@ fn vvc_luma_partition_plan_splits_to_8x8_leaves() {
             height: 8
         }]
     );
+}
+
+#[test]
+fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
+    let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
+    let mut params = vvc_ctu_partition_params(
+        VvcVideoGeometry {
+            width: 64,
+            height: 64,
+        },
+        black,
+    )
+    .expect("64x64 partition params");
+    params.luma_max_leaf_size = 4;
+
+    let leaves: Vec<_> = VvcCtuCabacOp::yuv420_ctu_partition(params)
+        .into_iter()
+        .filter_map(|op| match op {
+            VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(leaves.len(), 256);
+    assert!(leaves
+        .iter()
+        .all(|node| node.width <= 4 && node.height <= 4));
 }
 
 #[test]
