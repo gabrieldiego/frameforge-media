@@ -83,12 +83,19 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             expected_len,
             "AV2 subsampled lossless source length must match geometry"
         );
-        assert_eq!(
-            recon.len(),
-            source.len(),
-            "AV2 subsampled lossless reconstruction length must match source"
-        );
         let source_backed_recon = mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent;
+        if source_backed_recon {
+            assert!(
+                recon.is_empty() || recon.len() == source.len(),
+                "AV2 fast subsampled lossless reconstruction must be empty or match source"
+            );
+        } else {
+            assert_eq!(
+                recon.len(),
+                source.len(),
+                "AV2 subsampled lossless reconstruction length must match source"
+            );
+        }
         Self {
             geometry,
             region,

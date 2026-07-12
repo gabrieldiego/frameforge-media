@@ -198,6 +198,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             Av2LosslessSubsampledModeSearch::FastScreenContent,
             ibc,
             record_fields,
+            true,
         );
     }
 
@@ -221,6 +222,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             Av2LosslessSubsampledModeSearch::Exhaustive,
             None,
             record_fields,
+            true,
         );
         let replace = best.as_ref().is_none_or(|(best_payload, _)| {
             (payload.bytes.len(), payload.symbol_bits)
@@ -251,7 +253,7 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
         Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
     ));
     debug_assert!(use_fast_lossless_subsampled_path(region));
-    let mut scratch_recon = vec![0; source.len()];
+    let mut scratch_recon = [];
     av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         region,
         profile,
@@ -264,6 +266,7 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
         Av2LosslessSubsampledModeSearch::FastScreenContent,
         None,
         record_fields,
+        false,
     )
 }
 
@@ -487,6 +490,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     mode_search: Av2LosslessSubsampledModeSearch,
     ibc: Option<&Av2LocalIbc444>,
     record_fields: bool,
+    copy_fast_recon: bool,
 ) -> Av2EntropyPayload {
     let lossless_partition_features = (partition_policy == Av2PartitionPolicy::LosslessAdaptive32)
         .then(|| {
@@ -515,7 +519,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         recon,
     );
     plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless);
-    if mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
+    if copy_fast_recon && mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
         lossless.copy_source_to_recon_region();
     }
     writer.finish()
