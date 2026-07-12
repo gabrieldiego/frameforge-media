@@ -26,24 +26,19 @@ impl Av2DcHvBdpcmTxbScores {
     }
 }
 
-fn residual_sample_proxy_score(
-    residual: &[i32; TX4X4_SAMPLES],
-    kind: Av2CoefficientProxyKind,
-) -> usize {
-    let magnitude_scale = match kind {
+fn residual_sample_proxy_magnitude_scale(kind: Av2CoefficientProxyKind) -> usize {
+    match kind {
         Av2CoefficientProxyKind::LumaIdtx => 4,
         Av2CoefficientProxyKind::LumaTransform => 4,
         Av2CoefficientProxyKind::ChromaTransform => 3,
-    };
-    let mut score = 16usize;
-    for &delta in residual {
-        let level = delta.unsigned_abs() as usize;
-        if level == 0 {
-            continue;
-        }
-        score += 80 + level.min(255) * magnitude_scale;
     }
-    score
+}
+
+fn add_residual_sample_proxy_score(score: &mut usize, delta: i32, magnitude_scale: usize) {
+    let level = delta.unsigned_abs() as usize;
+    if level != 0 {
+        *score += 80 + level.min(255) * magnitude_scale;
+    }
 }
 
 struct Av2LosslessSubsampledTileState<'a> {
@@ -881,38 +876,53 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             ));
         }
 
-        let mut dc_residual = [0i32; TX4X4_SAMPLES];
-        let mut horizontal_residual = [0i32; TX4X4_SAMPLES];
-        let mut vertical_residual = [0i32; TX4X4_SAMPLES];
-        let mut bdpcm_horizontal_residual = [0i32; TX4X4_SAMPLES];
-        let mut bdpcm_vertical_residual = [0i32; TX4X4_SAMPLES];
+        let magnitude_scale = residual_sample_proxy_magnitude_scale(kind);
+        let mut scores = Av2DcHvBdpcmTxbScores {
+            dc: 16,
+            horizontal: 16,
+            vertical: 16,
+            bdpcm_horizontal: 16,
+            bdpcm_vertical: 16,
+        };
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let pos = local_y * TX4X4_SIZE + local_x;
                 let sample = source[pos];
-                dc_residual[pos] = sample - dc;
-                horizontal_residual[pos] = sample - h_pred[local_y];
-                vertical_residual[pos] = sample - v_pred[local_x];
-                bdpcm_horizontal_residual[pos] = if local_x == 0 {
+                add_residual_sample_proxy_score(&mut scores.dc, sample - dc, magnitude_scale);
+                add_residual_sample_proxy_score(
+                    &mut scores.horizontal,
+                    sample - h_pred[local_y],
+                    magnitude_scale,
+                );
+                add_residual_sample_proxy_score(
+                    &mut scores.vertical,
+                    sample - v_pred[local_x],
+                    magnitude_scale,
+                );
+                let bdpcm_horizontal = if local_x == 0 {
                     sample - h_pred[local_y]
                 } else {
                     sample - source[pos - 1]
                 };
-                bdpcm_vertical_residual[pos] = if local_y == 0 {
+                add_residual_sample_proxy_score(
+                    &mut scores.bdpcm_horizontal,
+                    bdpcm_horizontal,
+                    magnitude_scale,
+                );
+                let bdpcm_vertical = if local_y == 0 {
                     sample - v_pred[local_x]
                 } else {
                     sample - source[pos - TX4X4_SIZE]
                 };
+                add_residual_sample_proxy_score(
+                    &mut scores.bdpcm_vertical,
+                    bdpcm_vertical,
+                    magnitude_scale,
+                );
             }
         }
 
-        Av2DcHvBdpcmTxbScores {
-            dc: residual_sample_proxy_score(&dc_residual, kind),
-            horizontal: residual_sample_proxy_score(&horizontal_residual, kind),
-            vertical: residual_sample_proxy_score(&vertical_residual, kind),
-            bdpcm_horizontal: residual_sample_proxy_score(&bdpcm_horizontal_residual, kind),
-            bdpcm_vertical: residual_sample_proxy_score(&bdpcm_vertical_residual, kind),
-        }
+        scores
     }
 
     fn dc_predictor_for_score(
