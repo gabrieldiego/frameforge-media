@@ -26,6 +26,26 @@ impl Av2DcHvBdpcmTxbScores {
     }
 }
 
+fn residual_sample_proxy_score(
+    residual: &[i32; TX4X4_SAMPLES],
+    kind: Av2CoefficientProxyKind,
+) -> usize {
+    let magnitude_scale = match kind {
+        Av2CoefficientProxyKind::LumaIdtx => 4,
+        Av2CoefficientProxyKind::LumaTransform => 4,
+        Av2CoefficientProxyKind::ChromaTransform => 3,
+    };
+    let mut score = 16usize;
+    for &delta in residual {
+        let level = delta.unsigned_abs() as usize;
+        if level == 0 {
+            continue;
+        }
+        score += 80 + level.min(255) * magnitude_scale;
+    }
+    score
+}
+
 struct Av2LosslessSubsampledTileState<'a> {
     geometry: Av2VideoGeometry,
     region: Av2TileRegion,
@@ -887,11 +907,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
 
         Av2DcHvBdpcmTxbScores {
-            dc: coefficient_proxy_score(&av2_fwht4x4(&dc_residual), kind),
-            horizontal: coefficient_proxy_score(&av2_fwht4x4(&horizontal_residual), kind),
-            vertical: coefficient_proxy_score(&av2_fwht4x4(&vertical_residual), kind),
-            bdpcm_horizontal: coefficient_proxy_score(&av2_fwht4x4(&bdpcm_horizontal_residual), kind),
-            bdpcm_vertical: coefficient_proxy_score(&av2_fwht4x4(&bdpcm_vertical_residual), kind),
+            dc: residual_sample_proxy_score(&dc_residual, kind),
+            horizontal: residual_sample_proxy_score(&horizontal_residual, kind),
+            vertical: residual_sample_proxy_score(&vertical_residual, kind),
+            bdpcm_horizontal: residual_sample_proxy_score(&bdpcm_horizontal_residual, kind),
+            bdpcm_vertical: residual_sample_proxy_score(&bdpcm_vertical_residual, kind),
         }
     }
 
