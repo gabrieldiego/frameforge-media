@@ -2,6 +2,7 @@ const CDF_PROB_TOP: u32 = 1 << 15;
 const EC_PROB_SHIFT: u32 = 7;
 const AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE: usize = 512;
 const AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE: usize = 256;
+const AV2_STATIC_CDF_LOOKUP_SIZE: usize = 512;
 // The forward AV2 pre-carry finalizer delays output while a future carry could
 // still change pending bytes. Each pending word is a 9-bit byte-plus-carry
 // value, so 32 words map to a small 288-bit RTL queue. This is intentionally
@@ -74,7 +75,7 @@ pub struct Av2EntropyWriter {
     last_adaptive_cdf_name: Option<Av2StaticNameCacheEntry>,
     last_adaptive_cdf_index: Option<usize>,
     adaptive_cdf_lookup_cache: [Option<usize>; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
-    adaptive_static_cdf_indices: Vec<Option<usize>>,
+    adaptive_static_cdf_indices: [Option<usize>; AV2_STATIC_CDF_LOOKUP_SIZE],
     record_fields: bool,
 }
 
@@ -150,7 +151,7 @@ impl Av2EntropyWriter {
             last_adaptive_cdf_name: None,
             last_adaptive_cdf_index: None,
             adaptive_cdf_lookup_cache: [None; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
-            adaptive_static_cdf_indices: Vec::new(),
+            adaptive_static_cdf_indices: [None; AV2_STATIC_CDF_LOOKUP_SIZE],
             record_fields,
         }
     }
@@ -249,6 +250,7 @@ impl Av2EntropyWriter {
         self.write_symbol_with_resolved_cdf(name, symbol, cdf, nsymbs, update_cdf, adaptive_index);
     }
 
+    #[inline(always)]
     pub fn write_symbol_with_static_cdf_key(
         &mut self,
         name: &'static str,
@@ -266,6 +268,7 @@ impl Av2EntropyWriter {
         self.write_symbol_with_resolved_cdf(name, symbol, cdf, nsymbs, update_cdf, adaptive_index);
     }
 
+    #[inline(always)]
     fn write_symbol_with_resolved_cdf(
         &mut self,
         name: &'static str,
@@ -432,16 +435,17 @@ impl Av2EntropyWriter {
         index
     }
 
+    #[inline(always)]
     fn static_adaptive_cdf_index(
         &mut self,
         static_key: usize,
         cdf: &[u16],
         nsymbs: usize,
     ) -> usize {
-        if static_key >= self.adaptive_static_cdf_indices.len() {
-            self.adaptive_static_cdf_indices
-                .resize(static_key + 1, None);
-        }
+        assert!(
+            static_key < AV2_STATIC_CDF_LOOKUP_SIZE,
+            "static AV2 CDF key {static_key} exceeds direct lookup table"
+        );
         if let Some(index) = self.adaptive_static_cdf_indices[static_key] {
             #[cfg(debug_assertions)]
             {
