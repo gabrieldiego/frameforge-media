@@ -370,7 +370,7 @@ def read_y4m_metadata(path: Path, context: str) -> Y4mMetadata:
 
 def generate_yuv(vector: TestVector, sources: dict[str, TestVectorSource]) -> bytes:
     validate_vector(vector)
-    if vector.pattern == "source_crop":
+    if vector.pattern in {"source_crop", "source_crop_canary"}:
         return generate_source_crop(vector, sources)
     if vector.pattern == "source_file":
         return generate_source_file_clip(vector)
@@ -569,11 +569,14 @@ def generate_source_crop(vector: TestVector, sources: dict[str, TestVectorSource
     if vector.crop_x + vector.width > source.width or vector.crop_y + vector.height > source.height:
         raise ValueError(f"{vector.filename} crop exceeds source dimensions")
 
-    if source.fmt in {"png_rgb8", "png_rgba8"} and yuv444_bit_depth(vector.fmt) is not None:
-        return generate_png_yuv444_crop(vector, source)
+    if source.fmt in {"png_rgb8", "png_rgba8"}:
+        if yuv420_bit_depth(vector.fmt) is not None:
+            return generate_png_yuv420_crop(vector, source)
+        if yuv444_bit_depth(vector.fmt) is not None:
+            return generate_png_yuv444_crop(vector, source)
     if source.fmt != "yuv420p8" or vector.fmt != "yuv420p8":
         raise ValueError(
-            "source_crop supports yuv420p8->yuv420p8 and PNG RGB/RGBA->planar YUV 4:4:4"
+            "source_crop supports yuv420p8->yuv420p8 and PNG RGB/RGBA->planar YUV 4:2:0 or 4:4:4"
         )
 
     frame_size = source.width * source.height * 3 // 2
@@ -604,6 +607,61 @@ def generate_source_crop(vector: TestVector, sources: dict[str, TestVectorSource
     return bytes(out)
 
 
+def generate_png_yuv420_crop(vector: TestVector, source: TestVectorSource) -> bytes:
+    if Image is None:
+        raise ValueError("PNG-backed source_crop vectors require Pillow")
+
+    with Image.open(source.path) as image:
+        if image.size != (source.width, source.height):
+            raise ValueError(
+                f"{source.id} declares {source.width}x{source.height}, "
+                f"but PNG is {image.size[0]}x{image.size[1]}"
+            )
+        crop = image.convert("RGB").crop(
+            (
+                vector.crop_x,
+                vector.crop_y,
+                vector.crop_x + vector.width,
+                vector.crop_y + vector.height,
+            )
+        )
+        red_plane, green_plane, blue_plane = crop.split()
+        y_plane = green_plane.tobytes()
+        u444 = blue_plane.tobytes()
+        v444 = red_plane.tobytes()
+        u_plane = bytearray()
+        v_plane = bytearray()
+        for y in range(0, vector.height, 2):
+            row0 = y * vector.width
+            row1 = (y + 1) * vector.width
+            for x in range(0, vector.width, 2):
+                indices = (
+                    row0 + x,
+                    row0 + x + 1,
+                    row1 + x,
+                    row1 + x + 1,
+                )
+                u_plane.append(sum(u444[index] for index in indices) // 4)
+                v_plane.append(sum(v444[index] for index in indices) // 4)
+
+    bit_depth = yuv420_bit_depth(vector.fmt)
+    if bit_depth is None:
+        raise ValueError(f"unsupported PNG-backed output format: {vector.fmt}")
+    if vector.pattern == "source_crop_canary" and bit_depth <= 8:
+        raise ValueError("source_crop_canary is intended for high-depth crop vectors")
+    if bit_depth > 8:
+        return pad_planar8_planes_to_le(
+            (
+                (y_plane, vector.width, vector.height, 0),
+                (u_plane, vector.width // 2, vector.height // 2, 1),
+                (v_plane, vector.width // 2, vector.height // 2, 2),
+            ),
+            bit_depth,
+            canary=vector.pattern == "source_crop_canary",
+        )
+    return y_plane + bytes(u_plane) + bytes(v_plane)
+
+
 def generate_png_yuv444_crop(vector: TestVector, source: TestVectorSource) -> bytes:
     if Image is None:
         raise ValueError("PNG-backed source_crop vectors require Pillow")
@@ -623,13 +681,23 @@ def generate_png_yuv444_crop(vector: TestVector, source: TestVectorSource) -> by
             )
         )
         red_plane, green_plane, blue_plane = crop.split()
-        out = green_plane.tobytes() + blue_plane.tobytes() + red_plane.tobytes()
+        planes = (
+            (green_plane.tobytes(), vector.width, vector.height, 0),
+            (blue_plane.tobytes(), vector.width, vector.height, 1),
+            (red_plane.tobytes(), vector.width, vector.height, 2),
+        )
         bit_depth = yuv444_bit_depth(vector.fmt)
         if bit_depth is None:
             raise ValueError(f"unsupported PNG-backed output format: {vector.fmt}")
+        if vector.pattern == "source_crop_canary" and bit_depth <= 8:
+            raise ValueError("source_crop_canary is intended for high-depth crop vectors")
         if bit_depth > 8:
-            return zero_pad_planar8_to_le(out, bit_depth)
-        return out
+            return pad_planar8_planes_to_le(
+                planes,
+                bit_depth,
+                canary=vector.pattern == "source_crop_canary",
+            )
+        return b"".join(bytes(plane) for plane, _width, _height, _index in planes)
 
 
 def zero_pad_planar8_to_le(data: bytes, bit_depth: int) -> bytes:
@@ -639,6 +707,25 @@ def zero_pad_planar8_to_le(data: bytes, bit_depth: int) -> bytes:
         value = sample << shift
         out[index * 2] = value & 0xFF
         out[index * 2 + 1] = value >> 8
+    return bytes(out)
+
+
+def pad_planar8_planes_to_le(
+    planes: tuple[tuple[bytes | bytearray, int, int, int], ...],
+    bit_depth: int,
+    *,
+    canary: bool,
+) -> bytes:
+    shift = bit_depth - 8
+    out = bytearray()
+    for data, width, height, plane in planes:
+        for y in range(height):
+            row = y * width
+            for x in range(width):
+                value = data[row + x] << shift
+                if canary:
+                    value |= bitdepth_canary_lower(x, y, 0, plane, bit_depth)
+                out.extend(value.to_bytes(2, "little"))
     return bytes(out)
 
 
@@ -805,17 +892,22 @@ def append_canary_plane(
 
 def bitdepth_canary_sample(x: int, y: int, frame: int, plane: int, bit_depth: int) -> int:
     shift = bit_depth - 8
-    low_mask = (1 << shift) - 1
     block_index = ((x // 8) + (y // 8) * 2 + frame) % 4
     base = (
         (32, 96, 160, 224),
         (80, 144, 208, 48),
         (112, 176, 64, 240),
     )[plane][block_index]
+    return (base << shift) | bitdepth_canary_lower(x, y, frame, plane, bit_depth)
+
+
+def bitdepth_canary_lower(x: int, y: int, frame: int, plane: int, bit_depth: int) -> int:
+    shift = bit_depth - 8
+    low_mask = (1 << shift) - 1
     lower = ((x & 3) | ((y & 3) << 2) | (plane << 1) | frame) & low_mask
     if lower == 0:
         lower = low_mask
-    return (base << shift) | lower
+    return lower
 
 
 def render_frame(vector: TestVector, frame: int) -> tuple[bytearray, bytearray, bytearray]:

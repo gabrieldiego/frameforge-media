@@ -205,10 +205,12 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
     }
 
     let mut best: Option<(Av2EntropyPayload, Vec<u8>)> = None;
+    // The max-16 candidate can emit an AVM-rejected tile for high-depth 4:2:0
+    // edge geometries while still matching the internal reconstruction.
+    // Keep the reference-clean candidates until that leaf shape is audited.
     for partition_policy in [
         Av2PartitionPolicy::LargestLosslessLeaves,
         Av2PartitionPolicy::LosslessLeafLimit { max_size: 32 },
-        Av2PartitionPolicy::LosslessLeafLimit { max_size: 16 },
         Av2PartitionPolicy::Fixed8x8Leaves,
     ] {
         let mut candidate_recon = recon.to_vec();

@@ -49,6 +49,7 @@ Supported patterns:
 - `gradient`
 - `color_blocks`
 - `bitdepth_canary`
+- `source_crop_canary` for local high-depth PNG-backed crop fixtures
 
 `bitdepth_canary` is a high-depth smoke pattern that writes deterministic
 non-zero lower bits into generated 10-bit and 12-bit samples. It is intended to
@@ -58,6 +59,11 @@ enables them only for codec paths that emit reference-decodable lossless 4:2:2
 streams. VVC 4:2:0, 4:2:2, and 4:4:4 high-depth canaries are enabled through
 12 bits, and AV2 is enabled for the 10-bit 4:2:0, 4:2:2, and 4:4:4 canary
 paths.
+
+`source_crop_canary` behaves like `source_crop` for PNG-backed local fixtures,
+but high-depth output keeps the 8-bit crop value in the upper bits and writes a
+deterministic non-zero pattern into the lower bits. This is useful for lossless
+crop sweeps that should expose accidental low-bit pruning.
 
 Generated filenames include metadata in the CLI-supported form:
 
