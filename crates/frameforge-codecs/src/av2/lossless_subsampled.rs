@@ -315,39 +315,99 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         leaf_height: usize,
         coded_mi_context: &Av2CodedMiContext,
     ) -> [i32; TX4X4_SAMPLES] {
-        let residual = match plane {
-            Av2LosslessPlane::Y => {
-                if let Some(horz) = mode.luma_bdpcm_horz {
-                    self.dpcm_residual4x4(plane, x0, y0, horz)
-                } else {
-                    self.luma_intra_residual4x4(
-                        x0,
-                        y0,
-                        mode.luma_intra_mode,
-                        leaf_x0,
-                        leaf_y0,
-                        leaf_width,
-                        leaf_height,
-                        coded_mi_context,
-                    )
+        let residual = if self.source_backed_recon && !mode.use_fsc {
+            match plane {
+                Av2LosslessPlane::Y => {
+                    if let Some(horz) = mode.luma_bdpcm_horz {
+                        self.source_backed_dpcm_residual4x4(plane, x0, y0, horz)
+                    } else if let Some(residual) =
+                        self.source_backed_luma_intra_residual4x4(x0, y0, mode.luma_intra_mode)
+                    {
+                        residual
+                    } else {
+                        self.luma_intra_residual4x4(
+                            x0,
+                            y0,
+                            mode.luma_intra_mode,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            leaf_height,
+                            coded_mi_context,
+                        )
+                    }
                 }
-            }
-            Av2LosslessPlane::U | Av2LosslessPlane::V => {
-                if mode.chroma_use_bdpcm {
-                    self.dpcm_residual4x4(plane, x0, y0, mode.chroma_intra_mode.is_horizontal())
-                } else {
-                    self.intra_residual4x4(
+                Av2LosslessPlane::U | Av2LosslessPlane::V => {
+                    if mode.chroma_use_bdpcm {
+                        self.source_backed_dpcm_residual4x4(
+                            plane,
+                            x0,
+                            y0,
+                            mode.chroma_intra_mode.is_horizontal(),
+                        )
+                    } else if let Some(residual) = self.source_backed_chroma_intra_residual4x4(
                         plane,
                         x0,
                         y0,
                         mode.chroma_intra_mode,
-                        chroma_directional_angle_for_mode(mode),
-                        leaf_x0,
-                        leaf_y0,
-                        leaf_width,
-                        leaf_height,
-                        coded_mi_context,
-                    )
+                    ) {
+                        residual
+                    } else {
+                        self.intra_residual4x4(
+                            plane,
+                            x0,
+                            y0,
+                            mode.chroma_intra_mode,
+                            chroma_directional_angle_for_mode(mode),
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            leaf_height,
+                            coded_mi_context,
+                        )
+                    }
+                }
+            }
+        } else {
+            match plane {
+                Av2LosslessPlane::Y => {
+                    if let Some(horz) = mode.luma_bdpcm_horz {
+                        self.dpcm_residual4x4(plane, x0, y0, horz)
+                    } else {
+                        self.luma_intra_residual4x4(
+                            x0,
+                            y0,
+                            mode.luma_intra_mode,
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            leaf_height,
+                            coded_mi_context,
+                        )
+                    }
+                }
+                Av2LosslessPlane::U | Av2LosslessPlane::V => {
+                    if mode.chroma_use_bdpcm {
+                        self.dpcm_residual4x4(
+                            plane,
+                            x0,
+                            y0,
+                            mode.chroma_intra_mode.is_horizontal(),
+                        )
+                    } else {
+                        self.intra_residual4x4(
+                            plane,
+                            x0,
+                            y0,
+                            mode.chroma_intra_mode,
+                            chroma_directional_angle_for_mode(mode),
+                            leaf_x0,
+                            leaf_y0,
+                            leaf_width,
+                            leaf_height,
+                            coded_mi_context,
+                        )
+                    }
                 }
             }
         };
@@ -750,6 +810,132 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             }
         }
         residual
+    }
+
+    fn source_backed_luma_intra_residual4x4(
+        &self,
+        x0: usize,
+        y0: usize,
+        mode: Av2LumaIntraMode,
+    ) -> Option<[i32; TX4X4_SAMPLES]> {
+        self.source_backed_chroma_intra_residual4x4(
+            Av2LosslessPlane::Y,
+            x0,
+            y0,
+            chroma_mode_for_luma_mode(mode),
+        )
+    }
+
+    fn source_backed_chroma_intra_residual4x4(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mode: Av2ChromaIntraMode,
+    ) -> Option<[i32; TX4X4_SAMPLES]> {
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        match mode {
+            Av2ChromaIntraMode::Dc => {
+                let predictor = i32::from(self.source_backed_dc_predictor(plane, x0, y0));
+                for local_y in 0..TX4X4_SIZE {
+                    for local_x in 0..TX4X4_SIZE {
+                        residual[local_y * TX4X4_SIZE + local_x] =
+                            i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
+                                - predictor;
+                    }
+                }
+                Some(residual)
+            }
+            Av2ChromaIntraMode::Horizontal => {
+                for local_y in 0..TX4X4_SIZE {
+                    let predictor =
+                        i32::from(self.source_backed_h_predictor(plane, x0, y0, local_y));
+                    for local_x in 0..TX4X4_SIZE {
+                        residual[local_y * TX4X4_SIZE + local_x] =
+                            i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
+                                - predictor;
+                    }
+                }
+                Some(residual)
+            }
+            Av2ChromaIntraMode::Vertical => {
+                let mut predictors = [0i32; TX4X4_SIZE];
+                for (local_x, predictor) in predictors.iter_mut().enumerate() {
+                    *predictor = i32::from(self.source_backed_v_predictor(plane, x0, y0, local_x));
+                }
+                for local_y in 0..TX4X4_SIZE {
+                    for local_x in 0..TX4X4_SIZE {
+                        residual[local_y * TX4X4_SIZE + local_x] =
+                            i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
+                                - predictors[local_x];
+                    }
+                }
+                Some(residual)
+            }
+            _ => None,
+        }
+    }
+
+    fn source_backed_dpcm_residual4x4(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        horz: bool,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let x = x0 + local_x;
+                let y = y0 + local_y;
+                let sample = i32::from(self.source_sample(plane, x, y));
+                let predicted_delta = if horz {
+                    if local_x == 0 {
+                        sample - i32::from(self.source_backed_h_predictor(plane, x0, y0, local_y))
+                    } else {
+                        sample - i32::from(self.source_sample(plane, x - 1, y))
+                    }
+                } else if local_y == 0 {
+                    sample - i32::from(self.source_backed_v_predictor(plane, x0, y0, local_x))
+                } else {
+                    sample - i32::from(self.source_sample(plane, x, y - 1))
+                };
+                residual[local_y * TX4X4_SIZE + local_x] = predicted_delta;
+            }
+        }
+        residual
+    }
+
+    fn source_backed_dc_predictor(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+    ) -> Av2Sample {
+        let edge_sample = |plane, x, y| self.source_sample(plane, x, y);
+        self.dc_predictor_with(plane, x0, y0, &edge_sample)
+    }
+
+    fn source_backed_h_predictor(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        local_y: usize,
+    ) -> Av2Sample {
+        let edge_sample = |plane, x, y| self.source_sample(plane, x, y);
+        self.h_predictor_with(plane, x0, y0, local_y, &edge_sample)
+    }
+
+    fn source_backed_v_predictor(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        local_x: usize,
+    ) -> Av2Sample {
+        let edge_sample = |plane, x, y| self.source_sample(plane, x, y);
+        self.v_predictor_with(plane, x0, y0, local_x, &edge_sample)
     }
 
     fn intra_residual4x4_for_score(
