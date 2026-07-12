@@ -191,6 +191,26 @@ impl Av2EntropyWriter {
         }
     }
 
+    #[inline(always)]
+    pub fn write_literal_bit(&mut self, name: &'static str, value: bool) {
+        if self.record_fields {
+            self.fields.push(Av2EntropyField {
+                name,
+                code: Av2EntropyCode::Literal,
+                symbol_offset: self.symbol_bits,
+                bit_count: 1,
+                symbol: None,
+                literal_value: Some(u32::from(value)),
+                fl: None,
+                fh: None,
+                fl_inc: None,
+                fh_inc: None,
+            });
+        }
+        self.symbol_bits += 1;
+        self.encode_literal_bypass(u32::from(value), 1);
+    }
+
     pub fn write_uniform(&mut self, name: &'static str, n: u32, value: u32) {
         assert!(n > 0, "AV2 uniform helper expects a positive range");
         assert!(value < n, "AV2 uniform value is outside the coding range");
@@ -205,7 +225,7 @@ impl Av2EntropyWriter {
             self.write_literal(name, value, (l - 1) as u8);
         } else {
             self.write_literal(name, m + ((value - m) >> 1), (l - 1) as u8);
-            self.write_literal(name, (value - m) & 1, 1);
+            self.write_literal_bit(name, ((value - m) & 1) != 0);
         }
     }
 

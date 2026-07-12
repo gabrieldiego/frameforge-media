@@ -52,7 +52,7 @@ fn write_luma_palette_colors(
         // AV2 v1.0.0 Section 5.20.8.1 palette_mode_info(), mirrored from
         // AVM write_palette_colors_y(): signal cache entries until every
         // palette color is accounted for, then delta-code only misses.
-        writer.write_literal("tile.palette.y_color_cache", u32::from(found), 1);
+        writer.write_literal_bit("tile.palette.y_color_cache", found);
         colors_in_cache += usize::from(found);
         if colors_in_cache == colors.len() {
             break;
@@ -169,7 +169,7 @@ fn write_luma_palette_color_map(
         // smaller than 64x64 signal a scan direction before the identity-axis
         // and color-index tokens. AVM pack_map_tokens() maps direction=1 to
         // a transposed column-major scan.
-        writer.write_literal("tile.palette.y_direction", u32::from(vertical_scan), 1);
+        writer.write_literal_bit("tile.palette.y_direction", vertical_scan);
     }
     let mut prev_identity_row_flag = 0usize;
     let outer_limit = if vertical_scan {

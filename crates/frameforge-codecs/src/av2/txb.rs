@@ -157,7 +157,7 @@ fn write_luma_palette_residual_txb(
                 level as i32
             };
         } else {
-            writer.write_literal("tile.coeff.y.ac_sign_negative", u32::from(negative), 1);
+            writer.write_literal_bit("tile.coeff.y.ac_sign_negative", negative);
         }
         write_luma_high_range(writer, pos, level, &mut hr_level_avg);
         cul_level += level;
@@ -298,7 +298,7 @@ fn write_chroma_bdpcm_txb(
             Av2ChromaPlane::U => "tile.coeff.u.ac_sign_negative",
             Av2ChromaPlane::V => "tile.coeff.v.ac_sign_negative",
         };
-        writer.write_literal(sign_name, u32::from(negative), 1);
+        writer.write_literal_bit(sign_name, negative);
         write_chroma_high_range(writer, plane, pos, level, &mut hr_level_avg);
         if scan_index == 0 {
             dc_val = if negative {
@@ -1382,7 +1382,7 @@ fn write_truncated_rice(
         if q > 0 {
             writer.write_literal(name, 0, q as u8);
         }
-        writer.write_literal(name, 1, 1);
+        writer.write_literal_bit(name, true);
         if m > 0 {
             writer.write_literal(name, value & ((1u32 << m) - 1), m);
         }

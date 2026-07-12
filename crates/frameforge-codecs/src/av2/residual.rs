@@ -497,7 +497,7 @@ fn write_u_lossless_dc_txb(writer: &mut Av2EntropyWriter, skip_ctx: u8, sample: 
     write_u_txb_nonzero(writer, skip_ctx, false);
     write_eob_one_uv(writer);
     write_uv_dc_level(writer, level);
-    writer.write_literal("tile.coeff.u.dc_sign_negative", u32::from(negative), 1);
+    writer.write_literal_bit("tile.coeff.u.dc_sign_negative", negative);
     write_uv_dc_high_range(writer, level);
     nonzero_dc_entropy_context(negative)
 }
@@ -511,7 +511,7 @@ fn write_v_lossless_dc_txb(writer: &mut Av2EntropyWriter, skip_ctx: u8, sample: 
     write_v_txb_nonzero(writer, skip_ctx);
     write_eob_one_uv(writer);
     write_uv_dc_level(writer, level);
-    writer.write_literal("tile.coeff.v.dc_sign_negative", u32::from(negative), 1);
+    writer.write_literal_bit("tile.coeff.v.dc_sign_negative", negative);
     write_uv_dc_high_range(writer, level);
     nonzero_dc_entropy_context(negative)
 }
@@ -541,7 +541,7 @@ fn write_chroma_dc_delta_txb(
         Av2ChromaPlane::U => "tile.coeff.u.dc_sign_negative",
         Av2ChromaPlane::V => "tile.coeff.v.dc_sign_negative",
     };
-    writer.write_literal(sign_name, u32::from(delta < 0), 1);
+    writer.write_literal_bit(sign_name, delta < 0);
     write_uv_dc_high_range(writer, level);
     (
         lossless_entropy_context(u32::from(level), i32::from(delta.signum())),

@@ -469,7 +469,7 @@ fn write_intrabc_copy(
     );
     for idx in 0..(max_ref_bv_count - 1) {
         let bit = usize::from(usize::from(drl_idx) != idx);
-        writer.write_literal("tile.intrabc.drl_idx", bit as u32, 1);
+        writer.write_literal_bit("tile.intrabc.drl_idx", bit != 0);
         if usize::from(drl_idx) == idx {
             break;
         }
@@ -501,10 +501,10 @@ fn write_intrabc_explicit_dv(writer: &mut Av2EntropyWriter, dv: Av2IntrabcExplic
     let scaled_col = (diff_col.unsigned_abs() >> 3) as usize;
     write_intrabc_dv_magnitude(writer, scaled_row, scaled_col);
     if diff_row != 0 {
-        writer.write_literal("tile.intrabc.dv.sign", u32::from(diff_row < 0), 1);
+        writer.write_literal_bit("tile.intrabc.dv.sign", diff_row < 0);
     }
     if diff_col != 0 {
-        writer.write_literal("tile.intrabc.dv.sign", u32::from(diff_col < 0), 1);
+        writer.write_literal_bit("tile.intrabc.dv.sign", diff_col < 0);
     }
 }
 
@@ -589,7 +589,7 @@ fn write_intrabc_dv_truncated_unary(
                 false,
             );
         } else {
-            writer.write_literal("tile.intrabc.dv.shell_offset_class2", bit as u32, 1);
+            writer.write_literal_bit("tile.intrabc.dv.shell_offset_class2", bit != 0);
         }
         if coded_value == bit_idx {
             break;
