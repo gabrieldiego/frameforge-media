@@ -148,29 +148,33 @@ fn quantized_luma_palette_values(
     let n = values.len();
     // Minimize weighted absolute luma prediction error over sorted value
     // buckets. Residual coefficients still make reconstruction lossless.
+    let mut prefix_counts = vec![0usize; n + 1];
+    let mut prefix_sums = vec![0usize; n + 1];
+    for (index, &value) in values.iter().enumerate() {
+        let count = counts[usize::from(value)];
+        prefix_counts[index + 1] = prefix_counts[index] + count;
+        prefix_sums[index + 1] = prefix_sums[index] + usize::from(value) * count;
+    }
+
     let mut segment_cost = vec![vec![0usize; n]; n];
     let mut segment_value = vec![vec![0; n]; n];
     for start in 0..n {
+        let mut median_index = start;
         for end in start..n {
-            let total_count: usize = values[start..=end]
-                .iter()
-                .map(|&value| counts[usize::from(value)])
-                .sum();
+            let total_count = prefix_counts[end + 1] - prefix_counts[start];
             let median_threshold = total_count.div_ceil(2);
-            let mut cumulative = 0usize;
-            let mut median = values[start];
-            for &value in &values[start..=end] {
-                cumulative += counts[usize::from(value)];
-                if cumulative >= median_threshold {
-                    median = value;
-                    break;
-                }
+            while prefix_counts[median_index + 1] - prefix_counts[start] < median_threshold {
+                median_index += 1;
             }
+            let median = values[median_index];
+            let median_value = usize::from(median);
+            let left_count = prefix_counts[median_index + 1] - prefix_counts[start];
+            let left_sum = prefix_sums[median_index + 1] - prefix_sums[start];
+            let right_count = prefix_counts[end + 1] - prefix_counts[median_index + 1];
+            let right_sum = prefix_sums[end + 1] - prefix_sums[median_index + 1];
             segment_value[start][end] = median;
-            segment_cost[start][end] = values[start..=end]
-                .iter()
-                .map(|&value| usize::from(value.abs_diff(median)) * counts[usize::from(value)])
-                .sum();
+            segment_cost[start][end] =
+                median_value * left_count - left_sum + right_sum - median_value * right_count;
         }
     }
 
