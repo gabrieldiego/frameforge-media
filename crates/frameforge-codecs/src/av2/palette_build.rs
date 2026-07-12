@@ -44,7 +44,7 @@ pub(crate) fn build_luma_palette_444(
                 }
             }
 
-            let block = build_luma_palette_block(&samples, bit_depth);
+            let block = build_luma_palette_block(&samples);
             let mode = choose_luma_intra_mode(
                 &y_plane,
                 geometry.width,

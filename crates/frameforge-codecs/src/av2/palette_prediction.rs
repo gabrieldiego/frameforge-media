@@ -65,36 +65,23 @@ fn luma_intra_prediction_sample(
 
 fn build_luma_palette_block(
     samples: &[Av2Sample; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
-    bit_depth: SampleBitDepth,
 ) -> Av2LumaPaletteBlock444 {
-    let mut collected = Vec::with_capacity(AV2_LUMA_PALETTE_MAX_COLORS);
-    let value_count = usize::from(bit_depth.max_sample()) + 1;
-    let mut counts = vec![0usize; value_count];
-    let mut first_positions = vec![usize::MAX; value_count];
-    for (sample_index, &sample) in samples.iter().enumerate() {
-        let sample_index_by_value = usize::from(sample);
-        counts[sample_index_by_value] += 1;
-        first_positions[sample_index_by_value] =
-            first_positions[sample_index_by_value].min(sample_index);
-    }
-    for &sample in samples {
-        if !collected.contains(&sample) && collected.len() < AV2_LUMA_PALETTE_MAX_COLORS {
-            collected.push(sample);
-        }
-    }
-    if collected.is_empty() {
-        collected.push(0);
-    }
+    let stats = LumaPaletteBlockStats::from_samples(samples);
 
-    let unique_colors = counts.iter().filter(|&&count| count != 0).count();
+    let unique_colors = stats.len;
     let target_colors = unique_colors
         .clamp(AV2_LUMA_PALETTE_MIN_COLORS, AV2_LUMA_PALETTE_MAX_COLORS)
         .min(AV2_LUMA_PALETTE_SOFT_MAX_COLORS);
 
     let mut colors = if unique_colors > target_colors {
-        quantized_luma_palette_values(&counts, &first_positions, target_colors)
+        quantized_luma_palette_values_compact(
+            stats.values(),
+            stats.counts(),
+            stats.first_positions(),
+            target_colors,
+        )
     } else {
-        collected
+        stats.values().to_vec()
     };
     let mut candidate = 0;
     while colors.len() < target_colors {
@@ -114,6 +101,71 @@ fn build_luma_palette_block(
     Av2LumaPaletteBlock444 { colors, indices }
 }
 
+struct LumaPaletteBlockStats {
+    values: [Av2Sample; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+    counts: [usize; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+    first_positions: [usize; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+    len: usize,
+}
+
+impl LumaPaletteBlockStats {
+    fn from_samples(samples: &[Av2Sample; AV2_LUMA_PALETTE_BLOCK_SAMPLES]) -> Self {
+        let mut stats = Self {
+            values: [0; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+            counts: [0; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+            first_positions: [usize::MAX; AV2_LUMA_PALETTE_BLOCK_SAMPLES],
+            len: 0,
+        };
+        for (sample_index, &sample) in samples.iter().enumerate() {
+            if let Some(value_index) = stats.values[..stats.len]
+                .iter()
+                .position(|&value| value == sample)
+            {
+                stats.counts[value_index] += 1;
+                stats.first_positions[value_index] =
+                    stats.first_positions[value_index].min(sample_index);
+            } else {
+                stats.values[stats.len] = sample;
+                stats.counts[stats.len] = 1;
+                stats.first_positions[stats.len] = sample_index;
+                stats.len += 1;
+            }
+        }
+        stats.sort_by_value();
+        stats
+    }
+
+    fn sort_by_value(&mut self) {
+        for index in 1..self.len {
+            let value = self.values[index];
+            let count = self.counts[index];
+            let first_position = self.first_positions[index];
+            let mut insertion = index;
+            while insertion > 0 && self.values[insertion - 1] > value {
+                self.values[insertion] = self.values[insertion - 1];
+                self.counts[insertion] = self.counts[insertion - 1];
+                self.first_positions[insertion] = self.first_positions[insertion - 1];
+                insertion -= 1;
+            }
+            self.values[insertion] = value;
+            self.counts[insertion] = count;
+            self.first_positions[insertion] = first_position;
+        }
+    }
+
+    fn values(&self) -> &[Av2Sample] {
+        &self.values[..self.len]
+    }
+
+    fn counts(&self) -> &[usize] {
+        &self.counts[..self.len]
+    }
+
+    fn first_positions(&self) -> &[usize] {
+        &self.first_positions[..self.len]
+    }
+}
+
 fn palette_index_for_sample(colors: &[Av2Sample], sample: Av2Sample) -> u8 {
     match colors.binary_search(&sample) {
         Ok(index) => index as u8,
@@ -130,6 +182,103 @@ fn palette_index_for_sample(colors: &[Av2Sample], sample: Av2Sample) -> u8 {
             }
         }
     }
+}
+
+fn quantized_luma_palette_values_compact(
+    values: &[Av2Sample],
+    counts: &[usize],
+    first_positions: &[usize],
+    target_colors: usize,
+) -> Vec<Av2Sample> {
+    debug_assert_eq!(values.len(), counts.len());
+    debug_assert_eq!(values.len(), first_positions.len());
+    if values.len() <= target_colors {
+        return values.to_vec();
+    }
+
+    let n = values.len();
+    let mut prefix_counts = [0usize; AV2_LUMA_PALETTE_BLOCK_SAMPLES + 1];
+    let mut prefix_sums = [0usize; AV2_LUMA_PALETTE_BLOCK_SAMPLES + 1];
+    for (index, (&value, &count)) in values.iter().zip(counts).enumerate() {
+        prefix_counts[index + 1] = prefix_counts[index] + count;
+        prefix_sums[index + 1] = prefix_sums[index] + usize::from(value) * count;
+    }
+
+    let mut segment_cost =
+        [0usize; AV2_LUMA_PALETTE_BLOCK_SAMPLES * AV2_LUMA_PALETTE_BLOCK_SAMPLES];
+    let mut segment_value =
+        [0; AV2_LUMA_PALETTE_BLOCK_SAMPLES * AV2_LUMA_PALETTE_BLOCK_SAMPLES];
+    for start in 0..n {
+        let mut median_index = start;
+        for end in start..n {
+            let total_count = prefix_counts[end + 1] - prefix_counts[start];
+            let median_threshold = total_count.div_ceil(2);
+            while prefix_counts[median_index + 1] - prefix_counts[start] < median_threshold {
+                median_index += 1;
+            }
+            let median = values[median_index];
+            let median_value = usize::from(median);
+            let left_count = prefix_counts[median_index + 1] - prefix_counts[start];
+            let left_sum = prefix_sums[median_index + 1] - prefix_sums[start];
+            let right_count = prefix_counts[end + 1] - prefix_counts[median_index + 1];
+            let right_sum = prefix_sums[end + 1] - prefix_sums[median_index + 1];
+            let segment_index = start * AV2_LUMA_PALETTE_BLOCK_SAMPLES + end;
+            segment_value[segment_index] = median;
+            segment_cost[segment_index] =
+                median_value * left_count - left_sum + right_sum - median_value * right_count;
+        }
+    }
+
+    const DP_ROWS: usize = AV2_LUMA_PALETTE_MAX_COLORS + 1;
+    const DP_COLS: usize = AV2_LUMA_PALETTE_BLOCK_SAMPLES + 1;
+    let mut dp = [usize::MAX; DP_ROWS * DP_COLS];
+    let mut split = [0usize; DP_ROWS * DP_COLS];
+    dp[0] = 0;
+    for colors in 1..=target_colors {
+        for end in colors..=n {
+            let dp_index = colors * DP_COLS + end;
+            for start in (colors - 1)..end {
+                let previous_index = (colors - 1) * DP_COLS + start;
+                let segment_index = start * AV2_LUMA_PALETTE_BLOCK_SAMPLES + end - 1;
+                let Some(cost) = dp[previous_index].checked_add(segment_cost[segment_index])
+                else {
+                    continue;
+                };
+                if cost < dp[dp_index] {
+                    dp[dp_index] = cost;
+                    split[dp_index] = start;
+                }
+            }
+        }
+    }
+
+    let mut colors = Vec::with_capacity(target_colors);
+    let mut end = n;
+    for color_count in (1..=target_colors).rev() {
+        let start = split[color_count * DP_COLS + end];
+        colors.push(segment_value[start * AV2_LUMA_PALETTE_BLOCK_SAMPLES + end - 1]);
+        end = start;
+    }
+    colors.reverse();
+    colors.sort_unstable();
+    colors.dedup();
+
+    if colors.len() < target_colors {
+        let mut frequent: Vec<usize> = (0..n).collect();
+        frequent.sort_by_key(|&index| (Reverse(counts[index]), first_positions[index], values[index]));
+        for index in frequent {
+            if colors.len() == target_colors {
+                break;
+            }
+            let value = values[index];
+            if !colors.contains(&value) {
+                colors.push(value);
+            }
+        }
+        colors.sort_unstable();
+    }
+
+    colors
 }
 
 fn quantized_luma_palette_values(
