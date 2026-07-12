@@ -14,12 +14,13 @@ use ibc::{Av2LocalIbc444, Av2LocalIbcStats};
 use palette::Av2LumaPalette444;
 use syntax::{Av2SyntaxPayload, Av2SyntaxWriter};
 use tile::{
-    av2_black_444_tile_entropy_payload_for_region,
-    av2_black_444_tile_entropy_payload_for_region_with_intrabc,
+    av2_black_444_tile_entropy_payload_for_region_with_fields,
+    av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
-    av2_lossless_subsampled_tile_entropy_payload_for_region,
+    av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields,
     av2_lossy_420_tile_entropy_payload_for_region,
-    av2_luma_palette_444_tile_entropy_payload_for_region, Av2TileRegion,
+    av2_lossy_420_tile_entropy_payload_for_region_with_fields,
+    av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2TileRegion,
 };
 
 pub const AV2_CODEC_NAME: &str = "av2";
@@ -932,7 +933,7 @@ fn av2_mvp_444_trace_jsonl_for_mode(
         frame_mode.allow_intrabc(),
         &tile_layout,
     );
-    let entropy = av2_tile_entropy_payloads_for_mode(&tile_layout, frame_mode);
+    let entropy = av2_tile_entropy_payloads_for_mode(&tile_layout, frame_mode, true);
     let mut lines = String::new();
 
     push_av2_trace_line(
@@ -1569,9 +1570,16 @@ fn av2_black_closed_loop_key_payload(
         .iter()
         .map(|&region| {
             if allow_intrabc {
-                av2_black_444_tile_entropy_payload_for_region_with_intrabc(region, profile, true)
+                av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields(
+                    region, profile, true, false,
+                )
             } else {
-                av2_black_tile_entropy_payload_for_region(region, profile, chroma_format)
+                tile::av2_black_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    chroma_format,
+                    false,
+                )
             }
         })
         .collect();
@@ -1600,13 +1608,14 @@ fn av2_lossy_420_closed_loop_key_payload(
         .regions
         .iter()
         .map(|&region| {
-            av2_lossy_420_tile_entropy_payload_for_region(
+            av2_lossy_420_tile_entropy_payload_for_region_with_fields(
                 region,
                 profile,
                 geometry,
                 bit_depth,
                 frame,
                 reconstruction,
+                false,
             )
         })
         .collect();
@@ -1639,7 +1648,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
         .regions
         .iter()
         .map(|&region| {
-            av2_lossless_subsampled_tile_entropy_payload_for_region(
+            av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields(
                 region,
                 profile,
                 geometry,
@@ -1648,6 +1657,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
                 frame,
                 reconstruction,
                 ibc,
+                false,
             )
         })
         .collect();
@@ -1676,6 +1686,7 @@ fn av2_mvp_444_closed_loop_key_payload(
     let tile_payload = tile_group_payload_from_entropy(&av2_tile_entropy_payloads_for_mode(
         &tile_layout,
         frame_mode,
+        false,
     ));
     let bit_offset = payload.bytes.len() * 8;
     payload.fields.push(syntax::Av2SyntaxField {
@@ -1706,34 +1717,44 @@ fn tile_group_payload_from_entropy(tile_payloads: &[entropy::Av2EntropyPayload])
 fn av2_tile_entropy_payloads_for_mode(
     tile_layout: &Av2TileLayout,
     frame_mode: &Av2Mvp444FrameMode,
+    record_fields: bool,
 ) -> Vec<entropy::Av2EntropyPayload> {
     tile_layout
         .regions
         .iter()
-        .map(|&region| av2_tile_entropy_payload_for_region(region, frame_mode))
+        .map(|&region| av2_tile_entropy_payload_for_region(region, frame_mode, record_fields))
         .collect()
 }
 
 fn av2_tile_entropy_payload_for_region(
     region: Av2TileRegion,
     frame_mode: &Av2Mvp444FrameMode,
+    record_fields: bool,
 ) -> entropy::Av2EntropyPayload {
     match frame_mode {
-        Av2Mvp444FrameMode::Black => av2_black_444_tile_entropy_payload_for_region_with_intrabc(
-            region,
-            frame_mode.profile(),
-            frame_mode.allow_intrabc(),
-        ),
+        Av2Mvp444FrameMode::Black => {
+            av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields(
+                region,
+                frame_mode.profile(),
+                frame_mode.allow_intrabc(),
+                record_fields,
+            )
+        }
         Av2Mvp444FrameMode::LumaPalette { palette, ibc } => {
             if !frame_mode.allow_intrabc() && av2_luma_palette_region_is_black(palette, region) {
-                av2_black_444_tile_entropy_payload_for_region(region, frame_mode.profile())
+                av2_black_444_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    frame_mode.profile(),
+                    record_fields,
+                )
             } else {
-                av2_luma_palette_444_tile_entropy_payload_for_region(
+                av2_luma_palette_444_tile_entropy_payload_for_region_with_fields(
                     region,
                     frame_mode.profile(),
                     frame_mode.allow_intrabc(),
                     palette,
                     ibc.as_ref(),
+                    record_fields,
                 )
             }
         }

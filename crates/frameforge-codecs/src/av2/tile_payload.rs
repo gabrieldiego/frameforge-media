@@ -7,20 +7,31 @@ pub(crate) fn av2_black_444_tile_entropy_payload(
     geometry: Av2VideoGeometry,
     profile: Av2Black444MvpProfile,
 ) -> Av2EntropyPayload {
-    av2_black_444_tile_entropy_payload_for_region(Av2TileRegion::root(geometry), profile)
+    av2_black_444_tile_entropy_payload_for_region_with_fields(
+        Av2TileRegion::root(geometry),
+        profile,
+        true,
+    )
 }
 
-pub(crate) fn av2_black_444_tile_entropy_payload_for_region(
+pub(crate) fn av2_black_444_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
+    record_fields: bool,
 ) -> Av2EntropyPayload {
-    av2_black_444_tile_entropy_payload_for_region_with_intrabc(region, profile, false)
+    av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields(
+        region,
+        profile,
+        false,
+        record_fields,
+    )
 }
 
-pub(crate) fn av2_black_444_tile_entropy_payload_for_region_with_intrabc(
+pub(crate) fn av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     allow_intrabc: bool,
+    record_fields: bool,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region(
         region,
@@ -31,7 +42,8 @@ pub(crate) fn av2_black_444_tile_entropy_payload_for_region_with_intrabc(
         None,
         None,
     );
-    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     plan.write_entropy(&mut writer, None, None);
     writer.finish()
 }
@@ -41,19 +53,30 @@ pub(crate) fn av2_black_tile_entropy_payload_for_region(
     profile: Av2Black444MvpProfile,
     chroma_format: Av2ChromaFormat,
 ) -> Av2EntropyPayload {
+    av2_black_tile_entropy_payload_for_region_with_fields(region, profile, chroma_format, true)
+}
+
+pub(crate) fn av2_black_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    chroma_format: Av2ChromaFormat,
+    record_fields: bool,
+) -> Av2EntropyPayload {
     let plan =
         Av2Black444TilePlan::for_region(region, profile, chroma_format, false, false, None, None);
-    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     plan.write_entropy(&mut writer, None, None);
     writer.finish()
 }
 
-pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region(
+pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     allow_intrabc: bool,
     palette: &Av2LumaPalette444,
     ibc: Option<&Av2LocalIbc444>,
+    record_fields: bool,
 ) -> Av2EntropyPayload {
     let mut best: Option<Av2EntropyPayload> = None;
     // Larger merged palette leaves currently add mode-search cost without a
@@ -66,6 +89,7 @@ pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region(
             palette,
             ibc,
             partition_policy,
+            record_fields,
         );
         let replace = best.as_ref().is_none_or(|best_payload| {
             (payload.bytes.len(), payload.symbol_bits)
@@ -86,6 +110,7 @@ fn av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
     palette: &Av2LumaPalette444,
     ibc: Option<&Av2LocalIbc444>,
     partition_policy: Av2PartitionPolicy,
+    record_fields: bool,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_partition_policy(
         region,
@@ -97,7 +122,8 @@ fn av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
         ibc,
         Some(palette),
     );
-    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     plan.write_entropy(&mut writer, Some(palette), ibc);
     writer.finish()
 }
@@ -110,6 +136,20 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
     source: &[u8],
     recon: &mut [u8],
 ) -> Av2EntropyPayload {
+    av2_lossy_420_tile_entropy_payload_for_region_with_fields(
+        region, profile, geometry, bit_depth, source, recon, true,
+    )
+}
+
+pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    recon: &mut [u8],
+    record_fields: bool,
+) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region(
         region,
         profile,
@@ -119,13 +159,14 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
         None,
         None,
     );
-    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     let mut lossy = Av2Lossy420TileState::new(geometry, region, bit_depth, source, recon);
     plan.write_lossy_420_entropy(&mut writer, &mut lossy);
     writer.finish()
 }
 
-pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
+pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     geometry: Av2VideoGeometry,
@@ -134,6 +175,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
     source: &[u8],
     recon: &mut [u8],
     ibc: Option<&Av2LocalIbc444>,
+    record_fields: bool,
 ) -> Av2EntropyPayload {
     debug_assert!(matches!(
         chroma_format,
@@ -155,6 +197,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
             },
             Av2LosslessSubsampledModeSearch::FastScreenContent,
             ibc,
+            record_fields,
         );
     }
 
@@ -177,6 +220,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region(
             partition_policy,
             Av2LosslessSubsampledModeSearch::Exhaustive,
             None,
+            record_fields,
         );
         let replace = best.as_ref().is_none_or(|(best_payload, _)| {
             (payload.bytes.len(), payload.symbol_bits)
@@ -233,6 +277,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     partition_policy: Av2PartitionPolicy,
     mode_search: Av2LosslessSubsampledModeSearch,
     ibc: Option<&Av2LocalIbc444>,
+    record_fields: bool,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_partition_policy(
         region,
@@ -244,7 +289,8 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         ibc,
         None,
     );
-    let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     let mut lossless = Av2LosslessSubsampledTileState::new(
         geometry,
         region,

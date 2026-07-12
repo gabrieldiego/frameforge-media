@@ -65,6 +65,7 @@ pub struct Av2EntropyWriter {
     symbol_bits: usize,
     adaptive_cdf_updates: bool,
     adaptive_cdfs: Vec<Av2AdaptiveCdf>,
+    record_fields: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,10 @@ impl Av2EntropyWriter {
     }
 
     pub fn with_cdf_updates(adaptive_cdf_updates: bool) -> Self {
+        Self::with_cdf_updates_and_fields(adaptive_cdf_updates, true)
+    }
+
+    pub fn with_cdf_updates_and_fields(adaptive_cdf_updates: bool, record_fields: bool) -> Self {
         Self {
             low: 0,
             rng: 0x8000,
@@ -100,6 +105,7 @@ impl Av2EntropyWriter {
             symbol_bits: 0,
             adaptive_cdf_updates,
             adaptive_cdfs: Vec::new(),
+            record_fields,
         }
     }
 
@@ -113,18 +119,20 @@ impl Av2EntropyWriter {
         }
         // AV2 v1.0.0 Section 4.11.3: L(n) consumes n literal bits through the
         // arithmetic decoder. Encoder-side this mirrors AVM avm_write_literal().
-        self.fields.push(Av2EntropyField {
-            name,
-            code: Av2EntropyCode::Literal,
-            symbol_offset: self.symbol_bits,
-            bit_count: bits as usize,
-            symbol: None,
-            literal_value: Some(value),
-            fl: None,
-            fh: None,
-            fl_inc: None,
-            fh_inc: None,
-        });
+        if self.record_fields {
+            self.fields.push(Av2EntropyField {
+                name,
+                code: Av2EntropyCode::Literal,
+                symbol_offset: self.symbol_bits,
+                bit_count: bits as usize,
+                symbol: None,
+                literal_value: Some(value),
+                fl: None,
+                fh: None,
+                fl_inc: None,
+                fh_inc: None,
+            });
+        }
         self.symbol_bits += bits as usize;
         while bits > 0 {
             let n = bits.min(31);
@@ -226,18 +234,20 @@ impl Av2EntropyWriter {
             let fh_inc = PROB_INC[nsymbs - 2][symbol];
             (fl, fh, fl_inc, fh_inc)
         };
-        self.fields.push(Av2EntropyField {
-            name,
-            code: Av2EntropyCode::Symbol,
-            symbol_offset: self.symbol_bits,
-            bit_count: 1,
-            symbol: Some(symbol),
-            literal_value: None,
-            fl: Some(fl),
-            fh: Some(fh),
-            fl_inc: Some(fl_inc),
-            fh_inc: Some(fh_inc),
-        });
+        if self.record_fields {
+            self.fields.push(Av2EntropyField {
+                name,
+                code: Av2EntropyCode::Symbol,
+                symbol_offset: self.symbol_bits,
+                bit_count: 1,
+                symbol: Some(symbol),
+                literal_value: None,
+                fl: Some(fl),
+                fh: Some(fh),
+                fl_inc: Some(fl_inc),
+                fh_inc: Some(fh_inc),
+            });
+        }
         self.symbol_bits += 1;
         self.encode_q15(fl, fh, symbol, nsymbs);
         if update_cdf || self.adaptive_cdf_updates {
