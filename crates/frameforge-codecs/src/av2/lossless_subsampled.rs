@@ -7,6 +7,25 @@ fn chroma_directional_angle_for_mode(mode: Av2LosslessSubsampledModeDecision) ->
     av2_chroma_directional_angle(mode.chroma_intra_mode)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct Av2DcHvBdpcmTxbScores {
+    dc: usize,
+    horizontal: usize,
+    vertical: usize,
+    bdpcm_horizontal: usize,
+    bdpcm_vertical: usize,
+}
+
+impl Av2DcHvBdpcmTxbScores {
+    fn add_assign(&mut self, other: Self) {
+        self.dc += other.dc;
+        self.horizontal += other.horizontal;
+        self.vertical += other.vertical;
+        self.bdpcm_horizontal += other.bdpcm_horizontal;
+        self.bdpcm_vertical += other.bdpcm_vertical;
+    }
+}
+
 struct Av2LosslessSubsampledTileState<'a> {
     geometry: Av2VideoGeometry,
     region: Av2TileRegion,
@@ -108,6 +127,17 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     fn txb_origin(&self, plane: Av2LosslessPlane, col: usize, row: usize) -> (usize, usize) {
         let (origin_x, origin_y) = self.plane_origin(plane);
         (origin_x + col * TX4X4_SIZE, origin_y + row * TX4X4_SIZE)
+    }
+
+    fn source_block4x4(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> [i32; 16] {
+        let mut block = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                block[local_y * TX4X4_SIZE + local_x] =
+                    i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
+            }
+        }
+        block
     }
 
     fn offset(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> usize {
@@ -814,6 +844,62 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         residual
     }
 
+    fn dc_h_v_bdpcm_txb_scores_for_score(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        kind: Av2CoefficientProxyKind,
+    ) -> Av2DcHvBdpcmTxbScores {
+        let source = self.source_block4x4(plane, x0, y0);
+        let dc = i32::from(self.dc_predictor_for_score(plane, x0, y0, leaf_x0, leaf_y0));
+        let mut h_pred = [0i32; TX4X4_SIZE];
+        let mut v_pred = [0i32; TX4X4_SIZE];
+        for index in 0..TX4X4_SIZE {
+            h_pred[index] = i32::from(self.h_predictor_for_score(
+                plane, x0, y0, index, leaf_x0, leaf_y0,
+            ));
+            v_pred[index] = i32::from(self.v_predictor_for_score(
+                plane, x0, y0, index, leaf_x0, leaf_y0,
+            ));
+        }
+
+        let mut dc_residual = [0i32; TX4X4_SAMPLES];
+        let mut horizontal_residual = [0i32; TX4X4_SAMPLES];
+        let mut vertical_residual = [0i32; TX4X4_SAMPLES];
+        let mut bdpcm_horizontal_residual = [0i32; TX4X4_SAMPLES];
+        let mut bdpcm_vertical_residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let pos = local_y * TX4X4_SIZE + local_x;
+                let sample = source[pos];
+                dc_residual[pos] = sample - dc;
+                horizontal_residual[pos] = sample - h_pred[local_y];
+                vertical_residual[pos] = sample - v_pred[local_x];
+                bdpcm_horizontal_residual[pos] = if local_x == 0 {
+                    sample - h_pred[local_y]
+                } else {
+                    sample - source[pos - 1]
+                };
+                bdpcm_vertical_residual[pos] = if local_y == 0 {
+                    sample - v_pred[local_x]
+                } else {
+                    sample - source[pos - TX4X4_SIZE]
+                };
+            }
+        }
+
+        Av2DcHvBdpcmTxbScores {
+            dc: coefficient_proxy_score(&av2_fwht4x4(&dc_residual), kind),
+            horizontal: coefficient_proxy_score(&av2_fwht4x4(&horizontal_residual), kind),
+            vertical: coefficient_proxy_score(&av2_fwht4x4(&vertical_residual), kind),
+            bdpcm_horizontal: coefficient_proxy_score(&av2_fwht4x4(&bdpcm_horizontal_residual), kind),
+            bdpcm_vertical: coefficient_proxy_score(&av2_fwht4x4(&bdpcm_vertical_residual), kind),
+        }
+    }
+
     fn dc_predictor_for_score(
         &self,
         plane: Av2LosslessPlane,
@@ -1499,7 +1585,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         decision: Av2TileDecision,
         visible_rows_mi: usize,
         visible_cols_mi: usize,
-        coded_mi_context: &Av2CodedMiContext,
+        _coded_mi_context: &Av2CodedMiContext,
     ) -> Av2LosslessSubsampledModeDecision {
         let txb_width = decision
             .block_size
@@ -1524,20 +1610,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             (Av2LumaIntraMode::Horizontal, Some(true), 64usize),
             (Av2LumaIntraMode::Vertical, Some(false), 64usize),
         ];
+        let luma_scores =
+            self.fast_luma_leaf_sampled_dc_h_v_bdpcm_scores(decision, txb_width, txb_height);
         let mut best_luma = (mode.luma_intra_mode, mode.luma_bdpcm_horz, usize::MAX);
         for (luma_intra_mode, luma_bdpcm_horz, syntax_penalty) in luma_candidates {
-            let candidate = Av2LosslessSubsampledModeDecision {
-                luma_intra_mode,
-                luma_bdpcm_horz,
-                ..mode
-            };
-            let score = self.luma_leaf_sampled_coefficient_score(
-                decision,
-                txb_width,
-                txb_height,
-                candidate,
-                coded_mi_context,
-            ) + syntax_penalty;
+            let score = match (luma_intra_mode, luma_bdpcm_horz) {
+                (Av2LumaIntraMode::Dc, None) => luma_scores.dc,
+                (Av2LumaIntraMode::Horizontal, None) => luma_scores.horizontal,
+                (Av2LumaIntraMode::Vertical, None) => luma_scores.vertical,
+                (Av2LumaIntraMode::Horizontal, Some(true)) => luma_scores.bdpcm_horizontal,
+                (Av2LumaIntraMode::Vertical, Some(false)) => luma_scores.bdpcm_vertical,
+                _ => unreachable!("fast luma mode search only scores DC/H/V and BDPCM"),
+            } + syntax_penalty;
             if score < best_luma.2 {
                 best_luma = (luma_intra_mode, luma_bdpcm_horz, score);
             }
@@ -1552,18 +1636,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             (true, Av2ChromaIntraMode::Horizontal, 64usize),
             (true, Av2ChromaIntraMode::Vertical, 64usize),
         ];
+        let chroma_scores =
+            self.fast_chroma_leaf_sampled_dc_h_v_bdpcm_scores(chroma_span);
         let mut best_chroma = (mode.chroma_use_bdpcm, mode.chroma_intra_mode, usize::MAX);
         for (chroma_use_bdpcm, chroma_intra_mode, syntax_penalty) in chroma_candidates {
-            let candidate = Av2LosslessSubsampledModeDecision {
-                chroma_use_bdpcm,
-                chroma_intra_mode,
-                ..mode
-            };
-            let score = self.chroma_leaf_sampled_coefficient_score(
-                chroma_span,
-                candidate,
-                coded_mi_context,
-            ) + syntax_penalty;
+            let score = match (chroma_use_bdpcm, chroma_intra_mode) {
+                (false, Av2ChromaIntraMode::Horizontal) => chroma_scores.horizontal,
+                (false, Av2ChromaIntraMode::Vertical) => chroma_scores.vertical,
+                (false, Av2ChromaIntraMode::Dc) => chroma_scores.dc,
+                (true, Av2ChromaIntraMode::Horizontal) => chroma_scores.bdpcm_horizontal,
+                (true, Av2ChromaIntraMode::Vertical) => chroma_scores.bdpcm_vertical,
+                _ => unreachable!("fast chroma mode search only scores DC/H/V and BDPCM"),
+            } + syntax_penalty;
             if score < best_chroma.2 {
                 best_chroma = (chroma_use_bdpcm, chroma_intra_mode, score);
             }
@@ -1573,18 +1657,14 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode
     }
 
-    fn luma_leaf_sampled_coefficient_score(
+    fn fast_luma_leaf_sampled_dc_h_v_bdpcm_scores(
         &self,
         decision: Av2TileDecision,
         txb_width: usize,
         txb_height: usize,
-        mode: Av2LosslessSubsampledModeDecision,
-        coded_mi_context: &Av2CodedMiContext,
-    ) -> usize {
-        let mut score = 0usize;
+    ) -> Av2DcHvBdpcmTxbScores {
+        let mut scores = Av2DcHvBdpcmTxbScores::default();
         let (leaf_x0, leaf_y0) = self.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
-        let leaf_width = txb_width * TX4X4_SIZE;
-        let leaf_height = txb_height * TX4X4_SIZE;
         let row_step = fast_leaf_sample_step(txb_height, AV2_FAST_LUMA_SAMPLE_GRID);
         let col_step = fast_leaf_sample_step(txb_width, AV2_FAST_LUMA_SAMPLE_GRID);
         for row in (0..txb_height).step_by(row_step) {
@@ -1592,65 +1672,45 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             for col in (0..txb_width).step_by(col_step) {
                 let abs_col = decision.col + col;
                 let (x0, y0) = self.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
-                let coefficients = self.tx4x4_coefficients_for_mode_score(
+                scores.add_assign(self.dc_h_v_bdpcm_txb_scores_for_score(
                     Av2LosslessPlane::Y,
                     x0,
                     y0,
-                    mode,
                     leaf_x0,
                     leaf_y0,
-                    leaf_width,
-                    leaf_height,
-                    coded_mi_context,
-                );
-                let kind = if mode.use_fsc {
-                    Av2CoefficientProxyKind::LumaIdtx
-                } else {
-                    Av2CoefficientProxyKind::LumaTransform
-                };
-                score += coefficient_proxy_score(&coefficients, kind);
+                    Av2CoefficientProxyKind::LumaTransform,
+                ));
             }
         }
-        score
+        scores
     }
 
-    fn chroma_leaf_sampled_coefficient_score(
+    fn fast_chroma_leaf_sampled_dc_h_v_bdpcm_scores(
         &self,
         chroma_span: Av2ChromaTx4x4Span,
-        mode: Av2LosslessSubsampledModeDecision,
-        coded_mi_context: &Av2CodedMiContext,
-    ) -> usize {
-        let mut score = 0usize;
+    ) -> Av2DcHvBdpcmTxbScores {
+        let mut scores = Av2DcHvBdpcmTxbScores::default();
         let row_step = fast_leaf_sample_step(chroma_span.height, AV2_FAST_CHROMA_SAMPLE_GRID);
         let col_step = fast_leaf_sample_step(chroma_span.width, AV2_FAST_CHROMA_SAMPLE_GRID);
         for plane in [Av2LosslessPlane::U, Av2LosslessPlane::V] {
             let (leaf_x0, leaf_y0) = self.txb_origin(plane, chroma_span.col, chroma_span.row);
-            let leaf_width = chroma_span.width * TX4X4_SIZE;
-            let leaf_height = chroma_span.height * TX4X4_SIZE;
             for row in (0..chroma_span.height).step_by(row_step) {
                 let abs_row = chroma_span.row + row;
                 for col in (0..chroma_span.width).step_by(col_step) {
                     let abs_col = chroma_span.col + col;
                     let (x0, y0) = self.txb_origin(plane, abs_col, abs_row);
-                    let coefficients = self.tx4x4_coefficients_for_mode_score(
+                    scores.add_assign(self.dc_h_v_bdpcm_txb_scores_for_score(
                         plane,
                         x0,
                         y0,
-                        mode,
                         leaf_x0,
                         leaf_y0,
-                        leaf_width,
-                        leaf_height,
-                        coded_mi_context,
-                    );
-                    score += coefficient_proxy_score(
-                        &coefficients,
                         Av2CoefficientProxyKind::ChromaTransform,
-                    );
+                    ));
                 }
             }
         }
-        score
+        scores
     }
 
     fn luma_leaf_coefficient_score(
