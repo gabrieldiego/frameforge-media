@@ -156,11 +156,6 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         read_validated_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
     }
 
-    fn set_recon_sample(&mut self, plane: Av2LosslessPlane, x: usize, y: usize, sample: Av2Sample) {
-        let offset = self.offset(plane, x, y);
-        write_validated_planar_sample(self.recon, offset, sample, self.bit_depth);
-    }
-
     fn dc_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
         let edge_sample = |plane, x, y| self.recon_sample(plane, x, y);
         self.dc_predictor_with(plane, x0, y0, &edge_sample)
@@ -1791,18 +1786,17 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
 
     fn copy_source_to_recon_txb(&mut self, plane: Av2LosslessPlane, x0: usize, y0: usize) {
         let (plane_width, plane_height) = self.plane_geometry(plane);
+        let bytes_per_sample = self.bit_depth.bytes_per_sample();
         for local_y in 0..TX4X4_SIZE {
             let y = y0 + local_y;
             if y >= plane_height {
                 continue;
             }
-            for local_x in 0..TX4X4_SIZE {
-                let x = x0 + local_x;
-                if x < plane_width {
-                    let sample = self.source_sample(plane, x, y);
-                    self.set_recon_sample(plane, x, y, sample);
-                }
-            }
+            let row_samples = TX4X4_SIZE.min(plane_width.saturating_sub(x0));
+            let offset = self.offset(plane, x0, y) * bytes_per_sample;
+            let row_bytes = row_samples * bytes_per_sample;
+            self.recon[offset..offset + row_bytes]
+                .copy_from_slice(&self.source[offset..offset + row_bytes]);
         }
     }
 
@@ -1892,23 +1886,4 @@ fn read_validated_planar_sample(
     let offset = sample_index * 2;
     debug_assert!(offset + 1 < buffer.len());
     Av2Sample::from_le_bytes([buffer[offset], buffer[offset + 1]])
-}
-
-fn write_validated_planar_sample(
-    buffer: &mut [u8],
-    sample_index: usize,
-    sample: Av2Sample,
-    bit_depth: SampleBitDepth,
-) {
-    if bit_depth.bits() <= 8 {
-        debug_assert!(sample_index < buffer.len());
-        buffer[sample_index] = sample as u8;
-        return;
-    }
-
-    let offset = sample_index * 2;
-    debug_assert!(offset + 1 < buffer.len());
-    let bytes = sample.to_le_bytes();
-    buffer[offset] = bytes[0];
-    buffer[offset + 1] = bytes[1];
 }

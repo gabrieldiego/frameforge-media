@@ -744,13 +744,15 @@ fn coefficient_high_range_proxy_score(
 }
 
 fn tx4x4_nonzero_bounds(levels: &[u32; TX4X4_SAMPLES]) -> Option<(usize, usize)> {
-    let first = TX4X4_SCAN.iter().position(|&pos| levels[pos] != 0)?;
-    let eob = TX4X4_SCAN
-        .iter()
-        .rposition(|&pos| levels[pos] != 0)
-        .map(|index| index + 1)
-        .expect("first nonzero implies eob");
-    Some((first, eob))
+    let mut first = None;
+    let mut eob = 0usize;
+    for (scan_index, &pos) in TX4X4_SCAN.iter().enumerate() {
+        if levels[pos] != 0 {
+            first.get_or_insert(scan_index);
+            eob = scan_index + 1;
+        }
+    }
+    first.map(|first| (first, eob))
 }
 
 fn adaptive_high_range_score_bits(value: u32, context: u32) -> usize {

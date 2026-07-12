@@ -256,7 +256,7 @@ fn write_chroma_bdpcm_txb(
 fn lossless_coefficient_levels(coefficients: &[i32; TX4X4_SAMPLES]) -> [u32; TX4X4_SAMPLES] {
     let mut levels = [0u32; TX4X4_SAMPLES];
     for (index, &coefficient) in coefficients.iter().enumerate() {
-        assert_eq!(
+        debug_assert_eq!(
             coefficient % 8,
             0,
             "AV2 lossless WHT coefficient must be divisible by UNIT_QUANT_FACTOR"
@@ -267,15 +267,13 @@ fn lossless_coefficient_levels(coefficients: &[i32; TX4X4_SAMPLES]) -> [u32; TX4
 }
 
 fn tx4x4_eob(levels: &[u32; TX4X4_SAMPLES]) -> Option<usize> {
-    TX4X4_SCAN
-        .iter()
-        .position(|&pos| levels[pos] != 0)
-        .and_then(|_| {
-            TX4X4_SCAN
-                .iter()
-                .rposition(|&pos| levels[pos] != 0)
-                .map(|index| index + 1)
-        })
+    let mut eob = 0usize;
+    for (scan_index, &pos) in TX4X4_SCAN.iter().enumerate() {
+        if levels[pos] != 0 {
+            eob = scan_index + 1;
+        }
+    }
+    (eob != 0).then_some(eob)
 }
 
 fn write_eob_y(writer: &mut Av2EntropyWriter, eob: usize) {
