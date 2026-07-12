@@ -465,39 +465,16 @@ impl Av2LumaPalette444 {
                 scores.intra_dc += chroma_sample_prediction_score(sample, dc);
                 scores.intra_horz += chroma_sample_prediction_score(sample, h_edge[local_y]);
                 scores.intra_vert += chroma_sample_prediction_score(sample, v_edge[local_x]);
-                scores.intra_smooth += chroma_sample_prediction_score(
-                    sample,
-                    av2_highbd_smooth_intra_predictor(
-                        Av2ChromaIntraMode::Smooth,
-                        smooth_above,
-                        smooth_left,
-                        local_x,
-                        local_y,
-                        self.bit_depth,
-                    ),
+                let (smooth, smooth_v, smooth_h) = av2_highbd_smooth_intra_predictor_set(
+                    smooth_above,
+                    smooth_left,
+                    local_x,
+                    local_y,
+                    self.bit_depth,
                 );
-                scores.intra_smooth_v += chroma_sample_prediction_score(
-                    sample,
-                    av2_highbd_smooth_intra_predictor(
-                        Av2ChromaIntraMode::SmoothVertical,
-                        smooth_above,
-                        smooth_left,
-                        local_x,
-                        local_y,
-                        self.bit_depth,
-                    ),
-                );
-                scores.intra_smooth_h += chroma_sample_prediction_score(
-                    sample,
-                    av2_highbd_smooth_intra_predictor(
-                        Av2ChromaIntraMode::SmoothHorizontal,
-                        smooth_above,
-                        smooth_left,
-                        local_x,
-                        local_y,
-                        self.bit_depth,
-                    ),
-                );
+                scores.intra_smooth += chroma_sample_prediction_score(sample, smooth);
+                scores.intra_smooth_v += chroma_sample_prediction_score(sample, smooth_v);
+                scores.intra_smooth_h += chroma_sample_prediction_score(sample, smooth_h);
                 scores.intra_paeth += chroma_sample_prediction_score(
                     sample,
                     paeth_predictor(h_edge[local_y], v_edge[local_x], above_left),

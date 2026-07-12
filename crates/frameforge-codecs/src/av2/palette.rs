@@ -3,7 +3,7 @@ use super::{
     Av2Sample, Av2VideoGeometry,
 };
 use crate::av2::intra_prediction::{
-    av2_highbd_smooth_intra_predictor, av2_intra_residual4x4, directional_interpolate,
+    av2_highbd_smooth_intra_predictor_set, av2_intra_residual4x4, directional_interpolate,
     paeth_predictor, zone2_directional_predictor, ChromaD135Edges,
 };
 use crate::picture::{Picture, PixelFormat, SampleBitDepth};

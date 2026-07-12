@@ -213,6 +213,23 @@ pub(crate) fn av2_highbd_smooth_intra_predictor(
     local_y: usize,
     bit_depth: SampleBitDepth,
 ) -> Av2Sample {
+    let (smooth, smooth_v, smooth_h) =
+        av2_highbd_smooth_intra_predictor_set(above, left, local_x, local_y, bit_depth);
+    match mode {
+        Av2ChromaIntraMode::Smooth => smooth,
+        Av2ChromaIntraMode::SmoothVertical => smooth_v,
+        Av2ChromaIntraMode::SmoothHorizontal => smooth_h,
+        _ => unreachable!("smooth predictor only supports smooth chroma modes"),
+    }
+}
+
+pub(crate) fn av2_highbd_smooth_intra_predictor_set(
+    above: [Av2Sample; 5],
+    left: [Av2Sample; 5],
+    local_x: usize,
+    local_y: usize,
+    bit_depth: SampleBitDepth,
+) -> (Av2Sample, Av2Sample, Av2Sample) {
     debug_assert!(local_x < 4 && local_y < 4);
     const BLEND_WEIGHT_MAX: i32 = 32;
     const BLEND_MAX_LOG2: u8 = 5;
@@ -233,11 +250,10 @@ pub(crate) fn av2_highbd_smooth_intra_predictor(
         top_right + divide_round((left_sample - top_right) * (3 - local_x) as i32, TX_LOG2);
     let pred_v = pred_v + divide_round((top - pred_v) * row_weight, BLEND_MAX_LOG2 + 1);
     let pred_h = pred_h + divide_round((left_sample - pred_h) * col_weight, BLEND_MAX_LOG2 + 1);
-    let prediction = match mode {
-        Av2ChromaIntraMode::Smooth => divide_round(pred_v + pred_h, 1),
-        Av2ChromaIntraMode::SmoothVertical => pred_v,
-        Av2ChromaIntraMode::SmoothHorizontal => pred_h,
-        _ => unreachable!("smooth predictor only supports smooth chroma modes"),
-    };
-    prediction.clamp(0, i32::from(bit_depth.max_sample())) as Av2Sample
+    let max_sample = i32::from(bit_depth.max_sample());
+    (
+        divide_round(pred_v + pred_h, 1).clamp(0, max_sample) as Av2Sample,
+        pred_v.clamp(0, max_sample) as Av2Sample,
+        pred_h.clamp(0, max_sample) as Av2Sample,
+    )
 }
