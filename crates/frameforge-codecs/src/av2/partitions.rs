@@ -120,7 +120,10 @@ fn choose_luma_palette_partition(
                 return forced;
             }
         }
-        if allowed.none
+        let block_inside_visible = row_mi + block_size.mi_height() <= visible_rows_mi
+            && col_mi + block_size.mi_width() <= visible_cols_mi;
+        if block_inside_visible
+            && allowed.none
             && luma_palette_partition_policy_allows_leaf(partition_policy, block_size)
             && palette.is_some()
             && luma_palette_region_mergeable(block_size)
@@ -413,8 +416,9 @@ fn write_intrabc_flag(
     // set, each non-chroma leaf signals use_intrabc before normal intra modes.
     let ctx = context.intrabc_ctx(decision.row, decision.col, decision.block_size);
     let mut cdf = DEFAULT_INTRABC_CDFS[ctx];
-    writer.write_symbol(
+    writer.write_symbol_with_key(
         "tile.intrabc.use_intrabc",
+        ctx,
         usize::from(use_intrabc),
         &mut cdf,
         2,
@@ -440,7 +444,14 @@ fn write_intrabc_copy(
     );
     let skip_ctx = context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
-    writer.write_symbol("tile.intrabc.skip_txfm", 1, &mut skip_cdf, 2, false);
+    writer.write_symbol_with_key(
+        "tile.intrabc.skip_txfm",
+        skip_ctx,
+        1,
+        &mut skip_cdf,
+        2,
+        false,
+    );
 
     // AV2 v1.0.0 read_intrabc_info()/write_intrabc_info(): intrabc_mode=1
     // copies the selected reference BV directly. intrabc_mode=0 reads a

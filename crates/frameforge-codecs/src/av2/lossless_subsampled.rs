@@ -119,19 +119,16 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn source_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
-        read_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
-            .expect("validated AV2 subsampled lossless source must contain every sample")
+        read_validated_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
     }
 
     fn recon_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
-        read_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
-            .expect("validated AV2 subsampled lossless reconstruction must contain every sample")
+        read_validated_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
     }
 
     fn set_recon_sample(&mut self, plane: Av2LosslessPlane, x: usize, y: usize, sample: Av2Sample) {
         let offset = self.offset(plane, x, y);
-        write_planar_sample(self.recon, offset, sample, self.bit_depth)
-            .expect("validated AV2 subsampled lossless reconstruction must contain every sample");
+        write_validated_planar_sample(self.recon, offset, sample, self.bit_depth);
     }
 
     fn dc_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
@@ -1820,4 +1817,38 @@ fn chroma_subsample_y(chroma_format: Av2ChromaFormat) -> usize {
         Av2ChromaFormat::Yuv420 => 2,
         Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
     }
+}
+
+fn read_validated_planar_sample(
+    buffer: &[u8],
+    sample_index: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    if bit_depth.bits() <= 8 {
+        debug_assert!(sample_index < buffer.len());
+        return Av2Sample::from(buffer[sample_index]);
+    }
+
+    let offset = sample_index * 2;
+    debug_assert!(offset + 1 < buffer.len());
+    Av2Sample::from_le_bytes([buffer[offset], buffer[offset + 1]])
+}
+
+fn write_validated_planar_sample(
+    buffer: &mut [u8],
+    sample_index: usize,
+    sample: Av2Sample,
+    bit_depth: SampleBitDepth,
+) {
+    if bit_depth.bits() <= 8 {
+        debug_assert!(sample_index < buffer.len());
+        buffer[sample_index] = sample as u8;
+        return;
+    }
+
+    let offset = sample_index * 2;
+    debug_assert!(offset + 1 < buffer.len());
+    let bytes = sample.to_le_bytes();
+    buffer[offset] = bytes[0];
+    buffer[offset + 1] = bytes[1];
 }

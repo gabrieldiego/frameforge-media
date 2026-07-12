@@ -1,3 +1,7 @@
+// Keep 4:4:4 palette FSC gated until its chroma coefficient path is
+// reference-clean on larger screen-content frames.
+const AV2_ENABLE_LUMA_PALETTE_FSC_444: bool = false;
+
 #[cfg(test)]
 pub(crate) fn av2_black_444_tile_entropy_payload(
     geometry: Av2VideoGeometry,
@@ -52,12 +56,9 @@ pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region(
     ibc: &Av2LocalIbc444,
 ) -> Av2EntropyPayload {
     let mut best: Option<Av2EntropyPayload> = None;
-    for partition_policy in [
-        Av2PartitionPolicy::LargestLosslessLeaves,
-        Av2PartitionPolicy::LosslessLeafLimit { max_size: 32 },
-        Av2PartitionPolicy::LosslessLeafLimit { max_size: 16 },
-        Av2PartitionPolicy::Fixed8x8Leaves,
-    ] {
+    // Larger merged palette leaves currently add mode-search cost without a
+    // measured size win on 1080p screen-content baselines.
+    for partition_policy in [Av2PartitionPolicy::Fixed8x8Leaves] {
         let payload = av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
             region,
             profile,
@@ -481,12 +482,20 @@ impl Av2Black444TilePlan {
         } else {
             palette.and_then(|palette| palette.luma_bdpcm_horz_for_block(x0, y0))
         };
-        let chroma_intra_mode = palette
+        let mut chroma_intra_mode = palette
             .map(|palette| palette.chroma_intra_mode_for_block(x0, y0))
             .unwrap_or(Av2ChromaIntraMode::Horizontal);
         let chroma_use_bdpcm = palette
             .map(|palette| palette.chroma_use_bdpcm_for_block(x0, y0))
             .unwrap_or(false);
+        if self.luma_palette
+            && !chroma_use_bdpcm
+            && chroma_intra_mode == Av2ChromaIntraMode::Dc
+        {
+            // Avoid fragile single-DC chroma residual patterns in the current
+            // 4:4:4 palette path; vertical prediction keeps AVM lossless.
+            chroma_intra_mode = Av2ChromaIntraMode::Vertical;
+        }
         let prediction = decide_leaf_prediction(
             self.allow_intrabc,
             ibc_drl_idx,
@@ -524,7 +533,8 @@ impl Av2Black444TilePlan {
                 use_bdpcm_uv,
                 chroma_intra_mode,
             } => {
-                let use_fsc = use_luma_palette
+                let use_fsc = AV2_ENABLE_LUMA_PALETTE_FSC_444
+                    && use_luma_palette
                     && block_size.width == AV2_LUMA_PALETTE_BLOCK_SIZE
                     && block_size.height == AV2_LUMA_PALETTE_BLOCK_SIZE
                     && !use_dpcm_y
