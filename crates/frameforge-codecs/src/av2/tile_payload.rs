@@ -193,7 +193,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             if ibc.is_some() {
                 Av2PartitionPolicy::Fixed8x8Leaves
             } else {
-                Av2PartitionPolicy::LargestLosslessLeaves
+                Av2PartitionPolicy::LosslessLeafLimit { max_size: 16 }
             },
             Av2LosslessSubsampledModeSearch::FastScreenContent,
             ibc,
