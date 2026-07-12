@@ -250,7 +250,7 @@ impl Av2EntropyWriter {
         } else {
             None
         };
-        let (fl, fh, fl_inc, fh_inc) = {
+        let (fl, fh) = {
             let active_cdf = if let Some(index) = adaptive_index {
                 self.adaptive_cdfs[index].cdf.as_slice()
             } else {
@@ -267,15 +267,15 @@ impl Av2EntropyWriter {
                 CDF_PROB_TOP
             };
             let fh = active_cdf[symbol] as u32;
+            (fl, fh)
+        };
+        if self.record_fields {
             let fl_inc = if fl < CDF_PROB_TOP {
                 PROB_INC[nsymbs - 2][symbol.saturating_sub(1)]
             } else {
                 0
             };
             let fh_inc = PROB_INC[nsymbs - 2][symbol];
-            (fl, fh, fl_inc, fh_inc)
-        };
-        if self.record_fields {
             self.fields.push(Av2EntropyField {
                 name,
                 code: Av2EntropyCode::Symbol,
