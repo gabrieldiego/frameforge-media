@@ -65,6 +65,7 @@ pub struct Av2EntropyWriter {
     symbol_bits: usize,
     adaptive_cdf_updates: bool,
     adaptive_cdfs: Vec<Av2AdaptiveCdf>,
+    last_adaptive_cdf_index: Option<usize>,
     record_fields: bool,
 }
 
@@ -105,6 +106,7 @@ impl Av2EntropyWriter {
             symbol_bits: 0,
             adaptive_cdf_updates,
             adaptive_cdfs: Vec::new(),
+            last_adaptive_cdf_index: None,
             record_fields,
         }
     }
@@ -317,12 +319,23 @@ impl Av2EntropyWriter {
         nsymbs: usize,
     ) -> usize {
         let initial = &cdf[..nsymbs + 4];
+        if let Some(index) = self.last_adaptive_cdf_index {
+            let entry = &self.adaptive_cdfs[index];
+            if entry.name == name
+                && entry.key == key
+                && entry.nsymbs == nsymbs
+                && entry.initial == initial
+            {
+                return index;
+            }
+        }
         if let Some(index) = self.adaptive_cdfs.iter().position(|entry| {
             entry.name == name
                 && entry.key == key
                 && entry.nsymbs == nsymbs
                 && entry.initial == initial
         }) {
+            self.last_adaptive_cdf_index = Some(index);
             return index;
         }
 
@@ -333,7 +346,9 @@ impl Av2EntropyWriter {
             initial: initial.to_vec(),
             cdf: initial.to_vec(),
         });
-        self.adaptive_cdfs.len() - 1
+        let index = self.adaptive_cdfs.len() - 1;
+        self.last_adaptive_cdf_index = Some(index);
+        index
     }
 
     fn push_precarry(&mut self, word: u16) {
