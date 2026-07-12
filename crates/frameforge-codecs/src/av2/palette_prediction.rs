@@ -108,24 +108,28 @@ fn build_luma_palette_block(
 
     let mut indices = [0u8; AV2_LUMA_PALETTE_BLOCK_SAMPLES];
     for (sample_index, &sample) in samples.iter().enumerate() {
-        let index = colors
-            .iter()
-            .position(|&color| color == sample)
-            .unwrap_or_else(|| {
-                colors
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, &color)| {
-                        let delta = i32::from(sample) - i32::from(color);
-                        delta.unsigned_abs()
-                    })
-                    .map(|(index, _)| index)
-                    .expect("AV2 palette always has at least one color")
-            });
-        indices[sample_index] = index as u8;
+        indices[sample_index] = palette_index_for_sample(&colors, sample);
     }
 
     Av2LumaPaletteBlock444 { colors, indices }
+}
+
+fn palette_index_for_sample(colors: &[Av2Sample], sample: Av2Sample) -> u8 {
+    match colors.binary_search(&sample) {
+        Ok(index) => index as u8,
+        Err(0) => 0,
+        Err(index) if index == colors.len() => (colors.len() - 1) as u8,
+        Err(index) => {
+            let previous_index = index - 1;
+            let previous_delta = sample.abs_diff(colors[previous_index]);
+            let next_delta = sample.abs_diff(colors[index]);
+            if previous_delta <= next_delta {
+                previous_index as u8
+            } else {
+                index as u8
+            }
+        }
+    }
 }
 
 fn quantized_luma_palette_values(

@@ -26,6 +26,11 @@ pub(crate) struct Av2LumaPalette444 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av2LumaPaletteRegion {
     colors: Vec<Av2Sample>,
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+    indices: Vec<u8>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -46,9 +51,14 @@ fn chroma_sample_prediction_score(sample: Av2Sample, predictor: Av2Sample) -> us
 }
 
 impl Av2LumaPaletteRegion {
-    fn from_colors(colors: &[Av2Sample]) -> Self {
+    fn from_block(x0: usize, y0: usize, block: &Av2LumaPaletteBlock444) -> Self {
         Self {
-            colors: colors.to_vec(),
+            colors: block.colors.clone(),
+            x0,
+            y0,
+            width: AV2_LUMA_PALETTE_BLOCK_SIZE,
+            height: AV2_LUMA_PALETTE_BLOCK_SIZE,
+            indices: block.indices.to_vec(),
         }
     }
 
@@ -60,29 +70,20 @@ impl Av2LumaPaletteRegion {
         self.colors.len()
     }
 
-    pub(crate) fn index_for_sample(&self, sample: Av2Sample) -> u8 {
-        self.colors.binary_search(&sample).unwrap_or_else(|_| {
-            self.colors
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, &color)| sample.abs_diff(color))
-                .map(|(index, _)| index)
-                .expect("AV2 palette region must have at least one color")
-        }) as u8
+    pub(crate) fn index_at(&self, x: usize, y: usize) -> u8 {
+        debug_assert!(x >= self.x0 && x < self.x0 + self.width);
+        debug_assert!(y >= self.y0 && y < self.y0 + self.height);
+        self.indices[(y - self.y0) * self.width + (x - self.x0)]
     }
 
-    pub(crate) fn prediction_for_sample(&self, sample: Av2Sample) -> Av2Sample {
-        self.colors[usize::from(self.index_for_sample(sample))]
+    pub(crate) fn prediction_at(&self, x: usize, y: usize) -> Av2Sample {
+        self.colors[usize::from(self.index_at(x, y))]
     }
 }
 
 impl Av2LumaPalette444 {
     pub(crate) fn bit_depth(&self) -> SampleBitDepth {
         self.bit_depth
-    }
-
-    pub(crate) fn colors_for_block(&self, x0: usize, y0: usize) -> &[Av2Sample] {
-        &self.block_for_origin(x0, y0).colors
     }
 
     fn quantized_region_palette(
@@ -132,7 +133,21 @@ impl Av2LumaPalette444 {
             colors.push(filler);
         }
         colors.sort_unstable();
-        Av2LumaPaletteRegion { colors }
+
+        let mut indices = Vec::with_capacity(width * height);
+        for y in y0..y0 + height {
+            for x in x0..x0 + width {
+                indices.push(palette_index_for_sample(&colors, self.y_sample(x, y)));
+            }
+        }
+        Av2LumaPaletteRegion {
+            colors,
+            x0,
+            y0,
+            width,
+            height,
+            indices,
+        }
     }
 
     pub(crate) fn syntax_region_palette(
@@ -143,7 +158,7 @@ impl Av2LumaPalette444 {
         height: usize,
     ) -> Av2LumaPaletteRegion {
         if width == AV2_LUMA_PALETTE_BLOCK_SIZE && height == AV2_LUMA_PALETTE_BLOCK_SIZE {
-            Av2LumaPaletteRegion::from_colors(self.colors_for_block(x0, y0))
+            Av2LumaPaletteRegion::from_block(x0, y0, self.block_for_origin(x0, y0))
         } else {
             self.quantized_region_palette(x0, y0, width, height)
         }
@@ -625,7 +640,7 @@ impl Av2LumaPalette444 {
         x: usize,
         y: usize,
     ) -> u8 {
-        region.index_for_sample(self.y_sample(x, y))
+        region.index_at(x, y)
     }
 
     pub(crate) fn region_prediction_sample(
@@ -634,7 +649,7 @@ impl Av2LumaPalette444 {
         x: usize,
         y: usize,
     ) -> Av2Sample {
-        region.prediction_for_sample(self.y_sample(x, y))
+        region.prediction_at(x, y)
     }
 
     pub(crate) fn y_sample(&self, x: usize, y: usize) -> Av2Sample {
