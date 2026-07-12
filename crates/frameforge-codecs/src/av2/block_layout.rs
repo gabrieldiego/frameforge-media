@@ -467,6 +467,7 @@ struct Av2Black444TilePlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum Av2PartitionPolicy {
     Fixed8x8Leaves,
     LargestLosslessLeaves,
