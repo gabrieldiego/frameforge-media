@@ -211,14 +211,15 @@ mod tests {
 
     #[test]
     fn av2_chroma_eob_supports_last_tx4x4_scan_position() {
-        let mut levels = [0u32; TX4X4_SAMPLES];
-        levels[*TX4X4_SCAN.last().expect("TX_4X4 scan is non-empty")] = 1;
+        let mut coefficients = [0i32; TX4X4_SAMPLES];
+        coefficients[*TX4X4_SCAN.last().expect("TX_4X4 scan is non-empty")] = 8;
+        let (_, bounds) = lossless_coefficient_levels_and_bounds(&coefficients);
 
         // AV2 v1.0.0 Section 5.20.7.27 coeffs(), mirrored by AVM coefficient
         // coding, permits EOB values up to the transform sample count. A
         // nonzero final scan coefficient must therefore signal eob=16, not
         // wrap to txb_skip=1 in narrower RTL state.
-        assert_eq!(tx4x4_eob(&levels), Some(TX4X4_SAMPLES));
+        assert_eq!(bounds, Some((TX4X4_SAMPLES - 1, TX4X4_SAMPLES)));
         assert_eq!(eob_pos_token(TX4X4_SAMPLES), (5, 7));
     }
 

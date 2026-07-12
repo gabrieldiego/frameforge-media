@@ -112,8 +112,8 @@ fn write_luma_palette_residual_txb(
     dc_sign_ctx: u8,
     coefficients: &[i32; TX4X4_SAMPLES],
 ) -> (u8, bool) {
-    let levels = lossless_coefficient_levels(coefficients);
-    let Some(eob) = tx4x4_eob(&levels) else {
+    let (levels, bounds) = lossless_coefficient_levels_and_bounds(coefficients);
+    let Some((_, eob)) = bounds else {
         write_y_txb_all_zero(writer, skip_ctx);
         return (0, false);
     };
@@ -170,8 +170,8 @@ fn write_luma_palette_fsc_txb(
     writer: &mut Av2EntropyWriter,
     coefficients: &[i32; TX4X4_SAMPLES],
 ) -> (u8, bool) {
-    let levels = lossless_coefficient_levels(coefficients);
-    let Some(bob) = TX4X4_SCAN.iter().position(|&pos| levels[pos] != 0) else {
+    let (levels, bounds) = lossless_coefficient_levels_and_bounds(coefficients);
+    let Some((bob, _)) = bounds else {
         write_y_fsc_txb_all_zero(writer);
         return (0, false);
     };
@@ -248,8 +248,8 @@ fn write_chroma_bdpcm_txb(
     coefficients: &[i32; TX4X4_SAMPLES],
     use_fsc: bool,
 ) -> (u8, bool) {
-    let levels = lossless_coefficient_levels(coefficients);
-    let Some(eob) = tx4x4_eob(&levels) else {
+    let (levels, bounds) = lossless_coefficient_levels_and_bounds(coefficients);
+    let Some((_, eob)) = bounds else {
         match plane {
             Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, use_fsc),
             Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
@@ -313,27 +313,27 @@ fn write_chroma_bdpcm_txb(
     (lossless_entropy_context(cul_level, dc_val), true)
 }
 
-fn lossless_coefficient_levels(coefficients: &[i32; TX4X4_SAMPLES]) -> [u32; TX4X4_SAMPLES] {
+fn lossless_coefficient_levels_and_bounds(
+    coefficients: &[i32; TX4X4_SAMPLES],
+) -> ([u32; TX4X4_SAMPLES], Option<(usize, usize)>) {
     let mut levels = [0u32; TX4X4_SAMPLES];
-    for (index, &coefficient) in coefficients.iter().enumerate() {
+    let mut first = None;
+    let mut eob = 0usize;
+    for (scan_index, &index) in TX4X4_SCAN.iter().enumerate() {
+        let coefficient = coefficients[index];
         debug_assert_eq!(
             coefficient % 8,
             0,
             "AV2 lossless WHT coefficient must be divisible by UNIT_QUANT_FACTOR"
         );
-        levels[index] = coefficient.unsigned_abs() / 8;
-    }
-    levels
-}
-
-fn tx4x4_eob(levels: &[u32; TX4X4_SAMPLES]) -> Option<usize> {
-    let mut eob = 0usize;
-    for (scan_index, &pos) in TX4X4_SCAN.iter().enumerate() {
-        if levels[pos] != 0 {
+        let level = coefficient.unsigned_abs() / 8;
+        levels[index] = level;
+        if level != 0 {
+            first.get_or_insert(scan_index);
             eob = scan_index + 1;
         }
     }
-    (eob != 0).then_some(eob)
+    (levels, first.map(|first| (first, eob)))
 }
 
 fn write_eob_y(writer: &mut Av2EntropyWriter, eob: usize) {

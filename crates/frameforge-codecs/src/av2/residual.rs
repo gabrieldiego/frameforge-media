@@ -712,8 +712,8 @@ fn coefficient_proxy_score(
     coefficients: &[i32; TX4X4_SAMPLES],
     kind: Av2CoefficientProxyKind,
 ) -> usize {
-    let levels = lossless_coefficient_levels(coefficients);
-    let Some((first, eob)) = tx4x4_nonzero_bounds(&levels) else {
+    let (levels, bounds) = lossless_coefficient_levels_and_bounds(coefficients);
+    let Some((first, eob)) = bounds else {
         return 16;
     };
 
@@ -782,18 +782,6 @@ fn coefficient_high_range_proxy_score(
     let score = adaptive_high_range_score_bits(high_range, *high_range_avg) * 64;
     *high_range_avg = (*high_range_avg + high_range) >> 1;
     score
-}
-
-fn tx4x4_nonzero_bounds(levels: &[u32; TX4X4_SAMPLES]) -> Option<(usize, usize)> {
-    let mut first = None;
-    let mut eob = 0usize;
-    for (scan_index, &pos) in TX4X4_SCAN.iter().enumerate() {
-        if levels[pos] != 0 {
-            first.get_or_insert(scan_index);
-            eob = scan_index + 1;
-        }
-    }
-    first.map(|first| (first, eob))
 }
 
 fn adaptive_high_range_score_bits(value: u32, context: u32) -> usize {

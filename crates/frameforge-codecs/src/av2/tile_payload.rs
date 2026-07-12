@@ -312,16 +312,16 @@ fn lossless_partition_features_for_source(
             ));
         }
     }
-    let palette_cols = region.width / MVP_LEAF_BLOCK_SIZE;
-    let palette_rows = region.height / MVP_LEAF_BLOCK_SIZE;
-    let mut palette_micro_blocks = Vec::new();
+    let forced_micro_cols = region.width / MVP_LEAF_BLOCK_SIZE;
+    let forced_micro_rows = region.height / MVP_LEAF_BLOCK_SIZE;
+    let mut forced_micro_blocks = Vec::new();
     if palette_enabled {
-        palette_micro_blocks.reserve(palette_cols * palette_rows);
-        for row in 0..palette_rows {
+        forced_micro_blocks.reserve(forced_micro_cols * forced_micro_rows);
+        for row in 0..forced_micro_rows {
             let y0 = region.origin_y + row * MVP_LEAF_BLOCK_SIZE;
-            for col in 0..palette_cols {
+            for col in 0..forced_micro_cols {
                 let x0 = region.origin_x + col * MVP_LEAF_BLOCK_SIZE;
-                palette_micro_blocks.push(lossless_luma_8x8_is_palette_worthy(
+                forced_micro_blocks.push(lossless_luma_8x8_is_palette_worthy(
                     geometry, bit_depth, source, x0, y0,
                 ));
             }
@@ -331,8 +331,8 @@ fn lossless_partition_features_for_source(
         simple_leaves,
         cols,
         leaf_size: AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE,
-        palette_micro_blocks,
-        palette_cols,
+        forced_micro_blocks,
+        forced_micro_cols,
     }
 }
 
