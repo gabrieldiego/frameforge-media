@@ -55,6 +55,7 @@ const AV2_MAX_TILE_ROWS: usize = 64;
 const AV2_TILE_WIDTH_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_TILE_AREA_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC: bool = false;
+const AV2_ENABLE_LUMA_PALETTE_INTRABC_444: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2ChromaFormat {
@@ -456,7 +457,7 @@ enum Av2Mvp444FrameMode {
     Black,
     LumaPalette {
         palette: Av2LumaPalette444,
-        ibc: Av2LocalIbc444,
+        ibc: Option<Av2LocalIbc444>,
     },
 }
 
@@ -471,7 +472,13 @@ impl Av2Mvp444FrameMode {
             return Ok(Self::Black);
         }
         let palette = palette::build_luma_palette_444(frame, geometry, bit_depth)?;
-        let ibc = ibc::build_local_ibc_444_for_palette(frame, geometry, &palette)?;
+        let ibc = if AV2_ENABLE_LUMA_PALETTE_INTRABC_444 {
+            Some(ibc::build_local_ibc_444_for_palette(
+                frame, geometry, &palette,
+            )?)
+        } else {
+            None
+        };
         Ok(Self::LumaPalette { palette, ibc })
     }
 
@@ -486,7 +493,7 @@ impl Av2Mvp444FrameMode {
             // across 64x64 superblocks. The current local IBC model is still
             // tied to independent 64x64 tiles, so leave it off until the block
             // vector predictor is modeled for multi-superblock tiles.
-            Self::LumaPalette { .. } => false,
+            Self::LumaPalette { ibc, .. } => AV2_ENABLE_LUMA_PALETTE_INTRABC_444 && ibc.is_some(),
         }
     }
 
@@ -847,7 +854,10 @@ pub fn av2_mvp_444_ibc_stats_json_for_frame(
     let frame_mode = Av2Mvp444FrameMode::from_frame(frame, geometry, stream_format.bit_depth)?;
     let (black_mode, stats) = match &frame_mode {
         Av2Mvp444FrameMode::Black => (true, Av2LocalIbcStats::default()),
-        Av2Mvp444FrameMode::LumaPalette { ibc, .. } => (false, ibc.stats()),
+        Av2Mvp444FrameMode::LumaPalette { ibc, .. } => (
+            false,
+            ibc.as_ref().map(Av2LocalIbc444::stats).unwrap_or_default(),
+        ),
     };
 
     Ok(format!(
@@ -1723,7 +1733,7 @@ fn av2_tile_entropy_payload_for_region(
                     frame_mode.profile(),
                     frame_mode.allow_intrabc(),
                     palette,
-                    ibc,
+                    ibc.as_ref(),
                 )
             }
         }

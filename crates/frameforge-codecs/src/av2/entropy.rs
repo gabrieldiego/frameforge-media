@@ -196,24 +196,36 @@ impl Av2EntropyWriter {
         // AV2 v1.0.0 Sections 4.11.2 and 8.3: S() reads a symbol using the
         // active CDF selected by the syntax process. Encoder-side this mirrors
         // AVM avm_write_symbol().
-        let mut active_cdf = if self.adaptive_cdf_updates {
-            let index = self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs);
-            self.adaptive_cdfs[index].cdf.clone()
+        let adaptive_index = if self.adaptive_cdf_updates {
+            Some(self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs))
         } else {
-            cdf.to_vec()
+            None
         };
-        let fl = if symbol > 0 {
-            active_cdf[symbol - 1] as u32
-        } else {
-            CDF_PROB_TOP
+        let (fl, fh, fl_inc, fh_inc) = {
+            let active_cdf = if let Some(index) = adaptive_index {
+                self.adaptive_cdfs[index].cdf.as_slice()
+            } else {
+                &*cdf
+            };
+            assert_eq!(
+                active_cdf[nsymbs - 1],
+                0,
+                "last AV2 inverse CDF entry must be zero"
+            );
+            let fl = if symbol > 0 {
+                active_cdf[symbol - 1] as u32
+            } else {
+                CDF_PROB_TOP
+            };
+            let fh = active_cdf[symbol] as u32;
+            let fl_inc = if fl < CDF_PROB_TOP {
+                PROB_INC[nsymbs - 2][symbol.saturating_sub(1)]
+            } else {
+                0
+            };
+            let fh_inc = PROB_INC[nsymbs - 2][symbol];
+            (fl, fh, fl_inc, fh_inc)
         };
-        let fh = active_cdf[symbol] as u32;
-        let fl_inc = if fl < CDF_PROB_TOP {
-            PROB_INC[nsymbs - 2][symbol.saturating_sub(1)]
-        } else {
-            0
-        };
-        let fh_inc = PROB_INC[nsymbs - 2][symbol];
         self.fields.push(Av2EntropyField {
             name,
             code: Av2EntropyCode::Symbol,
@@ -227,14 +239,12 @@ impl Av2EntropyWriter {
             fh_inc: Some(fh_inc),
         });
         self.symbol_bits += 1;
-        self.encode_cdf_q15(symbol, &active_cdf, nsymbs);
+        self.encode_q15(fl, fh, symbol, nsymbs);
         if update_cdf || self.adaptive_cdf_updates {
-            update_cdf_counts(&mut active_cdf, symbol, nsymbs);
-            if self.adaptive_cdf_updates {
-                let index = self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs);
-                self.adaptive_cdfs[index].cdf = active_cdf;
+            if let Some(index) = adaptive_index {
+                update_cdf_counts(&mut self.adaptive_cdfs[index].cdf, symbol, nsymbs);
             } else {
-                cdf[..active_cdf.len()].copy_from_slice(&active_cdf);
+                update_cdf_counts(cdf, symbol, nsymbs);
             }
         }
     }
@@ -328,21 +338,6 @@ impl Av2EntropyWriter {
         self.precarry.push(word);
         #[cfg(debug_assertions)]
         self.reverse_precarry.push(word);
-    }
-
-    fn encode_cdf_q15(&mut self, symbol: usize, icdf: &[u16], nsymbs: usize) {
-        assert_eq!(
-            icdf[nsymbs - 1],
-            0,
-            "last AV2 inverse CDF entry must be zero"
-        );
-        let fl = if symbol > 0 {
-            icdf[symbol - 1] as u32
-        } else {
-            CDF_PROB_TOP
-        };
-        let fh = icdf[symbol] as u32;
-        self.encode_q15(fl, fh, symbol, nsymbs);
     }
 
     fn encode_q15(&mut self, fl: u32, fh: u32, symbol: usize, nsymbs: usize) {

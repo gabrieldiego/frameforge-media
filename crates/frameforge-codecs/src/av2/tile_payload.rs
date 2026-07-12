@@ -53,7 +53,7 @@ pub(crate) fn av2_luma_palette_444_tile_entropy_payload_for_region(
     profile: Av2Black444MvpProfile,
     allow_intrabc: bool,
     palette: &Av2LumaPalette444,
-    ibc: &Av2LocalIbc444,
+    ibc: Option<&Av2LocalIbc444>,
 ) -> Av2EntropyPayload {
     let mut best: Option<Av2EntropyPayload> = None;
     // Larger merged palette leaves currently add mode-search cost without a
@@ -84,7 +84,7 @@ fn av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
     profile: Av2Black444MvpProfile,
     allow_intrabc: bool,
     palette: &Av2LumaPalette444,
-    ibc: &Av2LocalIbc444,
+    ibc: Option<&Av2LocalIbc444>,
     partition_policy: Av2PartitionPolicy,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_partition_policy(
@@ -94,11 +94,11 @@ fn av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
         partition_policy,
         true,
         allow_intrabc,
-        Some(ibc),
+        ibc,
         Some(palette),
     );
     let mut writer = Av2EntropyWriter::with_cdf_updates(!profile.disable_cdf_update);
-    plan.write_entropy(&mut writer, Some(palette), Some(ibc));
+    plan.write_entropy(&mut writer, Some(palette), ibc);
     writer.finish()
 }
 
