@@ -193,7 +193,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             if ibc.is_some() {
                 Av2PartitionPolicy::Fixed8x8Leaves
             } else {
-                Av2PartitionPolicy::LosslessLeafLimit { max_size: 16 }
+                Av2PartitionPolicy::LosslessAdaptive32
             },
             Av2LosslessSubsampledModeSearch::FastScreenContent,
             ibc,
@@ -238,9 +238,188 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
 }
 
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
+const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 32;
+const AV2_LOSSLESS_BASE_LEAF_SIZE: usize = 16;
+const AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP: usize = 4;
+const AV2_LOSSLESS_ADAPTIVE_UNIQUE_LIMIT: usize = 8;
+const AV2_LOSSLESS_ADAPTIVE_GRADIENT_UNIQUE_LIMIT: usize = 16;
+const AV2_LOSSLESS_ADAPTIVE_GRADIENT_Q8_LIMIT: u64 = 192;
+const AV2_LOSSLESS_ADAPTIVE_RANGE_LIMIT: u16 = 8;
 
 fn use_fast_lossless_subsampled_path(region: Av2TileRegion) -> bool {
     region.width * region.height >= AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS
+}
+
+fn lossless_partition_features_for_source(
+    region: Av2TileRegion,
+    geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+) -> Av2LosslessPartitionFeatures {
+    let cols_32x32 = region.width.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    let rows_32x32 = region.height.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    let mut simple_32x32 = Vec::with_capacity(cols_32x32 * rows_32x32);
+    for row in 0..rows_32x32 {
+        let y0 = region.origin_y + row * AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE;
+        let height =
+            (region.origin_y + region.height - y0).min(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+        for col in 0..cols_32x32 {
+            let x0 = region.origin_x + col * AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE;
+            let width =
+                (region.origin_x + region.width - x0).min(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+            simple_32x32.push(lossless_luma_region_is_simple_for_32_leaf(
+                geometry, bit_depth, source, x0, y0, width, height,
+            ));
+        }
+    }
+    Av2LosslessPartitionFeatures {
+        simple_32x32,
+        cols_32x32,
+    }
+}
+
+fn lossless_luma_region_is_simple_for_32_leaf(
+    geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+) -> bool {
+    debug_assert!(width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    debug_assert!(height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    let normalize_shift = bit_depth.bits().saturating_sub(8);
+    let mut seen = [false; 256];
+    let mut unique = 0usize;
+    let mut min_sample = u16::MAX;
+    let mut max_sample = 0u16;
+    let mut gradient_sum = 0u64;
+    let mut gradient_edges = 0u64;
+    let mut above = [0u16; AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE / AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP];
+    for (sample_row, y) in (y0..(y0 + height))
+        .step_by(AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP)
+        .enumerate()
+    {
+        let mut prev = None;
+        for (sample_col, x) in (x0..(x0 + width))
+            .step_by(AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP)
+            .enumerate()
+        {
+            let sample = read_validated_planar_sample(
+                source,
+                y * geometry.width + x,
+                bit_depth,
+            ) >> normalize_shift;
+            let sample_index = usize::from(sample);
+            if !seen[sample_index] {
+                seen[sample_index] = true;
+                unique += 1;
+            }
+            min_sample = min_sample.min(sample);
+            max_sample = max_sample.max(sample);
+            if let Some(left) = prev {
+                gradient_sum += u64::from(sample.abs_diff(left));
+                gradient_edges += 1;
+            }
+            if sample_row > 0 {
+                gradient_sum += u64::from(sample.abs_diff(above[sample_col]));
+                gradient_edges += 1;
+            }
+            above[sample_col] = sample;
+            prev = Some(sample);
+        }
+    }
+
+    let range = max_sample - min_sample;
+    let gradient_q8 = if gradient_edges == 0 {
+        0
+    } else {
+        (gradient_sum * 256) / gradient_edges
+    };
+    unique <= AV2_LOSSLESS_ADAPTIVE_UNIQUE_LIMIT
+        || range <= AV2_LOSSLESS_ADAPTIVE_RANGE_LIMIT
+        || (unique <= AV2_LOSSLESS_ADAPTIVE_GRADIENT_UNIQUE_LIMIT
+            && gradient_q8 <= AV2_LOSSLESS_ADAPTIVE_GRADIENT_Q8_LIMIT)
+}
+
+fn choose_lossless_adaptive_32_partition(
+    row_mi: usize,
+    col_mi: usize,
+    block_size: Av2MvpBlockSize,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    features: &Av2LosslessPartitionFeatures,
+) -> Av2MvpPartition {
+    if !block_size.is_partition_point() {
+        return Av2MvpPartition::None;
+    }
+
+    let allowed = allowed_partitions(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi);
+    if let Some(forced) =
+        forced_boundary_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+    {
+        if allowed.contains(forced) {
+            return forced;
+        }
+    }
+    if let Some(only_allowed) = allowed.only() {
+        return only_allowed;
+    }
+    if allowed.none
+        && block_size.width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+        && block_size.height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+        && features.allows_larger_leaf(row_mi, col_mi, block_size)
+    {
+        return Av2MvpPartition::None;
+    }
+    if allowed.none
+        && block_size.width <= AV2_LOSSLESS_BASE_LEAF_SIZE
+        && block_size.height <= AV2_LOSSLESS_BASE_LEAF_SIZE
+    {
+        return Av2MvpPartition::None;
+    }
+
+    let max_size = if block_size.width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+        && block_size.height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+    {
+        AV2_LOSSLESS_BASE_LEAF_SIZE
+    } else {
+        AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+    };
+
+    if block_size.width == block_size.height {
+        if block_size.height > max_size && allowed.horz {
+            return Av2MvpPartition::Horz;
+        }
+        if block_size.width > max_size && allowed.vert {
+            return Av2MvpPartition::Vert;
+        }
+    } else if block_size.width > block_size.height {
+        if block_size.width > max_size && allowed.vert {
+            return Av2MvpPartition::Vert;
+        }
+        if block_size.height > max_size && allowed.horz {
+            return Av2MvpPartition::Horz;
+        }
+    } else {
+        if block_size.height > max_size && allowed.horz {
+            return Av2MvpPartition::Horz;
+        }
+        if block_size.width > max_size && allowed.vert {
+            return Av2MvpPartition::Vert;
+        }
+    }
+
+    if allowed.none {
+        Av2MvpPartition::None
+    } else if allowed.horz {
+        Av2MvpPartition::Horz
+    } else if allowed.vert {
+        Av2MvpPartition::Vert
+    } else {
+        Av2MvpPartition::None
+    }
 }
 
 fn cached_lossless_subsampled_mode(
@@ -279,7 +458,11 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     ibc: Option<&Av2LocalIbc444>,
     record_fields: bool,
 ) -> Av2EntropyPayload {
-    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+    let lossless_partition_features = (partition_policy == Av2PartitionPolicy::LosslessAdaptive32)
+        .then(|| {
+            lossless_partition_features_for_source(region, geometry, bit_depth, source)
+        });
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy_and_features(
         region,
         profile,
         chroma_format,
@@ -288,6 +471,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         ibc.is_some(),
         ibc,
         None,
+        lossless_partition_features,
     );
     let mut writer =
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
@@ -317,7 +501,7 @@ impl Av2Black444TilePlan {
         ibc: Option<&Av2LocalIbc444>,
         palette: Option<&Av2LumaPalette444>,
     ) -> Self {
-        Self::for_region_with_partition_policy(
+        Self::for_region_with_partition_policy_and_features(
             region,
             profile,
             chroma_format,
@@ -326,6 +510,7 @@ impl Av2Black444TilePlan {
             allow_intrabc,
             ibc,
             palette,
+            None,
         )
     }
 
@@ -338,6 +523,30 @@ impl Av2Black444TilePlan {
         allow_intrabc: bool,
         ibc: Option<&Av2LocalIbc444>,
         palette: Option<&Av2LumaPalette444>,
+    ) -> Self {
+        Self::for_region_with_partition_policy_and_features(
+            region,
+            profile,
+            chroma_format,
+            partition_policy,
+            luma_palette,
+            allow_intrabc,
+            ibc,
+            palette,
+            None,
+        )
+    }
+
+    fn for_region_with_partition_policy_and_features(
+        region: Av2TileRegion,
+        profile: Av2Black444MvpProfile,
+        chroma_format: Av2ChromaFormat,
+        partition_policy: Av2PartitionPolicy,
+        luma_palette: bool,
+        allow_intrabc: bool,
+        ibc: Option<&Av2LocalIbc444>,
+        palette: Option<&Av2LumaPalette444>,
+        lossless_partition_features: Option<Av2LosslessPartitionFeatures>,
     ) -> Self {
         assert!(
             !profile.enable_sdp,
@@ -367,6 +576,7 @@ impl Av2Black444TilePlan {
             luma_palette,
             allow_intrabc,
             max_ref_bv_count,
+            lossless_partition_features,
         };
         let mut partition_context = Av2PartitionContext::new(visible_rows_mi, visible_cols_mi);
         for row_mi in (0..visible_rows_mi).step_by(PARTITION_CONTEXT_DIM) {
@@ -433,6 +643,16 @@ impl Av2Black444TilePlan {
                         max_size,
                     )
                 }
+                Av2PartitionPolicy::LosslessAdaptive32 => choose_lossless_adaptive_32_partition(
+                    row_mi,
+                    col_mi,
+                    block_size,
+                    visible_rows_mi,
+                    visible_cols_mi,
+                    self.lossless_partition_features
+                        .as_ref()
+                        .expect("adaptive lossless partitioning needs source features"),
+                ),
             }
         };
         self.decisions.push(Av2TileDecision {

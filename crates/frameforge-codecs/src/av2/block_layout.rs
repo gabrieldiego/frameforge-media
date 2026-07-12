@@ -463,6 +463,7 @@ struct Av2Black444TilePlan {
     luma_palette: bool,
     allow_intrabc: bool,
     max_ref_bv_count: usize,
+    lossless_partition_features: Option<Av2LosslessPartitionFeatures>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +471,47 @@ enum Av2PartitionPolicy {
     Fixed8x8Leaves,
     LargestLosslessLeaves,
     LosslessLeafLimit { max_size: usize },
+    LosslessAdaptive32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Av2LosslessPartitionFeatures {
+    simple_32x32: Vec<bool>,
+    cols_32x32: usize,
+}
+
+impl Av2LosslessPartitionFeatures {
+    fn allows_larger_leaf(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> bool {
+        if block_size.width <= 16 && block_size.height <= 16 {
+            return true;
+        }
+        if block_size.width > 32 || block_size.height > 32 {
+            return false;
+        }
+
+        let x0 = col_mi * MI_SIZE;
+        let y0 = row_mi * MI_SIZE;
+        let x1 = x0 + block_size.width;
+        let y1 = y0 + block_size.height;
+        let col0 = x0 / 32;
+        let row0 = y0 / 32;
+        let col1 = (x1 - 1) / 32;
+        let row1 = (y1 - 1) / 32;
+        for row in row0..=row1 {
+            for col in col0..=col1 {
+                let index = row * self.cols_32x32 + col;
+                if !self.simple_32x32.get(index).copied().unwrap_or(false) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
