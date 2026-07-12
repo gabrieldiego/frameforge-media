@@ -10,6 +10,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -37,6 +38,9 @@ class ComparisonResult:
     frameforge_bytes: int
     reference_bytes: int
     ratio: float
+    frameforge_seconds: float
+    frameforge_fps: float
+    frame_count: int
     lossless: bool
     reference_cached: bool
     log: Path
@@ -129,13 +133,14 @@ def main() -> int:
         print(
             "  mode={mode} baseline={backend} reference={cache} "
             "FrameForge={ff} byte(s), reference={ref} byte(s), "
-            "ratio={ratio:.3f}x".format(
+            "ratio={ratio:.3f}x, encode={fps} fps".format(
                 mode="lossless" if result.lossless else "default",
                 backend=args.reference_backend,
                 cache="cached" if result.reference_cached else "fresh",
                 ff=result.frameforge_bytes,
                 ref=result.reference_bytes,
                 ratio=result.ratio,
+                fps=format_fps(result.frameforge_fps),
             ),
             flush=True,
         )
@@ -145,29 +150,44 @@ def main() -> int:
         "FrameForge media compression comparison: "
         f"{args.set} ({args.codec}, baseline={args.reference_backend})"
     )
-    print("| # | vector | mode | reference | FrameForge bytes | reference bytes | FF/reference | delta | log |")
-    print("|---:|---|---|---|---:|---:|---:|---:|---|")
+    print(
+        "| # | vector | mode | reference | FrameForge bytes | reference bytes | "
+        "FF/reference | delta | FF encode fps | log |"
+    )
+    print("|---:|---|---|---|---:|---:|---:|---:|---:|---|")
     total_ff = 0
     total_ref = 0
+    total_frames = 0
+    total_frameforge_seconds = 0.0
     for index, result in enumerate(results, start=1):
         total_ff += result.frameforge_bytes
         total_ref += result.reference_bytes
+        total_frames += result.frame_count
+        total_frameforge_seconds += result.frameforge_seconds
         delta = result.frameforge_bytes - result.reference_bytes
         mode = "lossless" if result.lossless else "default"
         cache = "cached" if result.reference_cached else "fresh"
         print(
             f"| {index} | {result.vector_name} | {mode} | {cache} | {result.frameforge_bytes} | "
             f"{result.reference_bytes} | {result.ratio:.3f}x | {delta:+d} | "
+            f"{format_fps(result.frameforge_fps)} | "
             f"{relpath(result.log)} |"
         )
     if results:
         total_ratio = total_ff / total_ref if total_ref else float("inf")
+        total_fps = (
+            total_frames / total_frameforge_seconds
+            if total_frameforge_seconds > 0.0
+            else float("inf")
+        )
         print(
             f"| total | {len(results)} vector(s) | mixed | mixed | {total_ff} | {total_ref} | "
-            f"{total_ratio:.3f}x | {total_ff - total_ref:+d} | |"
+            f"{total_ratio:.3f}x | {total_ff - total_ref:+d} | {format_fps(total_fps)} | |"
         )
     print()
-    print("NOTE: this is a size comparison only, not a validation pass/fail criterion.")
+    print(
+        "NOTE: FrameForge encode FPS is timed locally; reference encoders are only size baselines."
+    )
     return 0
 
 
@@ -265,9 +285,14 @@ def run_case(
     metadata = reference_cache_metadata(vector, vector_path, reference_encoder, reference_cmd, args)
     metadata_path = reference_metadata_path(reference_output)
 
-    frameforge_result = run_logged(frameforge_cmd)
+    frameforge_result, frameforge_seconds = run_logged_timed(frameforge_cmd)
+    frameforge_fps = (
+        vector.frames / frameforge_seconds if frameforge_seconds > 0.0 else float("inf")
+    )
     reference_cached = False
     reference_output_text = ""
+    reference_run_cmd = reference_cmd
+    reference_run_output = reference_output
     if not args.refresh_reference and reference_cache_valid(
         reference_output, metadata_path, metadata, args
     ):
@@ -278,24 +303,43 @@ def run_case(
         )
         reference_returncode = 0
     else:
-        remove_reference_outputs(reference_output, args)
-        reference_result = run_logged(reference_cmd)
+        reference_run_output = temporary_reference_output(reference_output)
+        reference_run_cmd = reference_encode_command(
+            vector,
+            vector_path,
+            reference_run_output,
+            reference_encoder,
+            args,
+        )
+        remove_reference_outputs(reference_run_output, args)
+        reference_result = run_logged(reference_run_cmd)
         reference_output_text = reference_result.stdout
         reference_returncode = reference_result.returncode
 
+    reference_log_header = f"$ {shlex.join(reference_run_cmd)}"
+    if reference_run_cmd != reference_cmd:
+        reference_log_header += f"\n# cache command: {shlex.join(reference_cmd)}"
     log.write_text(
-        f"$ {shlex.join(frameforge_cmd)}\n\n{frameforge_result.stdout}\n\n"
-        f"$ {shlex.join(reference_cmd)}\n\n{reference_output_text}"
+        f"$ {shlex.join(frameforge_cmd)}\n\n{frameforge_result.stdout}\n"
+        f"FrameForge timing: elapsed_seconds={frameforge_seconds:.6f} "
+        f"encode_fps={format_fps(frameforge_fps)}\n\n"
+        f"{reference_log_header}\n\n{reference_output_text}"
     )
 
     if frameforge_result.returncode != 0:
         raise SystemExit(f"FrameForge encode failed for {vector_path.name}; see {relpath(log)}")
     if reference_returncode != 0:
+        if not reference_cached:
+            remove_reference_outputs(reference_run_output, args)
         raise SystemExit(f"reference encode failed for {vector_path.name}; see {relpath(log)}")
     require_non_empty(frameforge_output, "FrameForge", vector_path, log)
-    require_non_empty(reference_output, "reference", vector_path, log)
-    require_reference_outputs(reference_output, args, vector_path, log)
-    if not reference_cached:
+    if reference_cached:
+        require_non_empty(reference_output, "reference", vector_path, log)
+        require_reference_outputs(reference_output, args, vector_path, log)
+    else:
+        require_non_empty(reference_run_output, "reference", vector_path, log)
+        require_reference_outputs(reference_run_output, args, vector_path, log)
+        promote_reference_outputs(reference_run_output, reference_output, args)
         metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 
     frameforge_bytes = frameforge_output.stat().st_size
@@ -308,6 +352,9 @@ def run_case(
         frameforge_bytes=frameforge_bytes,
         reference_bytes=reference_bytes,
         ratio=ratio,
+        frameforge_seconds=frameforge_seconds,
+        frameforge_fps=frameforge_fps,
+        frame_count=vector.frames,
         lossless=vector.lossless,
         reference_cached=reference_cached,
         log=log,
@@ -338,6 +385,10 @@ def reference_metadata_path(output: Path) -> Path:
     return output.with_name(f"{output.stem}_metadata.json")
 
 
+def temporary_reference_output(output: Path) -> Path:
+    return output.with_name(f".{output.stem}.{os.getpid()}.tmp{output.suffix}")
+
+
 def reference_outputs(output: Path, args: argparse.Namespace) -> list[Path]:
     outputs = [output]
     if args.reference_backend == REFERENCE_BACKEND_NATIVE and args.codec == "vvc":
@@ -349,6 +400,16 @@ def remove_reference_outputs(output: Path, args: argparse.Namespace) -> None:
     for path in [*reference_outputs(output, args), reference_metadata_path(output)]:
         if path.exists():
             path.unlink()
+
+
+def promote_reference_outputs(temp_output: Path, final_output: Path, args: argparse.Namespace) -> None:
+    temp_outputs = reference_outputs(temp_output, args)
+    final_outputs = reference_outputs(final_output, args)
+    for path in final_outputs:
+        if path.exists():
+            path.unlink()
+    for temp_path, final_path in zip(temp_outputs, final_outputs, strict=True):
+        temp_path.replace(final_path)
 
 
 def require_reference_outputs(
@@ -741,6 +802,20 @@ def run_logged(command: list[str]) -> subprocess.CompletedProcess[str]:
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def run_logged_timed(command: list[str]) -> tuple[subprocess.CompletedProcess[str], float]:
+    start = time.perf_counter()
+    process = run_logged(command)
+    return process, time.perf_counter() - start
+
+
+def format_fps(value: float) -> str:
+    if value == float("inf"):
+        return "inf"
+    if value >= 100:
+        return f"{value:.1f}"
+    return f"{value:.2f}"
 
 
 def require_non_empty(output: Path, label: str, vector_path: Path, log: Path) -> None:
