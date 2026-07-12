@@ -1,6 +1,7 @@
 const CDF_PROB_TOP: u32 = 1 << 15;
 const EC_PROB_SHIFT: u32 = 7;
 const AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE: usize = 512;
+const AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE: usize = 256;
 // The forward AV2 pre-carry finalizer delays output while a future carry could
 // still change pending bytes. Each pending word is a 9-bit byte-plus-carry
 // value, so 32 words map to a small 288-bit RTL queue. This is intentionally
@@ -69,6 +70,7 @@ pub struct Av2EntropyWriter {
     adaptive_cdfs: Vec<Av2AdaptiveCdf>,
     adaptive_cdf_names: Vec<&'static str>,
     adaptive_cdf_name_ptrs: Vec<Av2StaticNameCacheEntry>,
+    adaptive_cdf_name_lookup_cache: [usize; AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE],
     last_adaptive_cdf_name: Option<Av2StaticNameCacheEntry>,
     last_adaptive_cdf_index: Option<usize>,
     adaptive_cdf_lookup_cache: [Option<usize>; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
@@ -143,6 +145,7 @@ impl Av2EntropyWriter {
             adaptive_cdfs: Vec::new(),
             adaptive_cdf_names: Vec::new(),
             adaptive_cdf_name_ptrs: Vec::new(),
+            adaptive_cdf_name_lookup_cache: [usize::MAX; AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE],
             last_adaptive_cdf_name: None,
             last_adaptive_cdf_index: None,
             adaptive_cdf_lookup_cache: [None; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
@@ -406,13 +409,27 @@ impl Av2EntropyWriter {
                 return entry.index;
             }
         }
-        if let Some(entry) = self
-            .adaptive_cdf_name_ptrs
-            .iter()
-            .find(|entry| entry.ptr == ptr && entry.len == len)
+        let cache_slot = av2_adaptive_cdf_name_lookup_cache_slot(ptr, len);
+        let cached_ptr_index = self.adaptive_cdf_name_lookup_cache[cache_slot];
+        if let Some(entry) = (cached_ptr_index != usize::MAX)
+            .then(|| self.adaptive_cdf_name_ptrs.get(cached_ptr_index))
+            .flatten()
             .copied()
         {
+            if entry.ptr == ptr && entry.len == len {
+                self.last_adaptive_cdf_name = Some(entry);
+                return entry.index;
+            }
+        }
+        if let Some((ptr_index, entry)) = self
+            .adaptive_cdf_name_ptrs
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.ptr == ptr && entry.len == len)
+        {
+            let entry = *entry;
             self.last_adaptive_cdf_name = Some(entry);
+            self.adaptive_cdf_name_lookup_cache[cache_slot] = ptr_index;
             return entry.index;
         }
 
@@ -427,7 +444,9 @@ impl Av2EntropyWriter {
             self.adaptive_cdf_names.len() - 1
         };
         let entry = Av2StaticNameCacheEntry { ptr, len, index };
+        let ptr_index = self.adaptive_cdf_name_ptrs.len();
         self.adaptive_cdf_name_ptrs.push(entry);
+        self.adaptive_cdf_name_lookup_cache[cache_slot] = ptr_index;
         self.last_adaptive_cdf_name = Some(entry);
         index
     }
@@ -534,6 +553,15 @@ fn av2_adaptive_cdf_lookup_cache_slot(
         hash = hash.rotate_left(13).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     }
     (hash as usize) & (AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE - 1)
+}
+
+fn av2_adaptive_cdf_name_lookup_cache_slot(ptr: usize, len: usize) -> usize {
+    let mut hash = ptr.wrapping_mul(0x9e37_79b9_7f4a_7c15usize);
+    hash ^= len.wrapping_mul(0xbf58_476d_1ce4_e5b9usize);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccdusize);
+    hash ^= hash >> 33;
+    hash & (AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE - 1)
 }
 
 impl Av2PrecarryForwardFinalizer {
