@@ -8,6 +8,7 @@ const AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE: usize = 512;
 // this ever overflows on real streams, treat it as an encoder bug and revisit
 // the entropy finalizer instead of reinstating a full payload buffer.
 const AV2_PRE_CARRY_PENDING_LIMIT: usize = 32;
+const AV2_PRE_CARRY_FLUSH_THRESHOLD: usize = 8;
 
 const PROB_INC: [[i32; 16]; 15] = [
     [8, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
@@ -551,7 +552,9 @@ impl Av2PrecarryForwardFinalizer {
             "AV2 forward pre-carry pending buffer exceeded {AV2_PRE_CARRY_PENDING_LIMIT} words"
         );
         self.max_pending_words = self.max_pending_words.max(self.pending.len());
-        self.flush_common_prefix();
+        if self.pending.len() >= AV2_PRE_CARRY_FLUSH_THRESHOLD {
+            self.flush_common_prefix();
+        }
     }
 
     fn finish(mut self) -> Vec<u8> {
