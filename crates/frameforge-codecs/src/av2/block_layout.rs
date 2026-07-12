@@ -479,16 +479,73 @@ struct Av2LosslessPartitionFeatures {
     simple_leaves: Vec<bool>,
     cols: usize,
     leaf_size: usize,
+    palette_micro_blocks: Vec<bool>,
+    palette_cols: usize,
 }
 
 impl Av2LosslessPartitionFeatures {
+    fn base_leaf_size(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> usize {
+        if self.requires_palette_leaf(row_mi, col_mi, block_size) {
+            MVP_LEAF_BLOCK_SIZE
+        } else {
+            AV2_LOSSLESS_BASE_LEAF_SIZE
+        }
+    }
+
+    fn requires_palette_leaf(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> bool {
+        if self.palette_micro_blocks.is_empty()
+            || (block_size.width <= MVP_LEAF_BLOCK_SIZE
+                && block_size.height <= MVP_LEAF_BLOCK_SIZE)
+        {
+            return false;
+        }
+
+        let x0 = col_mi * MI_SIZE;
+        let y0 = row_mi * MI_SIZE;
+        let x1 = x0 + block_size.width;
+        let y1 = y0 + block_size.height;
+        let col0 = x0 / MVP_LEAF_BLOCK_SIZE;
+        let row0 = y0 / MVP_LEAF_BLOCK_SIZE;
+        let col1 = (x1 - 1) / MVP_LEAF_BLOCK_SIZE;
+        let row1 = (y1 - 1) / MVP_LEAF_BLOCK_SIZE;
+        for row in row0..=row1 {
+            for col in col0..=col1 {
+                let index = row * self.palette_cols + col;
+                if self
+                    .palette_micro_blocks
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn allows_larger_leaf(
         &self,
         row_mi: usize,
         col_mi: usize,
         block_size: Av2MvpBlockSize,
     ) -> bool {
-        if block_size.width <= 16 && block_size.height <= 16 {
+        if self.requires_palette_leaf(row_mi, col_mi, block_size) {
+            return false;
+        }
+        if block_size.width <= AV2_LOSSLESS_BASE_LEAF_SIZE
+            && block_size.height <= AV2_LOSSLESS_BASE_LEAF_SIZE
+        {
             return true;
         }
         if block_size.width > self.leaf_size || block_size.height > self.leaf_size {

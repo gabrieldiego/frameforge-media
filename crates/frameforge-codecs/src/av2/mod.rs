@@ -666,7 +666,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
         if options.lossless
             && matches!(
                 stream_format.chroma_format,
-                Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+                Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
             )
         {
             let (bitstream, reconstruction) =
@@ -831,7 +831,7 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
 ) -> (Vec<u8>, Vec<u8>) {
     debug_assert!(matches!(
         stream_format.chroma_format,
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
     ));
     let expected_len = Picture::expected_len(
         geometry.width,
@@ -841,7 +841,7 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
     assert_eq!(
         frame.len(),
         expected_len,
-        "AV2 subsampled lossless input length must match geometry"
+        "AV2 planar lossless input length must match geometry"
     );
     let ibc = if AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC {
         ibc::build_local_ibc_subsampled(
@@ -860,6 +860,13 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
     } else {
         Av2Black444MvpProfile::current()
     };
+    let palette = palette::build_luma_palette_lossless(
+        frame,
+        geometry,
+        stream_format.chroma_format,
+        stream_format.bit_depth,
+    )
+    .ok();
     let mut reconstruction = vec![0; expected_len];
     let mut out = Vec::new();
     append_obu(
@@ -881,6 +888,7 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
             frame,
             &mut reconstruction,
             profile,
+            palette.as_ref(),
             ibc.as_ref(),
         ),
     );
@@ -1730,6 +1738,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
     frame: &[u8],
     reconstruction: &mut [u8],
     profile: Av2Black444MvpProfile,
+    palette: Option<&Av2LumaPalette444>,
     ibc: Option<&Av2LocalIbc444>,
 ) -> Av2SyntaxPayload {
     let tile_layout = if ibc.is_none() {
@@ -1739,8 +1748,12 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
             .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry))
     };
     let allow_intrabc = ibc.is_some();
-    let mut payload =
-        av2_mvp_444_closed_loop_key_header_payload(allow_intrabc, allow_intrabc, &tile_layout);
+    let allow_screen_content_tools = allow_intrabc || palette.is_some();
+    let mut payload = av2_mvp_444_closed_loop_key_header_payload(
+        allow_screen_content_tools,
+        allow_intrabc,
+        &tile_layout,
+    );
     let tile_payloads: Vec<_> = if ibc.is_none() && tile_layout.tile_count() > 1 {
         std::thread::scope(|scope| {
             let handles: Vec<_> = tile_layout
@@ -1755,6 +1768,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
                             stream_format.chroma_format,
                             stream_format.bit_depth,
                             frame,
+                            palette,
                             false,
                         )
                     })
@@ -1778,6 +1792,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
                     stream_format.bit_depth,
                     frame,
                     reconstruction,
+                    palette,
                     ibc,
                     false,
                 )

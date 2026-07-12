@@ -253,6 +253,7 @@ struct Av2LosslessSubsampledModeDecision {
     luma_bdpcm_horz: Option<bool>,
     chroma_use_bdpcm: bool,
     chroma_intra_mode: Av2ChromaIntraMode,
+    use_luma_palette: bool,
     use_fsc: bool,
 }
 
@@ -269,6 +270,7 @@ impl Default for Av2LosslessSubsampledModeDecision {
             luma_bdpcm_horz: None,
             chroma_use_bdpcm: false,
             chroma_intra_mode: Av2ChromaIntraMode::Horizontal,
+            use_luma_palette: false,
             use_fsc: false,
         }
     }

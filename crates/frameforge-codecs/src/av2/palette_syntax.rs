@@ -39,6 +39,16 @@ fn write_luma_palette_mode_info(
     cache_context.update_leaf(decision.row, decision.col, decision.block_size, colors);
 }
 
+fn write_luma_palette_absent_mode_info(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    cache_context: &mut Av2PaletteColorCacheContext,
+) {
+    let mut mode_cdf = DEFAULT_PALETTE_Y_MODE_CDF;
+    writer.write_symbol("tile.palette.y_mode_present", 0, &mut mode_cdf, 2, false);
+    cache_context.clear_leaf(decision.row, decision.col, decision.block_size);
+}
+
 fn write_luma_palette_colors(
     writer: &mut Av2EntropyWriter,
     colors: &[Av2Sample],

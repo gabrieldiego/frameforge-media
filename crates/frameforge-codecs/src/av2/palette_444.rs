@@ -157,7 +157,10 @@ impl Av2LumaPalette444 {
         width: usize,
         height: usize,
     ) -> Av2LumaPaletteRegion {
-        if width == AV2_LUMA_PALETTE_BLOCK_SIZE && height == AV2_LUMA_PALETTE_BLOCK_SIZE {
+        if width == AV2_LUMA_PALETTE_BLOCK_SIZE
+            && height == AV2_LUMA_PALETTE_BLOCK_SIZE
+            && !self.blocks.is_empty()
+        {
             Av2LumaPaletteRegion::from_block(x0, y0, self.block_for_origin(x0, y0))
         } else {
             self.quantized_region_palette(x0, y0, width, height)

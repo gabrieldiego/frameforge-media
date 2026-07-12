@@ -102,6 +102,7 @@ fn write_lossless_subsampled_residual_coefficients(
     coded_mi_context: &Av2CodedMiContext,
     lossless: &mut Av2LosslessSubsampledTileState<'_>,
     mode: Av2LosslessSubsampledModeDecision,
+    palette: Option<&Av2LumaPalette444>,
 ) {
     let txb_width = decision
         .block_size
@@ -118,6 +119,16 @@ fn write_lossless_subsampled_residual_coefficients(
         lossless.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
     let luma_leaf_width = txb_width * TX4X4_SIZE;
     let luma_leaf_height = txb_height * TX4X4_SIZE;
+    let luma_palette_region = mode.use_luma_palette.then(|| {
+        palette
+            .expect("AV2 luma palette mode needs palette state")
+            .syntax_region_palette(
+                luma_leaf_x0,
+                luma_leaf_y0,
+                luma_leaf_width,
+                luma_leaf_height,
+            )
+    });
     for row in 0..txb_height {
         let abs_row = decision.row + row;
         for col in 0..txb_width {
@@ -126,17 +137,26 @@ fn write_lossless_subsampled_residual_coefficients(
                 luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
-            let residual = lossless.tx4x4_residual_for_mode(
-                Av2LosslessPlane::Y,
-                x0,
-                y0,
-                mode,
-                luma_leaf_x0,
-                luma_leaf_y0,
-                luma_leaf_width,
-                luma_leaf_height,
-                coded_mi_context,
-            );
+            let residual = if let Some(region) = luma_palette_region.as_ref() {
+                lossless.luma_palette_residual4x4(
+                    palette.expect("AV2 luma palette mode needs palette state"),
+                    region,
+                    x0,
+                    y0,
+                )
+            } else {
+                lossless.tx4x4_residual_for_mode(
+                    Av2LosslessPlane::Y,
+                    x0,
+                    y0,
+                    mode,
+                    luma_leaf_x0,
+                    luma_leaf_y0,
+                    luma_leaf_width,
+                    luma_leaf_height,
+                    coded_mi_context,
+                )
+            };
             let (context, _) = if tx4x4_residual_is_zero(&residual) {
                 if mode.use_fsc {
                     write_y_fsc_txb_all_zero(writer);

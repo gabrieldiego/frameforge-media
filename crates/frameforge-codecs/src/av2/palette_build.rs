@@ -26,6 +26,19 @@ pub(crate) fn build_luma_palette_444(
     let y_plane = decode_planar_samples(frame, 0, plane_len, bit_depth)?;
     let u_plane = decode_planar_samples(frame, plane_len, plane_len, bit_depth)?;
     let v_plane = decode_planar_samples(frame, 2 * plane_len, plane_len, bit_depth)?;
+    build_luma_palette_from_planes(frame, geometry, bit_depth, y_plane, u_plane, v_plane, true)
+}
+
+fn build_luma_palette_from_planes(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
+    y_plane: Vec<Av2Sample>,
+    u_plane: Vec<Av2Sample>,
+    v_plane: Vec<Av2Sample>,
+    score_chroma_modes: bool,
+) -> Result<Av2LumaPalette444, String> {
+    let plane_len = geometry.width * geometry.height;
     let blocks_wide = geometry.width / AV2_LUMA_PALETTE_BLOCK_SIZE;
     let blocks_high = geometry.height / AV2_LUMA_PALETTE_BLOCK_SIZE;
     let mut blocks = Vec::with_capacity(blocks_wide * blocks_high);
@@ -45,31 +58,37 @@ pub(crate) fn build_luma_palette_444(
             }
 
             let block = build_luma_palette_block(&samples);
-            let mode = choose_luma_intra_mode(
-                &y_plane,
-                geometry.width,
-                x0,
-                y0,
-                block_x,
-                block_y,
-                blocks_wide,
-                blocks_high,
-                &luma_modes,
-                &block,
-            );
-            for local_y in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
-                for local_x in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
-                    let dst_index = (y0 + local_y) * geometry.width + x0 + local_x;
-                    luma_prediction[dst_index] = luma_intra_prediction_sample(
-                        &y_plane,
-                        geometry.width,
-                        x0,
-                        y0,
-                        local_x,
-                        local_y,
-                        &block,
-                        mode,
-                    );
+            let mode = if score_chroma_modes {
+                choose_luma_intra_mode(
+                    &y_plane,
+                    geometry.width,
+                    x0,
+                    y0,
+                    block_x,
+                    block_y,
+                    blocks_wide,
+                    blocks_high,
+                    &luma_modes,
+                    &block,
+                )
+            } else {
+                Av2LumaIntraMode::Dc
+            };
+            if score_chroma_modes {
+                for local_y in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
+                    for local_x in 0..AV2_LUMA_PALETTE_BLOCK_SIZE {
+                        let dst_index = (y0 + local_y) * geometry.width + x0 + local_x;
+                        luma_prediction[dst_index] = luma_intra_prediction_sample(
+                            &y_plane,
+                            geometry.width,
+                            x0,
+                            y0,
+                            local_x,
+                            local_y,
+                            &block,
+                            mode,
+                        );
+                    }
                 }
             }
             luma_modes.push(mode);
@@ -102,15 +121,17 @@ pub(crate) fn build_luma_palette_444(
         blocks_high,
     };
 
-    for block_y in 0..blocks_high {
-        for block_x in 0..blocks_wide {
-            let block_index = block_y * blocks_wide + block_x;
-            let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
-            let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
-            let (chroma_use_bdpcm, chroma_intra_mode) =
-                palette.chroma_mode_decision_for_block(x0, y0);
-            palette.chroma_use_bdpcm[block_index] = chroma_use_bdpcm;
-            palette.chroma_intra_modes[block_index] = chroma_intra_mode;
+    if score_chroma_modes {
+        for block_y in 0..blocks_high {
+            for block_x in 0..blocks_wide {
+                let block_index = block_y * blocks_wide + block_x;
+                let x0 = block_x * AV2_LUMA_PALETTE_BLOCK_SIZE;
+                let y0 = block_y * AV2_LUMA_PALETTE_BLOCK_SIZE;
+                let (chroma_use_bdpcm, chroma_intra_mode) =
+                    palette.chroma_mode_decision_for_block(x0, y0);
+                palette.chroma_use_bdpcm[block_index] = chroma_use_bdpcm;
+                palette.chroma_intra_modes[block_index] = chroma_intra_mode;
+            }
         }
     }
 
@@ -132,6 +153,56 @@ pub(crate) fn build_luma_palette_444(
     }
 
     Ok(palette)
+}
+
+pub(crate) fn build_luma_palette_lossless(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+) -> Result<Av2LumaPalette444, String> {
+    let format = match chroma_format {
+        Av2ChromaFormat::Yuv420 => PixelFormat::yuv420(bit_depth.bits()),
+        Av2ChromaFormat::Yuv422 => PixelFormat::yuv422(bit_depth.bits()),
+        Av2ChromaFormat::Yuv444 => PixelFormat::yuv444(bit_depth.bits()),
+    }
+    .expect("validated AV2 bit depth must map to a planar YUV pixel format");
+    let expected_len = Picture::expected_len(geometry.width, geometry.height, format);
+    if frame.len() != expected_len {
+        return Err(format!(
+            "AV2 {} lossless luma palette input length mismatch: expected {expected_len} byte(s), got {}",
+            format,
+            frame.len()
+        ));
+    }
+    if geometry.width % AV2_LUMA_PALETTE_BLOCK_SIZE != 0
+        || geometry.height % AV2_LUMA_PALETTE_BLOCK_SIZE != 0
+    {
+        return Err(format!(
+            "AV2 luma palette path expects dimensions in {}-pixel units, got {}x{}",
+            AV2_LUMA_PALETTE_BLOCK_SIZE, geometry.width, geometry.height
+        ));
+    }
+
+    let plane_len = geometry.width * geometry.height;
+    let y_plane = decode_planar_samples(frame, 0, plane_len, bit_depth)?;
+    Ok(Av2LumaPalette444 {
+        blocks: Vec::new(),
+        luma_modes: Vec::new(),
+        luma_bdpcm_horz: Vec::new(),
+        chroma_use_bdpcm: Vec::new(),
+        chroma_intra_modes: Vec::new(),
+        bit_depth,
+        y_plane,
+        luma_prediction: Vec::new(),
+        u_plane: vec![0; plane_len],
+        v_plane: vec![0; plane_len],
+        reconstruction: frame.to_vec(),
+        width: geometry.width,
+        height: geometry.height,
+        blocks_wide: geometry.width / AV2_LUMA_PALETTE_BLOCK_SIZE,
+        blocks_high: geometry.height / AV2_LUMA_PALETTE_BLOCK_SIZE,
+    })
 }
 
 fn decode_planar_samples(

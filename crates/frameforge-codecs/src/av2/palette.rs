@@ -1,6 +1,6 @@
 use super::{
     av2_lossless_dc_predictor, av2_lossless_h_pred_left_edge, av2_lossless_v_pred_above_edge,
-    Av2Sample, Av2VideoGeometry,
+    Av2ChromaFormat, Av2Sample, Av2VideoGeometry,
 };
 use crate::av2::intra_prediction::{
     av2_highbd_smooth_intra_predictor_set, av2_intra_residual4x4, directional_interpolate,

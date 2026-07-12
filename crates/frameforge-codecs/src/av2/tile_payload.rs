@@ -174,12 +174,13 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
     bit_depth: SampleBitDepth,
     source: &[u8],
     recon: &mut [u8],
+    palette: Option<&Av2LumaPalette444>,
     ibc: Option<&Av2LocalIbc444>,
     record_fields: bool,
 ) -> Av2EntropyPayload {
     debug_assert!(matches!(
         chroma_format,
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
     ));
     if use_fast_lossless_subsampled_path(region) {
         return av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
@@ -190,6 +191,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             bit_depth,
             source,
             recon,
+            palette,
             if ibc.is_some() {
                 Av2PartitionPolicy::Fixed8x8Leaves
             } else {
@@ -218,6 +220,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             bit_depth,
             source,
             &mut candidate_recon,
+            palette,
             partition_policy,
             Av2LosslessSubsampledModeSearch::Exhaustive,
             None,
@@ -234,7 +237,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
     }
 
     let (payload, candidate_recon) =
-        best.expect("AV2 subsampled lossless has fixed partition candidates");
+        best.expect("AV2 planar lossless has fixed partition candidates");
     recon.copy_from_slice(&candidate_recon);
     payload
 }
@@ -246,11 +249,12 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     source: &[u8],
+    palette: Option<&Av2LumaPalette444>,
     record_fields: bool,
 ) -> Av2EntropyPayload {
     debug_assert!(matches!(
         chroma_format,
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
     ));
     debug_assert!(use_fast_lossless_subsampled_path(region));
     let mut scratch_recon = [];
@@ -262,6 +266,7 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
         bit_depth,
         source,
         &mut scratch_recon,
+        palette,
         Av2PartitionPolicy::LosslessAdaptive32,
         Av2LosslessSubsampledModeSearch::FastScreenContent,
         None,
@@ -278,6 +283,7 @@ const AV2_LOSSLESS_ADAPTIVE_UNIQUE_LIMIT: usize = 8;
 const AV2_LOSSLESS_ADAPTIVE_GRADIENT_UNIQUE_LIMIT: usize = 16;
 const AV2_LOSSLESS_ADAPTIVE_GRADIENT_Q8_LIMIT: u64 = 192;
 const AV2_LOSSLESS_ADAPTIVE_RANGE_LIMIT: u16 = 8;
+const AV2_LOSSLESS_PALETTE_PARTITION_UNIQUE_LIMIT: usize = 4;
 
 fn use_fast_lossless_subsampled_path(region: Av2TileRegion) -> bool {
     region.width * region.height >= AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS
@@ -288,6 +294,7 @@ fn lossless_partition_features_for_source(
     geometry: Av2VideoGeometry,
     bit_depth: SampleBitDepth,
     source: &[u8],
+    palette_enabled: bool,
 ) -> Av2LosslessPartitionFeatures {
     let cols = region.width.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
     let rows = region.height.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
@@ -305,11 +312,53 @@ fn lossless_partition_features_for_source(
             ));
         }
     }
+    let palette_cols = region.width / MVP_LEAF_BLOCK_SIZE;
+    let palette_rows = region.height / MVP_LEAF_BLOCK_SIZE;
+    let mut palette_micro_blocks = Vec::new();
+    if palette_enabled {
+        palette_micro_blocks.reserve(palette_cols * palette_rows);
+        for row in 0..palette_rows {
+            let y0 = region.origin_y + row * MVP_LEAF_BLOCK_SIZE;
+            for col in 0..palette_cols {
+                let x0 = region.origin_x + col * MVP_LEAF_BLOCK_SIZE;
+                palette_micro_blocks.push(lossless_luma_8x8_is_palette_worthy(
+                    geometry, bit_depth, source, x0, y0,
+                ));
+            }
+        }
+    }
     Av2LosslessPartitionFeatures {
         simple_leaves,
         cols,
         leaf_size: AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE,
+        palette_micro_blocks,
+        palette_cols,
     }
+}
+
+fn lossless_luma_8x8_is_palette_worthy(
+    geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    x0: usize,
+    y0: usize,
+) -> bool {
+    let mut values = [0u16; AV2_LUMA_PALETTE_MAX_COLORS + 1];
+    let mut unique = 0usize;
+    for y in y0..(y0 + MVP_LEAF_BLOCK_SIZE) {
+        for x in x0..(x0 + MVP_LEAF_BLOCK_SIZE) {
+            let sample = read_validated_planar_sample(source, y * geometry.width + x, bit_depth);
+            if values[..unique].contains(&sample) {
+                continue;
+            }
+            if unique == values.len() {
+                return false;
+            }
+            values[unique] = sample;
+            unique += 1;
+        }
+    }
+    (2..=AV2_LOSSLESS_PALETTE_PARTITION_UNIQUE_LIMIT).contains(&unique)
 }
 
 fn lossless_luma_region_is_simple_for_adaptive_leaf(
@@ -407,9 +456,10 @@ fn choose_lossless_adaptive_32_partition(
     {
         return Av2MvpPartition::None;
     }
+    let base_leaf_size = features.base_leaf_size(row_mi, col_mi, block_size);
     if allowed.none
-        && block_size.width <= AV2_LOSSLESS_BASE_LEAF_SIZE
-        && block_size.height <= AV2_LOSSLESS_BASE_LEAF_SIZE
+        && block_size.width <= base_leaf_size
+        && block_size.height <= base_leaf_size
     {
         return Av2MvpPartition::None;
     }
@@ -417,7 +467,7 @@ fn choose_lossless_adaptive_32_partition(
     let max_size = if block_size.width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
         && block_size.height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
     {
-        AV2_LOSSLESS_BASE_LEAF_SIZE
+        base_leaf_size
     } else {
         AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
     };
@@ -463,6 +513,7 @@ fn cached_lossless_subsampled_mode(
     visible_rows_mi: usize,
     visible_cols_mi: usize,
     coded_mi_context: &Av2CodedMiContext,
+    palette: Option<&Av2LumaPalette444>,
 ) -> Av2LosslessSubsampledModeDecision {
     if let Some((cached_decision, cached_mode)) = cache {
         if *cached_decision == decision {
@@ -474,6 +525,7 @@ fn cached_lossless_subsampled_mode(
         visible_rows_mi,
         visible_cols_mi,
         coded_mi_context,
+        palette,
     );
     *cache = Some((decision, mode));
     mode
@@ -487,6 +539,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     bit_depth: SampleBitDepth,
     source: &[u8],
     recon: &mut [u8],
+    palette: Option<&Av2LumaPalette444>,
     partition_policy: Av2PartitionPolicy,
     mode_search: Av2LosslessSubsampledModeSearch,
     ibc: Option<&Av2LocalIbc444>,
@@ -495,7 +548,13 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
 ) -> Av2EntropyPayload {
     let lossless_partition_features = (partition_policy == Av2PartitionPolicy::LosslessAdaptive32)
         .then(|| {
-            lossless_partition_features_for_source(region, geometry, bit_depth, source)
+            lossless_partition_features_for_source(
+                region,
+                geometry,
+                bit_depth,
+                source,
+                palette.is_some(),
+            )
         });
     let plan = Av2Black444TilePlan::for_region_with_partition_policy_and_features(
         region,
@@ -519,7 +578,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         source,
         recon,
     );
-    plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless);
+    plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless, palette);
     if copy_fast_recon && mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
         lossless.copy_source_to_recon_region();
     }
@@ -1257,6 +1316,7 @@ impl Av2Black444TilePlan {
         &self,
         writer: &mut Av2EntropyWriter,
         lossless: &mut Av2LosslessSubsampledTileState<'_>,
+        palette: Option<&Av2LumaPalette444>,
     ) {
         let mut partition_context =
             Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
@@ -1266,6 +1326,8 @@ impl Av2Black444TilePlan {
             Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut coded_mi_context =
             Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut palette_cache_context =
+            Av2PaletteColorCacheContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut fsc_mode_context =
@@ -1332,6 +1394,11 @@ impl Av2Black444TilePlan {
                         false,
                     );
                     coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
+                    palette_cache_context.clear_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
                     lossless.copy_source_to_recon_leaf(
                         *decision,
                         self.visible_rows_mi,
@@ -1351,6 +1418,7 @@ impl Av2Black444TilePlan {
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &coded_mi_context,
+                        palette,
                     );
                     let coded_luma_mode = mode.coded_luma_mode();
                     let mode_syntax = luma_mode_context.syntax_for_leaf(
@@ -1397,6 +1465,7 @@ impl Av2Black444TilePlan {
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &coded_mi_context,
+                        palette,
                     );
                     write_intra_chroma_mode(
                         writer,
@@ -1405,6 +1474,39 @@ impl Av2Black444TilePlan {
                         mode.coded_luma_mode(),
                         mode.chroma_intra_mode,
                     );
+                    if let Some(palette) = palette {
+                        if mode.use_luma_palette {
+                            write_luma_palette_mode_info(
+                                writer,
+                                *decision,
+                                palette,
+                                &mut palette_cache_context,
+                                self.origin_x,
+                                self.origin_y,
+                            );
+                            write_luma_palette_color_map(
+                                writer,
+                                *decision,
+                                palette,
+                                self.origin_x,
+                                self.origin_y,
+                            );
+                        } else if mode.coded_luma_mode() == Av2LumaIntraMode::Dc
+                            && mode.luma_bdpcm_horz.is_none()
+                        {
+                            write_luma_palette_absent_mode_info(
+                                writer,
+                                *decision,
+                                &mut palette_cache_context,
+                            );
+                        } else {
+                            palette_cache_context.clear_leaf(
+                                decision.row,
+                                decision.col,
+                                decision.block_size,
+                            );
+                        }
+                    }
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
                     let mode = cached_lossless_subsampled_mode(
@@ -1414,6 +1516,7 @@ impl Av2Black444TilePlan {
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &coded_mi_context,
+                        palette,
                     );
                     write_lossless_subsampled_residual_coefficients(
                         writer,
@@ -1424,6 +1527,7 @@ impl Av2Black444TilePlan {
                         &coded_mi_context,
                         lossless,
                         mode,
+                        palette,
                     );
                     intrabc_context.update_leaf(
                         decision.row,
@@ -1437,7 +1541,7 @@ impl Av2Black444TilePlan {
                 Av2TileDecisionKind::LumaPaletteModeInfo
                 | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {
-                    unreachable!("AV2 subsampled lossless path disables palette")
+                    unreachable!("AV2 planar lossless path emits palette inline")
                 }
             }
         }

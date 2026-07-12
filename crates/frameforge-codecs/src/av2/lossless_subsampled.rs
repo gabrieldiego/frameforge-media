@@ -69,9 +69,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         assert!(
             matches!(
                 chroma_format,
-                Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+                Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
             ),
-            "AV2 subsampled lossless state expects 4:2:0 or 4:2:2 input"
+            "AV2 planar lossless state expects 4:2:0, 4:2:2, or 4:4:4 input"
         );
         let y_len = geometry.width * geometry.height;
         let c_width = geometry.width / chroma_subsample_x(chroma_format);
@@ -81,19 +81,19 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         assert_eq!(
             source.len(),
             expected_len,
-            "AV2 subsampled lossless source length must match geometry"
+            "AV2 planar lossless source length must match geometry"
         );
         let source_backed_recon = mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent;
         if source_backed_recon {
             assert!(
                 recon.is_empty() || recon.len() == source.len(),
-                "AV2 fast subsampled lossless reconstruction must be empty or match source"
+                "AV2 fast planar lossless reconstruction must be empty or match source"
             );
         } else {
             assert_eq!(
                 recon.len(),
                 source.len(),
-                "AV2 subsampled lossless reconstruction length must match source"
+                "AV2 planar lossless reconstruction length must match source"
             );
         }
         Self {
@@ -445,6 +445,26 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 }
             }
         }
+    }
+
+    fn luma_palette_residual4x4(
+        &self,
+        palette: &Av2LumaPalette444,
+        region: &Av2LumaPaletteRegion,
+        x0: usize,
+        y0: usize,
+    ) -> [i32; TX4X4_SAMPLES] {
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            let y = y0 + local_y;
+            for local_x in 0..TX4X4_SIZE {
+                let x = x0 + local_x;
+                residual[local_y * TX4X4_SIZE + local_x] =
+                    i32::from(self.source_sample(Av2LosslessPlane::Y, x, y))
+                        - i32::from(palette.region_prediction_sample(region, x, y));
+            }
+        }
+        residual
     }
 
     fn tx4x4_coefficients_for_mode_score(
@@ -1664,6 +1684,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         visible_rows_mi: usize,
         visible_cols_mi: usize,
         coded_mi_context: &Av2CodedMiContext,
+        palette: Option<&Av2LumaPalette444>,
     ) -> Av2LosslessSubsampledModeDecision {
         if self.mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
             return self.fast_mode_decision_for_leaf(
@@ -1671,6 +1692,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 visible_rows_mi,
                 visible_cols_mi,
                 coded_mi_context,
+                palette,
             );
         }
         let txb_width = decision
@@ -1751,6 +1773,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                         luma_bdpcm_horz,
                         chroma_use_bdpcm,
                         chroma_intra_mode,
+                        use_luma_palette: false,
                         use_fsc,
                     };
                     let fsc_syntax_penalty = usize::from(use_fsc) * 96;
@@ -1799,6 +1822,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                             luma_bdpcm_horz: None,
                             chroma_use_bdpcm,
                             chroma_intra_mode,
+                            use_luma_palette: false,
                             use_fsc,
                         };
                         let fsc_syntax_penalty = usize::from(use_fsc) * 96;
@@ -1831,7 +1855,8 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         decision: Av2TileDecision,
         visible_rows_mi: usize,
         visible_cols_mi: usize,
-        _coded_mi_context: &Av2CodedMiContext,
+        coded_mi_context: &Av2CodedMiContext,
+        palette: Option<&Av2LumaPalette444>,
     ) -> Av2LosslessSubsampledModeDecision {
         let txb_width = decision
             .block_size
@@ -1874,6 +1899,24 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
         mode.luma_intra_mode = best_luma.0;
         mode.luma_bdpcm_horz = best_luma.1;
+        if let Some(palette) = palette {
+            if self.fast_luma_palette_leaf_is_worthy(decision, txb_width, txb_height, best_luma.2)
+            {
+                let palette_score = self.fast_luma_palette_leaf_score(
+                    decision,
+                    txb_width,
+                    txb_height,
+                    palette,
+                    coded_mi_context,
+                );
+                if palette_score + AV2_FAST_LUMA_PALETTE_SELECTION_MARGIN < best_luma.2 {
+                    mode.luma_intra_mode = Av2LumaIntraMode::Dc;
+                    mode.luma_bdpcm_horz = None;
+                    mode.use_luma_palette = true;
+                    mode.use_fsc = false;
+                }
+            }
+        }
 
         let chroma_candidates = [
             (false, Av2ChromaIntraMode::Horizontal, 0usize),
@@ -1901,6 +1944,95 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode.chroma_use_bdpcm = best_chroma.0;
         mode.chroma_intra_mode = best_chroma.1;
         mode
+    }
+
+    fn fast_luma_palette_leaf_is_worthy(
+        &self,
+        decision: Av2TileDecision,
+        txb_width: usize,
+        txb_height: usize,
+        competing_luma_score: usize,
+    ) -> bool {
+        if competing_luma_score < AV2_FAST_LUMA_PALETTE_MIN_COMPETING_SCORE {
+            return false;
+        }
+        let leaf_width = txb_width * TX4X4_SIZE;
+        let leaf_height = txb_height * TX4X4_SIZE;
+        if leaf_width < AV2_LUMA_PALETTE_BLOCK_SIZE
+            || leaf_height < AV2_LUMA_PALETTE_BLOCK_SIZE
+            || leaf_width > AV2_FAST_LUMA_PALETTE_MAX_LEAF_SIZE
+            || leaf_height > AV2_FAST_LUMA_PALETTE_MAX_LEAF_SIZE
+        {
+            return false;
+        }
+        let normalize_shift = self.bit_depth.bits().saturating_sub(8);
+        let row_step = fast_leaf_sample_step(txb_height, AV2_FAST_LUMA_PALETTE_SAMPLE_GRID);
+        let col_step = fast_leaf_sample_step(txb_width, AV2_FAST_LUMA_PALETTE_SAMPLE_GRID);
+        let mut values = [0u16; AV2_FAST_LUMA_PALETTE_QUICK_UNIQUE_LIMIT + 1];
+        let mut unique = 0usize;
+        for row in (0..txb_height).step_by(row_step) {
+            for col in (0..txb_width).step_by(col_step) {
+                let (sample_x, sample_y) =
+                    self.txb_origin(Av2LosslessPlane::Y, decision.col + col, decision.row + row);
+                let sample = self.source_sample(Av2LosslessPlane::Y, sample_x, sample_y)
+                    >> normalize_shift;
+                if values[..unique].contains(&sample) {
+                    continue;
+                }
+                if unique == values.len() {
+                    return false;
+                }
+                values[unique] = sample;
+                unique += 1;
+            }
+        }
+        (2..=AV2_FAST_LUMA_PALETTE_QUICK_UNIQUE_LIMIT).contains(&unique)
+    }
+
+    fn fast_luma_palette_leaf_score(
+        &self,
+        decision: Av2TileDecision,
+        txb_width: usize,
+        txb_height: usize,
+        palette: &Av2LumaPalette444,
+        _coded_mi_context: &Av2CodedMiContext,
+    ) -> usize {
+        let (leaf_x0, leaf_y0) = self.txb_origin(Av2LosslessPlane::Y, decision.col, decision.row);
+        let leaf_width = txb_width * TX4X4_SIZE;
+        let leaf_height = txb_height * TX4X4_SIZE;
+        let region = palette.syntax_region_palette(leaf_x0, leaf_y0, leaf_width, leaf_height);
+        let vertical_scan = choose_luma_palette_map_vertical_for_region(
+            palette,
+            &region,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+        );
+        let map_score = luma_palette_color_map_rate_q8(
+            palette,
+            &region,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+            vertical_scan,
+        ) as usize
+            / 64;
+        let mut score = AV2_FAST_LUMA_PALETTE_BASE_SCORE
+            + region.color_count() * usize::from(self.bit_depth.bits()) * 4
+            + map_score;
+        for row in 0..txb_height {
+            let abs_row = decision.row + row;
+            for col in 0..txb_width {
+                let abs_col = decision.col + col;
+                let (x0, y0) = self.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
+                let residual = self.luma_palette_residual4x4(palette, &region, x0, y0);
+                let coefficients = av2_fwht4x4(&residual);
+                score += coefficient_proxy_score(&coefficients, Av2CoefficientProxyKind::LumaTransform);
+            }
+        }
+        score
     }
 
     fn fast_luma_leaf_sampled_dc_h_v_bdpcm_scores(
@@ -2123,6 +2255,12 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
 
 const AV2_FAST_LUMA_SAMPLE_GRID: usize = 2;
 const AV2_FAST_CHROMA_SAMPLE_GRID: usize = 2;
+const AV2_FAST_LUMA_PALETTE_BASE_SCORE: usize = 192;
+const AV2_FAST_LUMA_PALETTE_SELECTION_MARGIN: usize = 64;
+const AV2_FAST_LUMA_PALETTE_MIN_COMPETING_SCORE: usize = 1536;
+const AV2_FAST_LUMA_PALETTE_MAX_LEAF_SIZE: usize = AV2_LUMA_PALETTE_BLOCK_SIZE;
+const AV2_FAST_LUMA_PALETTE_SAMPLE_GRID: usize = 2;
+const AV2_FAST_LUMA_PALETTE_QUICK_UNIQUE_LIMIT: usize = 8;
 
 fn fast_leaf_sample_step(txb_count: usize, sample_grid: usize) -> usize {
     if txb_count <= 2 {
