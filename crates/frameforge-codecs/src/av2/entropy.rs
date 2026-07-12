@@ -74,6 +74,7 @@ pub struct Av2EntropyWriter {
     last_adaptive_cdf_name: Option<Av2StaticNameCacheEntry>,
     last_adaptive_cdf_index: Option<usize>,
     adaptive_cdf_lookup_cache: [Option<usize>; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
+    adaptive_static_cdf_indices: Vec<Option<usize>>,
     record_fields: bool,
 }
 
@@ -149,6 +150,7 @@ impl Av2EntropyWriter {
             last_adaptive_cdf_name: None,
             last_adaptive_cdf_index: None,
             adaptive_cdf_lookup_cache: [None; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
+            adaptive_static_cdf_indices: Vec::new(),
             record_fields,
         }
     }
@@ -239,6 +241,40 @@ impl Av2EntropyWriter {
         nsymbs: usize,
         update_cdf: bool,
     ) {
+        let adaptive_index = if self.adaptive_cdf_updates {
+            Some(self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs))
+        } else {
+            None
+        };
+        self.write_symbol_with_resolved_cdf(name, symbol, cdf, nsymbs, update_cdf, adaptive_index);
+    }
+
+    pub fn write_symbol_with_static_cdf_key(
+        &mut self,
+        name: &'static str,
+        static_cdf_key: usize,
+        symbol: usize,
+        cdf: &mut [u16],
+        nsymbs: usize,
+        update_cdf: bool,
+    ) {
+        let adaptive_index = if self.adaptive_cdf_updates {
+            Some(self.static_adaptive_cdf_index(static_cdf_key, cdf, nsymbs))
+        } else {
+            None
+        };
+        self.write_symbol_with_resolved_cdf(name, symbol, cdf, nsymbs, update_cdf, adaptive_index);
+    }
+
+    fn write_symbol_with_resolved_cdf(
+        &mut self,
+        name: &'static str,
+        symbol: usize,
+        cdf: &mut [u16],
+        nsymbs: usize,
+        update_cdf: bool,
+        adaptive_index: Option<usize>,
+    ) {
         assert!((2..=16).contains(&nsymbs), "AV2 CDF symbols must be 2..=16");
         assert!(symbol < nsymbs, "symbol out of CDF range");
         assert!(
@@ -248,11 +284,6 @@ impl Av2EntropyWriter {
         // AV2 v1.0.0 Sections 4.11.2 and 8.3: S() reads a symbol using the
         // active CDF selected by the syntax process. Encoder-side this mirrors
         // AVM avm_write_symbol().
-        let adaptive_index = if self.adaptive_cdf_updates {
-            Some(self.adaptive_cdf_index(cdf_name, cdf_key, cdf, nsymbs))
-        } else {
-            None
-        };
         let (fl, fh) = {
             let active_cdf = if let Some(index) = adaptive_index {
                 self.adaptive_cdfs[index].cdf.as_slice()
@@ -398,6 +429,45 @@ impl Av2EntropyWriter {
         let index = self.adaptive_cdfs.len() - 1;
         self.last_adaptive_cdf_index = Some(index);
         self.adaptive_cdf_lookup_cache[cache_slot] = Some(index);
+        index
+    }
+
+    fn static_adaptive_cdf_index(
+        &mut self,
+        static_key: usize,
+        cdf: &[u16],
+        nsymbs: usize,
+    ) -> usize {
+        if static_key >= self.adaptive_static_cdf_indices.len() {
+            self.adaptive_static_cdf_indices
+                .resize(static_key + 1, None);
+        }
+        if let Some(index) = self.adaptive_static_cdf_indices[static_key] {
+            #[cfg(debug_assertions)]
+            {
+                let initial_len = nsymbs + 4;
+                let initial = Av2CdfSignature::from_cdf(&cdf[..initial_len]);
+                let entry = &self.adaptive_cdfs[index];
+                debug_assert_eq!(entry.nsymbs, nsymbs);
+                debug_assert!(
+                    entry.initial.matches(initial),
+                    "static AV2 CDF key {static_key} reused for a different default CDF"
+                );
+            }
+            return index;
+        }
+
+        let initial_len = nsymbs + 4;
+        let initial = Av2CdfSignature::from_cdf(&cdf[..initial_len]);
+        self.adaptive_cdfs.push(Av2AdaptiveCdf {
+            name_index: usize::MAX,
+            key: static_key,
+            nsymbs,
+            initial,
+            cdf: cdf[..initial_len].to_vec(),
+        });
+        let index = self.adaptive_cdfs.len() - 1;
+        self.adaptive_static_cdf_indices[static_key] = Some(index);
         index
     }
 

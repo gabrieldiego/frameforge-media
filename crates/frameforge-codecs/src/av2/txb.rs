@@ -1,3 +1,48 @@
+const AV2_STATIC_CDF_TXB_SKIP_Y_BASE: usize = 0;
+const AV2_STATIC_CDF_TXB_SKIP_Y_FSC_BASE: usize = 16;
+const AV2_STATIC_CDF_TXB_SKIP_U_BASE: usize = 32;
+const AV2_STATIC_CDF_TXB_SKIP_U_FSC_BASE: usize = 48;
+const AV2_STATIC_CDF_TXB_SKIP_V_BASE: usize = 64;
+const AV2_STATIC_CDF_EOB_Y: usize = 100;
+const AV2_STATIC_CDF_EOB_UV: usize = 101;
+const AV2_STATIC_CDF_EOB_EXTRA: usize = 102;
+const AV2_STATIC_CDF_COEFF_Y_BASE_LF_EOB_BASE: usize = 110;
+const AV2_STATIC_CDF_COEFF_Y_BASE_EOB_BASE: usize = 130;
+const AV2_STATIC_CDF_COEFF_Y_BASE_LF_BASE: usize = 160;
+const AV2_STATIC_CDF_COEFF_Y_BASE_BASE: usize = 190;
+const AV2_STATIC_CDF_COEFF_Y_BR_LF_BASE: usize = 220;
+const AV2_STATIC_CDF_COEFF_Y_BR_BASE: usize = 240;
+const AV2_STATIC_CDF_COEFF_UV_BASE_LF_EOB_BASE: usize = 260;
+const AV2_STATIC_CDF_COEFF_UV_BASE_EOB_BASE: usize = 280;
+const AV2_STATIC_CDF_COEFF_UV_BASE_LF_BASE: usize = 300;
+const AV2_STATIC_CDF_COEFF_UV_BASE_BASE: usize = 320;
+const AV2_STATIC_CDF_COEFF_UV_BR_BASE: usize = 340;
+const AV2_STATIC_CDF_COEFF_Y_DC_BASE_LF_EOB_CTX0: usize = 360;
+const AV2_STATIC_CDF_COEFF_Y_DC_LOW_RANGE_LF_CTX0: usize = 361;
+const AV2_STATIC_CDF_COEFF_UV_DC_BASE_LF_EOB_CTX0: usize = 362;
+const AV2_STATIC_CDF_COEFF_Y_DC_SIGN_BASE: usize = 370;
+
+fn y_txb_skip_static_cdf_key(skip_ctx: u8) -> usize {
+    AV2_STATIC_CDF_TXB_SKIP_Y_BASE + usize::from(skip_ctx)
+}
+
+fn y_fsc_txb_skip_static_cdf_key(skip_ctx: u8) -> usize {
+    AV2_STATIC_CDF_TXB_SKIP_Y_FSC_BASE + usize::from(skip_ctx)
+}
+
+fn u_txb_skip_static_cdf_key(skip_ctx: u8, use_fsc: bool) -> usize {
+    let base = if use_fsc {
+        AV2_STATIC_CDF_TXB_SKIP_U_FSC_BASE
+    } else {
+        AV2_STATIC_CDF_TXB_SKIP_U_BASE
+    };
+    base + usize::from(skip_ctx)
+}
+
+fn v_txb_skip_static_cdf_key(skip_ctx: u8) -> usize {
+    AV2_STATIC_CDF_TXB_SKIP_V_BASE + usize::from(skip_ctx)
+}
+
 fn av2_fwht4x4(input: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
     // AV2 v1.0.0 lossless TX_4X4 uses AVM av2_fwht4x4_c() before coefficient
     // coding. The final UNIT_QUANT_FACTOR multiply is preserved so coefficient
@@ -279,15 +324,23 @@ fn tx4x4_eob(levels: &[u32; TX4X4_SAMPLES]) -> Option<usize> {
 fn write_eob_y(writer: &mut Av2EntropyWriter, eob: usize) {
     let (eob_pt, eob_extra) = eob_pos_token(eob);
     let mut cdf = DEFAULT_EOB_MULTI16_Y_CTX0_CDF;
-    writer.write_symbol("tile.coeff.y.eob_pt_tx4x4", eob_pt - 1, &mut cdf, 5, false);
+    writer.write_symbol_with_static_cdf_key(
+        "tile.coeff.y.eob_pt_tx4x4",
+        AV2_STATIC_CDF_EOB_Y,
+        eob_pt - 1,
+        &mut cdf,
+        5,
+        false,
+    );
 
     let eob_offset_bits = eob_offset_bits(eob_pt);
     if eob_offset_bits > 0 {
         let eob_shift = eob_offset_bits - 1;
         let bit = (eob_extra & (1 << eob_shift)) != 0;
         let mut extra_cdf = DEFAULT_EOB_EXTRA_CDF;
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.eob_extra_bit",
+            AV2_STATIC_CDF_EOB_EXTRA,
             usize::from(bit),
             &mut extra_cdf,
             2,
@@ -301,15 +354,23 @@ fn write_eob_y(writer: &mut Av2EntropyWriter, eob: usize) {
 fn write_eob_uv(writer: &mut Av2EntropyWriter, eob: usize) {
     let (eob_pt, eob_extra) = eob_pos_token(eob);
     let mut cdf = DEFAULT_EOB_MULTI16_UV_CTX2_CDF;
-    writer.write_symbol("tile.coeff.uv.eob_pt_tx4x4", eob_pt - 1, &mut cdf, 5, false);
+    writer.write_symbol_with_static_cdf_key(
+        "tile.coeff.uv.eob_pt_tx4x4",
+        AV2_STATIC_CDF_EOB_UV,
+        eob_pt - 1,
+        &mut cdf,
+        5,
+        false,
+    );
 
     let eob_offset_bits = eob_offset_bits(eob_pt);
     if eob_offset_bits > 0 {
         let eob_shift = eob_offset_bits - 1;
         let bit = (eob_extra & (1 << eob_shift)) != 0;
         let mut extra_cdf = DEFAULT_EOB_EXTRA_CDF;
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.eob_extra_bit",
+            AV2_STATIC_CDF_EOB_EXTRA,
             usize::from(bit),
             &mut extra_cdf,
             2,
@@ -349,8 +410,9 @@ fn write_chroma_coefficient_level(
         assert!(level > 0, "AV2 EOB coefficient must be non-zero");
         if limits {
             let mut cdf = DEFAULT_COEFF_BASE_LF_EOB_UV_CDFS[coeff_ctx];
-            writer.write_symbol(
+            writer.write_symbol_with_static_cdf_key(
                 "tile.coeff.uv.base_lf_eob",
+                AV2_STATIC_CDF_COEFF_UV_BASE_LF_EOB_BASE + coeff_ctx,
                 level.min(5) as usize - 1,
                 &mut cdf,
                 5,
@@ -358,8 +420,9 @@ fn write_chroma_coefficient_level(
             );
         } else {
             let mut cdf = DEFAULT_COEFF_BASE_EOB_UV_CDFS[coeff_ctx];
-            writer.write_symbol(
+            writer.write_symbol_with_static_cdf_key(
                 "tile.coeff.uv.base_eob",
+                AV2_STATIC_CDF_COEFF_UV_BASE_EOB_BASE + coeff_ctx,
                 level.min(3) as usize - 1,
                 &mut cdf,
                 3,
@@ -371,8 +434,9 @@ fn write_chroma_coefficient_level(
         }
     } else if limits {
         let mut cdf = DEFAULT_COEFF_BASE_LF_UV_CDFS[coeff_ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.uv.base_lf",
+            AV2_STATIC_CDF_COEFF_UV_BASE_LF_BASE + coeff_ctx,
             level.min(5) as usize,
             &mut cdf,
             6,
@@ -380,8 +444,9 @@ fn write_chroma_coefficient_level(
         );
     } else {
         let mut cdf = DEFAULT_COEFF_BASE_UV_CDFS[coeff_ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.uv.base",
+            AV2_STATIC_CDF_COEFF_UV_BASE_BASE + coeff_ctx,
             level.min(3) as usize,
             &mut cdf,
             4,
@@ -406,8 +471,9 @@ fn write_luma_coefficient_level(
         assert!(level > 0, "AV2 EOB coefficient must be non-zero");
         if limits {
             let mut cdf = DEFAULT_COEFF_BASE_LF_EOB_Y_CDFS[coeff_ctx];
-            writer.write_symbol(
+            writer.write_symbol_with_static_cdf_key(
                 "tile.coeff.y.base_lf_eob",
+                AV2_STATIC_CDF_COEFF_Y_BASE_LF_EOB_BASE + coeff_ctx,
                 level.min(5) as usize - 1,
                 &mut cdf,
                 5,
@@ -418,8 +484,9 @@ fn write_luma_coefficient_level(
             }
         } else {
             let mut cdf = DEFAULT_COEFF_BASE_EOB_Y_CDFS[coeff_ctx];
-            writer.write_symbol(
+            writer.write_symbol_with_static_cdf_key(
                 "tile.coeff.y.base_eob",
+                AV2_STATIC_CDF_COEFF_Y_BASE_EOB_BASE + coeff_ctx,
                 level.min(3) as usize - 1,
                 &mut cdf,
                 3,
@@ -431,8 +498,9 @@ fn write_luma_coefficient_level(
         }
     } else if limits {
         let mut cdf = DEFAULT_COEFF_BASE_LF_Y_CDFS[coeff_ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.y.base_lf",
+            AV2_STATIC_CDF_COEFF_Y_BASE_LF_BASE + coeff_ctx,
             level.min(5) as usize,
             &mut cdf,
             6,
@@ -443,8 +511,9 @@ fn write_luma_coefficient_level(
         }
     } else {
         let mut cdf = DEFAULT_COEFF_BASE_Y_CDFS[coeff_ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.y.base",
+            AV2_STATIC_CDF_COEFF_Y_BASE_BASE + coeff_ctx,
             level.min(3) as usize,
             &mut cdf,
             4,
@@ -466,8 +535,9 @@ fn write_luma_low_range(
     if lf {
         let br_ctx = luma_br_lf_context(levels, pos);
         let mut cdf = DEFAULT_COEFF_BR_LF_Y_CDFS[br_ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.y.low_range_lf",
+            AV2_STATIC_CDF_COEFF_Y_BR_LF_BASE + br_ctx,
             base_range.min(3) as usize,
             &mut cdf,
             4,
@@ -476,8 +546,9 @@ fn write_luma_low_range(
     } else {
         let br_ctx = luma_br_context(levels, pos);
         let mut cdf = DEFAULT_COEFF_BR_Y_CDFS[br_ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.y.low_range",
+            AV2_STATIC_CDF_COEFF_Y_BR_BASE + br_ctx,
             base_range.min(3) as usize,
             &mut cdf,
             4,
@@ -494,8 +565,9 @@ fn write_chroma_low_range(
 ) {
     let br_ctx = chroma_br_context(levels, pos);
     let mut cdf = DEFAULT_COEFF_BR_UV_CDFS[br_ctx];
-    writer.write_symbol(
+    writer.write_symbol_with_static_cdf_key(
         "tile.coeff.uv.low_range",
+        AV2_STATIC_CDF_COEFF_UV_BR_BASE + br_ctx,
         base_range.min(3) as usize,
         &mut cdf,
         4,
@@ -886,10 +958,9 @@ fn write_y_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 luma TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         name,
-        "tile.coeff.y.txb_skip_tx4x4",
-        usize::from(skip_ctx),
+        y_txb_skip_static_cdf_key(skip_ctx),
         1,
         &mut cdf,
         2,
@@ -921,10 +992,9 @@ fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 luma TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         name,
-        "tile.coeff.y.txb_skip_tx4x4",
-        usize::from(skip_ctx),
+        y_txb_skip_static_cdf_key(skip_ctx),
         0,
         &mut cdf,
         2,
@@ -934,10 +1004,9 @@ fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 
 fn write_y_fsc_txb_all_zero(writer: &mut Av2EntropyWriter) {
     let mut cdf = DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF;
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.coeff.y.txb_all_zero_fsc_tx4x4_ctx9",
-        "tile.coeff.y.txb_skip_fsc_tx4x4",
-        9,
+        y_fsc_txb_skip_static_cdf_key(9),
         1,
         &mut cdf,
         2,
@@ -947,10 +1016,9 @@ fn write_y_fsc_txb_all_zero(writer: &mut Av2EntropyWriter) {
 
 fn write_y_fsc_txb_nonzero(writer: &mut Av2EntropyWriter) {
     let mut cdf = DEFAULT_TXB_SKIP_Y_FSC_TX4X4_CTX9_CDF;
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.coeff.y.txb_nonzero_fsc_tx4x4_ctx9",
-        "tile.coeff.y.txb_skip_fsc_tx4x4",
-        9,
+        y_fsc_txb_skip_static_cdf_key(9),
         0,
         &mut cdf,
         2,
@@ -959,40 +1027,41 @@ fn write_y_fsc_txb_nonzero(writer: &mut Av2EntropyWriter) {
 }
 
 fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
-    let (name, cdf_name, mut cdf) = match skip_ctx {
+    let (name, mut cdf) = match skip_ctx {
         6 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx6",
-            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF,
         ),
         6 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx6",
-            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF,
         ),
         7 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx7",
-            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF,
         ),
         7 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx7",
-            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF,
         ),
         8 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx8",
-            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
         ),
         8 => (
             "tile.coeff.u.txb_nonzero_tx4x4_ctx8",
-            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
         ),
         _ => panic!("unsupported AV2 U TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol_with_cdf_key(name, cdf_name, usize::from(skip_ctx), 0, &mut cdf, 2, false);
+    writer.write_symbol_with_static_cdf_key(
+        name,
+        u_txb_skip_static_cdf_key(skip_ctx, use_fsc),
+        0,
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
@@ -1047,10 +1116,9 @@ fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 V TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         name,
-        "tile.coeff.v.txb_skip_tx4x4",
-        usize::from(skip_ctx),
+        v_txb_skip_static_cdf_key(skip_ctx),
         0,
         &mut cdf,
         2,
@@ -1059,40 +1127,41 @@ fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 }
 
 fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
-    let (name, cdf_name, mut cdf) = match skip_ctx {
+    let (name, mut cdf) = match skip_ctx {
         6 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx6",
-            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX6_CDF,
         ),
         6 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx6",
-            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX6_CDF,
         ),
         7 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx7",
-            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX7_CDF,
         ),
         7 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx7",
-            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX7_CDF,
         ),
         8 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx8",
-            "tile.coeff.u.txb_skip_fsc_tx4x4",
             DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
         ),
         8 => (
             "tile.coeff.u.txb_all_zero_tx4x4_ctx8",
-            "tile.coeff.u.txb_skip_tx4x4",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
         ),
         _ => panic!("unsupported AV2 U TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol_with_cdf_key(name, cdf_name, usize::from(skip_ctx), 1, &mut cdf, 2, false);
+    writer.write_symbol_with_static_cdf_key(
+        name,
+        u_txb_skip_static_cdf_key(skip_ctx, use_fsc),
+        1,
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_v_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
@@ -1147,10 +1216,9 @@ fn write_v_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
         ),
         _ => panic!("unsupported AV2 V TXB skip context {skip_ctx}"),
     };
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         name,
-        "tile.coeff.v.txb_skip_tx4x4",
-        usize::from(skip_ctx),
+        v_txb_skip_static_cdf_key(skip_ctx),
         1,
         &mut cdf,
         2,
@@ -1170,8 +1238,9 @@ fn write_eob_one_uv(writer: &mut Av2EntropyWriter) {
 fn write_y_dc_level(writer: &mut Av2EntropyWriter, level: u16) {
     let mut base_cdf = DEFAULT_COEFF_BASE_LF_EOB_Y_TX4X4_CTX0_CDF;
     let base_symbol = usize::from(level.min(5) - 1);
-    writer.write_symbol(
+    writer.write_symbol_with_static_cdf_key(
         "tile.coeff.y.dc_base_lf_eob_ctx0",
+        AV2_STATIC_CDF_COEFF_Y_DC_BASE_LF_EOB_CTX0,
         base_symbol,
         &mut base_cdf,
         5,
@@ -1181,8 +1250,9 @@ fn write_y_dc_level(writer: &mut Av2EntropyWriter, level: u16) {
     if level > 4 {
         let mut low_cdf = DEFAULT_COEFF_LPS_LF_CTX0_CDF;
         let low_symbol = usize::from((level - 1 - 4).min(3));
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.coeff.y.dc_low_range_lf_ctx0",
+            AV2_STATIC_CDF_COEFF_Y_DC_LOW_RANGE_LF_CTX0,
             low_symbol,
             &mut low_cdf,
             4,
@@ -1194,8 +1264,9 @@ fn write_y_dc_level(writer: &mut Av2EntropyWriter, level: u16) {
 fn write_uv_dc_level(writer: &mut Av2EntropyWriter, level: u16) {
     let mut base_cdf = DEFAULT_COEFF_BASE_LF_EOB_UV_CTX0_CDF;
     let base_symbol = usize::from(level.min(5) - 1);
-    writer.write_symbol(
+    writer.write_symbol_with_static_cdf_key(
         "tile.coeff.uv.dc_base_lf_eob_ctx0",
+        AV2_STATIC_CDF_COEFF_UV_DC_BASE_LF_EOB_CTX0,
         base_symbol,
         &mut base_cdf,
         5,
@@ -1223,7 +1294,14 @@ fn write_y_dc_sign(writer: &mut Av2EntropyWriter, negative: bool, dc_sign_ctx: u
         ),
         _ => panic!("unsupported AV2 luma DC sign context {dc_sign_ctx}"),
     };
-    writer.write_symbol(name, usize::from(negative), &mut cdf, 2, false);
+    writer.write_symbol_with_static_cdf_key(
+        name,
+        AV2_STATIC_CDF_COEFF_Y_DC_SIGN_BASE + usize::from(dc_sign_ctx),
+        usize::from(negative),
+        &mut cdf,
+        2,
+        false,
+    );
 }
 
 fn write_y_dc_high_range(writer: &mut Av2EntropyWriter, level: u16) {
