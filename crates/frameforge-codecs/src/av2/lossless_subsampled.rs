@@ -1862,8 +1862,8 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 }
 
-const AV2_FAST_LUMA_SAMPLE_GRID: usize = 8;
-const AV2_FAST_CHROMA_SAMPLE_GRID: usize = 4;
+const AV2_FAST_LUMA_SAMPLE_GRID: usize = 2;
+const AV2_FAST_CHROMA_SAMPLE_GRID: usize = 2;
 
 fn fast_leaf_sample_step(txb_count: usize, sample_grid: usize) -> usize {
     if txb_count <= 2 {
