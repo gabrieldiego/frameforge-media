@@ -28,6 +28,23 @@ pub(crate) struct Av2LumaPaletteRegion {
     colors: Vec<Av2Sample>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Av2ChromaModeTxbScores {
+    bdpcm_horz: usize,
+    bdpcm_vert: usize,
+    intra_dc: usize,
+    intra_horz: usize,
+    intra_vert: usize,
+    intra_smooth: usize,
+    intra_smooth_v: usize,
+    intra_smooth_h: usize,
+    intra_paeth: usize,
+}
+
+fn chroma_sample_prediction_score(sample: Av2Sample, predictor: Av2Sample) -> usize {
+    chroma_idtx_sample_score(i32::from(sample) - i32::from(predictor))
+}
+
 impl Av2LumaPaletteRegion {
     fn from_colors(colors: &[Av2Sample]) -> Self {
         Self {
@@ -173,11 +190,7 @@ impl Av2LumaPalette444 {
                 for txb_x in (0..AV2_LUMA_PALETTE_BLOCK_SIZE).step_by(4) {
                     let txb_x0 = x0 + txb_x;
                     let txb_y0 = y0 + txb_y;
-                    let bdpcm_horz_residual =
-                        self.chroma_bdpcm_residuals(plane, txb_x0, txb_y0, true);
-                    let bdpcm_vert_residual =
-                        self.chroma_bdpcm_residuals(plane, txb_x0, txb_y0, false);
-                    let intra_dc_residual = self.chroma_intra_residuals(
+                    let scores = self.chroma_mode_scores_for_txb(
                         plane,
                         txb_x0,
                         txb_y0,
@@ -185,27 +198,6 @@ impl Av2LumaPalette444 {
                         y0,
                         AV2_LUMA_PALETTE_BLOCK_SIZE,
                         AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::Dc,
-                    );
-                    let intra_horz_residual = self.chroma_intra_residuals(
-                        plane,
-                        txb_x0,
-                        txb_y0,
-                        x0,
-                        y0,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::Horizontal,
-                    );
-                    let intra_vert_residual = self.chroma_intra_residuals(
-                        plane,
-                        txb_x0,
-                        txb_y0,
-                        x0,
-                        y0,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::Vertical,
                     );
                     let intra_d45_residual = directional_allowed.then(|| {
                         self.chroma_intra_residuals(
@@ -279,51 +271,11 @@ impl Av2LumaPalette444 {
                             Av2ChromaIntraMode::Directional203,
                         )
                     });
-                    let intra_smooth_residual = self.chroma_intra_residuals(
-                        plane,
-                        txb_x0,
-                        txb_y0,
-                        x0,
-                        y0,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::Smooth,
-                    );
-                    let intra_smooth_v_residual = self.chroma_intra_residuals(
-                        plane,
-                        txb_x0,
-                        txb_y0,
-                        x0,
-                        y0,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::SmoothVertical,
-                    );
-                    let intra_smooth_h_residual = self.chroma_intra_residuals(
-                        plane,
-                        txb_x0,
-                        txb_y0,
-                        x0,
-                        y0,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::SmoothHorizontal,
-                    );
-                    let intra_paeth_residual = self.chroma_intra_residuals(
-                        plane,
-                        txb_x0,
-                        txb_y0,
-                        x0,
-                        y0,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        AV2_LUMA_PALETTE_BLOCK_SIZE,
-                        Av2ChromaIntraMode::Paeth,
-                    );
-                    bdpcm_horz_score += chroma_idtx_coeff_score(&bdpcm_horz_residual);
-                    bdpcm_vert_score += chroma_idtx_coeff_score(&bdpcm_vert_residual);
-                    intra_dc_score += chroma_idtx_coeff_score(&intra_dc_residual);
-                    intra_horz_score += chroma_idtx_coeff_score(&intra_horz_residual);
-                    intra_vert_score += chroma_idtx_coeff_score(&intra_vert_residual);
+                    bdpcm_horz_score += scores.bdpcm_horz;
+                    bdpcm_vert_score += scores.bdpcm_vert;
+                    intra_dc_score += scores.intra_dc;
+                    intra_horz_score += scores.intra_horz;
+                    intra_vert_score += scores.intra_vert;
                     if let Some(residual) = intra_d45_residual {
                         intra_d45_score += chroma_idtx_coeff_score(&residual);
                     }
@@ -342,10 +294,10 @@ impl Av2LumaPalette444 {
                     if let Some(residual) = intra_d203_residual {
                         intra_d203_score += chroma_idtx_coeff_score(&residual);
                     }
-                    intra_smooth_score += chroma_idtx_coeff_score(&intra_smooth_residual);
-                    intra_smooth_v_score += chroma_idtx_coeff_score(&intra_smooth_v_residual);
-                    intra_smooth_h_score += chroma_idtx_coeff_score(&intra_smooth_h_residual);
-                    intra_paeth_score += chroma_idtx_coeff_score(&intra_paeth_residual);
+                    intra_smooth_score += scores.intra_smooth;
+                    intra_smooth_v_score += scores.intra_smooth_v;
+                    intra_smooth_h_score += scores.intra_smooth_h;
+                    intra_paeth_score += scores.intra_paeth;
                 }
             }
         }
@@ -433,6 +385,126 @@ impl Av2LumaPalette444 {
         // where a block-local family choice is much cheaper than always using
         // DPCM.
         (use_bdpcm, mode)
+    }
+
+    fn chroma_mode_scores_for_txb(
+        &self,
+        plane: &[Av2Sample],
+        txb_x0: usize,
+        txb_y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+    ) -> Av2ChromaModeTxbScores {
+        let tile_x0 = 0;
+        let tile_y0 = 0;
+        let dc = self.chroma_dc_predictor(plane, txb_x0, txb_y0);
+        let above_left = {
+            let have_left = txb_x0 != tile_x0;
+            let have_top = txb_y0 != tile_y0;
+            if have_left && have_top {
+                self.chroma_sample(plane, txb_x0 - 1, txb_y0 - 1)
+            } else if have_top {
+                self.chroma_sample(plane, txb_x0, txb_y0 - 1)
+            } else if have_left {
+                self.chroma_sample(plane, txb_x0 - 1, txb_y0)
+            } else {
+                self.dc_predictor()
+            }
+        };
+        let (smooth_above, smooth_left) =
+            self.chroma_smooth_edges(plane, txb_x0, txb_y0, leaf_x0, leaf_y0, leaf_width, leaf_height);
+        let mut h_edge = [self.h_pred_left_edge(); 4];
+        let mut v_edge = [self.v_pred_above_edge(); 4];
+        for local_y in 0..4 {
+            h_edge[local_y] = if txb_x0 != tile_x0 {
+                self.chroma_sample(plane, txb_x0 - 1, txb_y0 + local_y)
+            } else if txb_y0 != tile_y0 {
+                self.chroma_sample(plane, txb_x0, txb_y0 - 1)
+            } else {
+                self.h_pred_left_edge()
+            };
+        }
+        for local_x in 0..4 {
+            v_edge[local_x] = if txb_y0 != tile_y0 {
+                self.chroma_sample(plane, txb_x0 + local_x, txb_y0 - 1)
+            } else if txb_x0 != tile_x0 {
+                self.chroma_sample(plane, txb_x0 - 1, txb_y0)
+            } else {
+                self.v_pred_above_edge()
+            };
+        }
+
+        let mut scores = Av2ChromaModeTxbScores::default();
+        for local_y in 0..4 {
+            let y = txb_y0 + local_y;
+            for local_x in 0..4 {
+                let x = txb_x0 + local_x;
+                let sample = self.chroma_sample(plane, x, y);
+                let bdpcm_horz = if local_x != 0 {
+                    self.chroma_sample(plane, x - 1, y)
+                } else if txb_x0 != tile_x0 {
+                    self.chroma_sample(plane, txb_x0 - 1, y)
+                } else if txb_y0 != tile_y0 {
+                    self.chroma_sample(plane, txb_x0, txb_y0 - 1)
+                } else {
+                    self.h_pred_left_edge()
+                };
+                let bdpcm_vert = if local_y != 0 {
+                    self.chroma_sample(plane, x, y - 1)
+                } else if txb_y0 != tile_y0 {
+                    self.chroma_sample(plane, x, txb_y0 - 1)
+                } else if txb_x0 != tile_x0 {
+                    self.chroma_sample(plane, txb_x0 - 1, txb_y0)
+                } else {
+                    self.v_pred_above_edge()
+                };
+                scores.bdpcm_horz += chroma_sample_prediction_score(sample, bdpcm_horz);
+                scores.bdpcm_vert += chroma_sample_prediction_score(sample, bdpcm_vert);
+                scores.intra_dc += chroma_sample_prediction_score(sample, dc);
+                scores.intra_horz += chroma_sample_prediction_score(sample, h_edge[local_y]);
+                scores.intra_vert += chroma_sample_prediction_score(sample, v_edge[local_x]);
+                scores.intra_smooth += chroma_sample_prediction_score(
+                    sample,
+                    av2_highbd_smooth_intra_predictor(
+                        Av2ChromaIntraMode::Smooth,
+                        smooth_above,
+                        smooth_left,
+                        local_x,
+                        local_y,
+                        self.bit_depth,
+                    ),
+                );
+                scores.intra_smooth_v += chroma_sample_prediction_score(
+                    sample,
+                    av2_highbd_smooth_intra_predictor(
+                        Av2ChromaIntraMode::SmoothVertical,
+                        smooth_above,
+                        smooth_left,
+                        local_x,
+                        local_y,
+                        self.bit_depth,
+                    ),
+                );
+                scores.intra_smooth_h += chroma_sample_prediction_score(
+                    sample,
+                    av2_highbd_smooth_intra_predictor(
+                        Av2ChromaIntraMode::SmoothHorizontal,
+                        smooth_above,
+                        smooth_left,
+                        local_x,
+                        local_y,
+                        self.bit_depth,
+                    ),
+                );
+                scores.intra_paeth += chroma_sample_prediction_score(
+                    sample,
+                    paeth_predictor(h_edge[local_y], v_edge[local_x], above_left),
+                );
+            }
+        }
+        scores
     }
 
     fn luma_bdpcm_horz_decision_for_block(&self, x0: usize, y0: usize) -> Option<bool> {
@@ -636,46 +708,6 @@ impl Av2LumaPalette444 {
 
     fn v_pred_above_edge(&self) -> Av2Sample {
         av2_lossless_v_pred_above_edge(self.bit_depth)
-    }
-
-    fn chroma_bdpcm_residuals(
-        &self,
-        plane: &[Av2Sample],
-        x0: usize,
-        y0: usize,
-        horz: bool,
-    ) -> [i32; 16] {
-        let tile_x0 = 0;
-        let tile_y0 = 0;
-        let mut residual = [0i32; 16];
-        for local_y in 0..4 {
-            let y = y0 + local_y;
-            for local_x in 0..4 {
-                let x = x0 + local_x;
-                let sample = i32::from(self.chroma_sample(plane, x, y));
-                let predictor = if horz {
-                    if local_x != 0 {
-                        self.chroma_sample(plane, x - 1, y)
-                    } else if x0 != tile_x0 {
-                        self.chroma_sample(plane, x0 - 1, y)
-                    } else if y0 != tile_y0 {
-                        self.chroma_sample(plane, x0, y0 - 1)
-                    } else {
-                        self.h_pred_left_edge()
-                    }
-                } else if local_y != 0 {
-                    self.chroma_sample(plane, x, y - 1)
-                } else if y0 != tile_y0 {
-                    self.chroma_sample(plane, x, y0 - 1)
-                } else if x0 != tile_x0 {
-                    self.chroma_sample(plane, x0 - 1, y0)
-                } else {
-                    self.v_pred_above_edge()
-                };
-                residual[local_y * 4 + local_x] = sample - i32::from(predictor);
-            }
-        }
-        residual
     }
 
     fn chroma_intra_residuals(

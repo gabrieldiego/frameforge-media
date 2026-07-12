@@ -4,14 +4,17 @@ fn chroma_idtx_coeff_score(residual: &[i32; 16]) -> usize {
     // instead of the FWHT domain so mode selection matches the coded syntax.
     let mut score = 0usize;
     for &sample_delta in residual {
-        let level = sample_delta.unsigned_abs() as usize;
-        if level == 0 {
-            continue;
-        }
-        score +=
-            AV2_CHROMA_BDPCM_NONZERO_COST + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100;
+        score += chroma_idtx_sample_score(sample_delta);
     }
     score
+}
+
+fn chroma_idtx_sample_score(sample_delta: i32) -> usize {
+    let level = sample_delta.unsigned_abs() as usize;
+    if level == 0 {
+        return 0;
+    }
+    AV2_CHROMA_BDPCM_NONZERO_COST + (level.min(255) * AV2_CHROMA_BDPCM_LEVEL_SCALE) / 100
 }
 
 fn luma_coeff_score(coefficients: &[i32; 16]) -> usize {
