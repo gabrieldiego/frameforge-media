@@ -43,6 +43,21 @@ fn v_txb_skip_static_cdf_key(skip_ctx: u8) -> usize {
     AV2_STATIC_CDF_TXB_SKIP_V_BASE + usize::from(skip_ctx)
 }
 
+fn tx4x4_coefficients_from_residual(
+    residual: &[i32; TX4X4_SAMPLES],
+    use_fsc: bool,
+) -> [i32; TX4X4_SAMPLES] {
+    if use_fsc {
+        idtx4x4_coefficients(residual)
+    } else {
+        av2_fwht4x4(residual)
+    }
+}
+
+fn tx4x4_residual_is_zero(residual: &[i32; TX4X4_SAMPLES]) -> bool {
+    residual.iter().all(|&sample| sample == 0)
+}
+
 fn av2_fwht4x4(input: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
     // AV2 v1.0.0 lossless TX_4X4 uses AVM av2_fwht4x4_c() before coefficient
     // coding. The final UNIT_QUANT_FACTOR multiply is preserved so coefficient

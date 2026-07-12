@@ -310,6 +310,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         )
     }
 
+    #[cfg(test)]
     fn tx4x4_coefficients_for_mode(
         &self,
         plane: Av2LosslessPlane,
@@ -322,7 +323,33 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         leaf_height: usize,
         coded_mi_context: &Av2CodedMiContext,
     ) -> [i32; TX4X4_SAMPLES] {
-        let residual = if self.source_backed_recon && !mode.use_fsc {
+        let residual = self.tx4x4_residual_for_mode(
+            plane,
+            x0,
+            y0,
+            mode,
+            leaf_x0,
+            leaf_y0,
+            leaf_width,
+            leaf_height,
+            coded_mi_context,
+        );
+        tx4x4_coefficients_from_residual(&residual, mode.use_fsc)
+    }
+
+    fn tx4x4_residual_for_mode(
+        &self,
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mode: Av2LosslessSubsampledModeDecision,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+        coded_mi_context: &Av2CodedMiContext,
+    ) -> [i32; TX4X4_SAMPLES] {
+        if self.source_backed_recon && !mode.use_fsc {
             match plane {
                 Av2LosslessPlane::Y => {
                     if let Some(horz) = mode.luma_bdpcm_horz {
@@ -417,11 +444,6 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                     }
                 }
             }
-        };
-        if mode.use_fsc {
-            idtx4x4_coefficients(&residual)
-        } else {
-            av2_fwht4x4(&residual)
         }
     }
 
