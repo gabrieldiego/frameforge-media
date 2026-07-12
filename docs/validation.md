@@ -88,8 +88,29 @@ to make missing reference tools a failure, or `VALIDATION_REFERENCE_MODE=off`
 for encode-only validation.
 
 Reference encoder compression comparisons are intentionally separate from
-decode-side validation. `make compare-compression` uses AVM/VTM encoders only
-to produce size baselines. For AV2, the Makefile defaults to
+decode-side validation. `make compare-compression` uses AVM/VTM encoders by
+default to produce codec-native size baselines. These default reference outputs
+are cached under `verification/generated/compression_compare/<codec>/<set>/`
+and reused when the input, encoder path, preset, thread settings, and extra
+reference arguments match. Set `COMPRESSION_REFRESH_REFERENCE=1` only when a
+cached reference result should be regenerated.
+
+AV2 does not currently have a fast dav1d-like production encoder separate from
+AVM. For faster lossy iteration, `COMPRESSION_REFERENCE_BACKEND=rav1e` uses
+the rav1e AV1 encoder as an explicit AV1 size/time baseline. rav1e does not
+currently implement lossless encoding, so lossless manifests should keep the
+default `COMPRESSION_REFERENCE_BACKEND=reference` path. The rav1e result is
+not an AV2 reference result, and it is written under a backend-specific
+subdirectory such as
+`verification/generated/compression_compare/av2/<set>/rav1e/` so it does not
+clobber cached AVM results. Build it with:
+
+```sh
+make reference-setup REFERENCE_CODEC=rav1e
+make compare-compression CODEC=av2 COMPRESSION_SET=smoke COMPRESSION_REFERENCE_BACKEND=rav1e
+```
+
+For AV2 native reference comparisons, the Makefile defaults to
 `COMPRESSION_REFERENCE_PRESET=fast`, which keeps `--cpu-used=9` and adds AVM
 threading and low-latency speed options. Use
 `COMPRESSION_REFERENCE_PRESET=default` to keep the legacy AVM argument set.

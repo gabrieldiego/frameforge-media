@@ -18,6 +18,7 @@ COMPRESSION_SET ?= $(VALIDATION_SET)
 COMPRESSION_OUT_DIR ?= verification/generated/compression_compare
 COMPRESSION_LOG_DIR ?= verification/generated/compression_compare_logs
 COMPRESSION_LIMIT ?=
+COMPRESSION_REFERENCE_BACKEND ?= reference
 COMPRESSION_REFERENCE_PRESET ?= fast
 COMPRESSION_REFERENCE_THREADS ?= auto
 COMPRESSION_REFERENCE_ARGS ?=
@@ -29,6 +30,7 @@ VALIDATION_STOP_FLAG := $(if $(filter 1 true yes,$(VALIDATION_STOP_ON_FAIL)),--s
 VALIDATION_LIMIT_FLAG := $(if $(strip $(VALIDATION_LIMIT)),--limit "$(VALIDATION_LIMIT)",)
 VALIDATION_SOURCE_FLAG := $(if $(filter 1 true yes,$(VALIDATION_SOURCE_FILTERS)),--source-filters,)
 COMPRESSION_LIMIT_FLAG := $(if $(strip $(COMPRESSION_LIMIT)),--limit "$(COMPRESSION_LIMIT)",)
+COMPRESSION_REFERENCE_BACKEND_FLAG := --reference-backend "$(COMPRESSION_REFERENCE_BACKEND)"
 COMPRESSION_REFERENCE_PRESET_FLAG := --reference-preset "$(COMPRESSION_REFERENCE_PRESET)"
 COMPRESSION_REFERENCE_THREADS_FLAG := --reference-threads "$(COMPRESSION_REFERENCE_THREADS)"
 COMPRESSION_AVM_TILE_COLUMNS_FLAG := --avm-tile-columns "$(COMPRESSION_AVM_TILE_COLUMNS)"
@@ -58,6 +60,7 @@ help:
 		'  make compare-compression' \
 		'                         Compare FrameForge and reference encoder sizes' \
 		'                         Uses CODEC=av2 COMPRESSION_SET=$(VALIDATION_SET)' \
+		'                         Set COMPRESSION_REFERENCE_BACKEND=rav1e for lossy AV1 baseline' \
 		'                         Uses COMPRESSION_REFERENCE_PRESET=fast by default' \
 		'                         Set COMPRESSION_REFERENCE_PRESET=default for legacy args' \
 		'                         Set COMPRESSION_REFRESH_REFERENCE=1 to ignore cache' \
@@ -110,7 +113,7 @@ validate-set: build
 	$(PYTHON) scripts/run_validation_set.py --codec "$(CODEC)" "$(VALIDATION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" $(VALIDATION_SOURCE_FLAG) $(VALIDATION_STOP_FLAG) $(VALIDATION_LIMIT_FLAG)
 
 compare-compression: build
-	$(PYTHON) scripts/compare_reference_compression.py --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG)
+	$(PYTHON) scripts/compare_reference_compression.py --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG)
 
 regression: build
 	$(PYTHON) scripts/run_validation_set.py --codec av2 smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail

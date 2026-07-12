@@ -25,6 +25,8 @@ REFERENCE_TOOLS = REPO_ROOT / "scripts" / "reference_tools.py"
 VTM_CFG_DIR = REPO_ROOT / "verification" / "references" / "vvc" / "vtm" / "cfg"
 VVC_MIN_BIT_DEPTH = 8
 VVC_MAX_BIT_DEPTH = 12
+REFERENCE_BACKEND_NATIVE = "reference"
+REFERENCE_BACKEND_RAV1E = "rav1e"
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,14 @@ def main() -> int:
         help="extra shell-style arguments appended to the reference encoder command",
     )
     parser.add_argument(
+        "--reference-backend",
+        default=REFERENCE_BACKEND_NATIVE,
+        help=(
+            "compression baseline backend: reference for AVM/VTM, or rav1e "
+            "for an AV1 rav1e baseline"
+        ),
+    )
+    parser.add_argument(
         "--reference-preset",
         choices=("default", "fast"),
         default="fast",
@@ -82,6 +92,7 @@ def main() -> int:
         help="rerun reference encoders instead of reusing matching cached outputs",
     )
     args = parser.parse_args()
+    args.reference_backend = normalize_reference_backend(args.reference_backend)
     args.reference_threads = parse_auto_int(args.reference_threads, "reference threads", 1)
     args.avm_tile_columns = parse_auto_int(args.avm_tile_columns, "AVM tile columns", 0)
     args.avm_tile_rows = parse_auto_int(args.avm_tile_rows, "AVM tile rows", 0)
@@ -90,7 +101,7 @@ def main() -> int:
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
         return 2
 
-    reference_encoder = resolve_reference_encoder(args.codec)
+    reference_encoder = resolve_reference_encoder(args.codec, args.reference_backend)
     vectors = generate_test_vectors.generate_vectors(args.set, args.vector_dir, args.set_dir)
     enabled_vectors = []
     skipped = 0
@@ -116,8 +127,11 @@ def main() -> int:
         result = run_case(vector, vector_path, reference_encoder, args)
         results.append(result)
         print(
-            "  mode={mode} reference={cache} FrameForge={ff} byte(s), reference={ref} byte(s), ratio={ratio:.3f}x".format(
+            "  mode={mode} baseline={backend} reference={cache} "
+            "FrameForge={ff} byte(s), reference={ref} byte(s), "
+            "ratio={ratio:.3f}x".format(
                 mode="lossless" if result.lossless else "default",
+                backend=args.reference_backend,
                 cache="cached" if result.reference_cached else "fresh",
                 ff=result.frameforge_bytes,
                 ref=result.reference_bytes,
@@ -127,7 +141,10 @@ def main() -> int:
         )
 
     print()
-    print(f"FrameForge media compression comparison: {args.set} ({args.codec})")
+    print(
+        "FrameForge media compression comparison: "
+        f"{args.set} ({args.codec}, baseline={args.reference_backend})"
+    )
     print("| # | vector | mode | reference | FrameForge bytes | reference bytes | FF/reference | delta | log |")
     print("|---:|---|---|---|---:|---:|---:|---:|---|")
     total_ff = 0
@@ -154,13 +171,31 @@ def main() -> int:
     return 0
 
 
-def resolve_reference_encoder(codec: str) -> str:
+def normalize_reference_backend(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"reference", "native", "avm", "vtm"}:
+        return REFERENCE_BACKEND_NATIVE
+    if normalized in {"rav1e", "av1-rav1e"}:
+        return REFERENCE_BACKEND_RAV1E
+    if normalized == "dav1d":
+        raise SystemExit(
+            "dav1d is an AV1 decoder, not an encoder; use "
+            "COMPRESSION_REFERENCE_BACKEND=rav1e for the AV1 encode baseline"
+        )
+    raise SystemExit(
+        "unsupported compression reference backend "
+        f"'{value}'; expected reference or rav1e"
+    )
+
+
+def resolve_reference_encoder(codec: str, reference_backend: str) -> str:
+    reference_codec = codec if reference_backend == REFERENCE_BACKEND_NATIVE else reference_backend
     command = [
         sys.executable,
         str(REFERENCE_TOOLS),
         "encoder",
         "--codec",
-        codec,
+        reference_codec,
         "--no-build",
     ]
     process = subprocess.run(
@@ -234,7 +269,7 @@ def run_case(
     reference_cached = False
     reference_output_text = ""
     if not args.refresh_reference and reference_cache_valid(
-        reference_output, metadata_path, metadata, args.codec
+        reference_output, metadata_path, metadata, args
     ):
         reference_cached = True
         reference_output_text = (
@@ -243,7 +278,7 @@ def run_case(
         )
         reference_returncode = 0
     else:
-        remove_reference_outputs(reference_output, args.codec)
+        remove_reference_outputs(reference_output, args)
         reference_result = run_logged(reference_cmd)
         reference_output_text = reference_result.stdout
         reference_returncode = reference_result.returncode
@@ -259,7 +294,7 @@ def run_case(
         raise SystemExit(f"reference encode failed for {vector_path.name}; see {relpath(log)}")
     require_non_empty(frameforge_output, "FrameForge", vector_path, log)
     require_non_empty(reference_output, "reference", vector_path, log)
-    require_reference_outputs(reference_output, args.codec, vector_path, log)
+    require_reference_outputs(reference_output, args, vector_path, log)
     if not reference_cached:
         metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 
@@ -282,11 +317,15 @@ def run_case(
 def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path]:
     output_dir = args.out_dir / args.codec / args.set
     log_dir = args.log_dir / args.codec
+    if args.reference_backend != REFERENCE_BACKEND_NATIVE:
+        output_dir = output_dir / args.reference_backend
+        log_dir = log_dir / args.reference_backend
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
-    extension = codec_extension(args.codec)
-    frameforge_output = output_dir / f"{stem}_frameforge.{extension}"
-    reference_output = output_dir / f"{stem}_reference.{extension}"
+    frameforge_extension = codec_extension(args.codec)
+    reference_extension = reference_extension_for_args(args)
+    frameforge_output = output_dir / f"{stem}_frameforge.{frameforge_extension}"
+    reference_output = output_dir / f"{stem}_reference.{reference_extension}"
     log = log_dir / f"{args.set}_{stem}.log"
     return frameforge_output, reference_output, log
 
@@ -299,23 +338,23 @@ def reference_metadata_path(output: Path) -> Path:
     return output.with_name(f"{output.stem}_metadata.json")
 
 
-def reference_outputs(output: Path, codec: str) -> list[Path]:
+def reference_outputs(output: Path, args: argparse.Namespace) -> list[Path]:
     outputs = [output]
-    if codec == "vvc":
+    if args.reference_backend == REFERENCE_BACKEND_NATIVE and args.codec == "vvc":
         outputs.append(reference_recon_path(output))
     return outputs
 
 
-def remove_reference_outputs(output: Path, codec: str) -> None:
-    for path in [*reference_outputs(output, codec), reference_metadata_path(output)]:
+def remove_reference_outputs(output: Path, args: argparse.Namespace) -> None:
+    for path in [*reference_outputs(output, args), reference_metadata_path(output)]:
         if path.exists():
             path.unlink()
 
 
 def require_reference_outputs(
-    output: Path, codec: str, vector_path: Path, log: Path
+    output: Path, args: argparse.Namespace, vector_path: Path, log: Path
 ) -> None:
-    for path in reference_outputs(output, codec):
+    for path in reference_outputs(output, args):
         require_non_empty(path, "reference", vector_path, log)
 
 
@@ -323,11 +362,11 @@ def reference_cache_valid(
     output: Path,
     metadata_path: Path,
     expected_metadata: dict,
-    codec: str,
+    args: argparse.Namespace,
 ) -> bool:
     if not metadata_path.exists():
         return False
-    for path in reference_outputs(output, codec):
+    for path in reference_outputs(output, args):
         if not path.exists() or path.stat().st_size == 0:
             return False
     try:
@@ -346,7 +385,7 @@ def reference_cache_metadata(
 ) -> dict:
     encoder_path = Path(reference_encoder)
     encoder_stat = encoder_path.stat()
-    return {
+    metadata = {
         "version": 1,
         "codec": args.codec,
         "set": args.set,
@@ -376,6 +415,9 @@ def reference_cache_metadata(
             "lossless": vector.lossless,
         },
     }
+    if args.reference_backend != REFERENCE_BACKEND_NATIVE:
+        metadata["reference_backend"] = args.reference_backend
+    return metadata
 
 
 def reference_encode_command(
@@ -385,6 +427,10 @@ def reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
+    if args.reference_backend == REFERENCE_BACKEND_RAV1E:
+        return rav1e_reference_encode_command(vector, vector_path, output, encoder, args)
+    if args.reference_backend != REFERENCE_BACKEND_NATIVE:
+        raise SystemExit(f"unsupported compression reference backend: {args.reference_backend}")
     if args.codec == "av2":
         return av2_reference_encode_command(vector, vector_path, output, encoder, args)
     if args.codec == "vvc":
@@ -393,6 +439,92 @@ def reference_encode_command(
         "reference compression comparison currently supports codecs av2 and vvc; "
         f"got {args.codec}"
     )
+
+
+def rav1e_reference_encode_command(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+    encoder: str,
+    args: argparse.Namespace,
+) -> list[str]:
+    bit_depth, _chroma = av1_pixel_format(vector.fmt)
+    if bit_depth not in {8, 10, 12}:
+        raise SystemExit(f"unsupported rav1e reference encode pixel format: {vector.fmt}")
+    if vector.lossless:
+        raise SystemExit(
+            "rav1e does not implement lossless encoding; use "
+            "COMPRESSION_REFERENCE_BACKEND=reference for lossless manifests"
+        )
+
+    y4m_input = rav1e_y4m_path(output)
+    ensure_y4m_input(vector, vector_path, y4m_input)
+    command = [encoder, str(y4m_input), "-o", str(output)]
+    if args.reference_preset == "fast":
+        command.extend(["--speed", "10"])
+    if args.reference_threads is not None:
+        command.extend(["--threads", str(args.reference_threads)])
+    if args.reference_args:
+        command.extend(shlex.split(args.reference_args))
+    return command
+
+
+def rav1e_y4m_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}_input.y4m")
+
+
+def ensure_y4m_input(
+    vector: generate_test_vectors.TestVector,
+    raw_path: Path,
+    y4m_path: Path,
+) -> None:
+    if (
+        y4m_path.exists()
+        and y4m_path.stat().st_size > 0
+        and y4m_path.stat().st_mtime_ns >= raw_path.stat().st_mtime_ns
+    ):
+        return
+
+    frame_len = generate_test_vectors.raw_frame_len(vector)
+    y4m_path.parent.mkdir(parents=True, exist_ok=True)
+    fps = fps_fraction(vector)
+    header = (
+        f"YUV4MPEG2 W{vector.width} H{vector.height} "
+        f"F{fps.numerator}:{fps.denominator} Ip A0:0 C{y4m_chroma_tag(vector.fmt)}\n"
+    ).encode("ascii")
+    with raw_path.open("rb") as source, y4m_path.open("wb") as output:
+        output.write(header)
+        for frame_index in range(vector.frames):
+            frame = source.read(frame_len)
+            if len(frame) != frame_len:
+                raise SystemExit(
+                    f"{raw_path} is too short for rav1e Y4M wrapper: "
+                    f"missing frame {frame_index + 1}"
+                )
+            output.write(b"FRAME\n")
+            output.write(frame)
+
+
+def y4m_chroma_tag(fmt: str) -> str:
+    bit_depth, chroma = av1_pixel_format(fmt)
+    if bit_depth == 8 and chroma == "420":
+        return "420jpeg"
+    if bit_depth == 8:
+        return chroma
+    return f"{chroma}p{bit_depth}"
+
+
+def av1_pixel_format(fmt: str) -> tuple[int, str]:
+    bit_depth = generate_test_vectors.yuv420_bit_depth(fmt)
+    if bit_depth is not None:
+        return bit_depth, "420"
+    bit_depth = generate_test_vectors.yuv422_bit_depth(fmt)
+    if bit_depth is not None:
+        return bit_depth, "422"
+    bit_depth = generate_test_vectors.yuv444_bit_depth(fmt)
+    if bit_depth is not None:
+        return bit_depth, "444"
+    raise SystemExit(f"unsupported rav1e reference encode pixel format: {fmt}")
 
 
 def av2_reference_encode_command(
@@ -628,6 +760,12 @@ def sha256_file(path: Path) -> str:
 
 def codec_extension(codec: str) -> str:
     return {"av2": "obu", "vvc": "vvc"}.get(codec, codec)
+
+
+def reference_extension_for_args(args: argparse.Namespace) -> str:
+    if args.reference_backend == REFERENCE_BACKEND_RAV1E:
+        return "ivf"
+    return codec_extension(args.codec)
 
 
 def relpath(path: Path) -> Path:

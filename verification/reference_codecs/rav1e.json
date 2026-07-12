@@ -1,0 +1,19 @@
+{
+  "codec": "rav1e",
+  "label": "rav1e",
+  "repo": "https://github.com/xiph/rav1e.git",
+  "build_system": "cargo",
+  "repo_env": ["FRAMEFORGE_RAV1E_REPO"],
+  "ref_env": ["FRAMEFORGE_RAV1E_REF"],
+  "root_env": ["FRAMEFORGE_RAV1E_ROOT"],
+  "encoder_env": ["FRAMEFORGE_RAV1E_ENCODER"],
+  "decoder_env": [],
+  "build_dir_env": [],
+  "build_type_env": ["FRAMEFORGE_RAV1E_BUILD_TYPE"],
+  "cmake_args_env": [],
+  "cargo_args_env": ["FRAMEFORGE_RAV1E_CARGO_ARGS"],
+  "default_root": "verification/references/rav1e",
+  "decoder_names": [],
+  "encoder_names": ["rav1e", "rav1e.exe"],
+  "decode_style": "none"
+}

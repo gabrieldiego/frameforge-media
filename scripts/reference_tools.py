@@ -27,6 +27,7 @@ class ReferenceManifest:
     codec: str
     label: str
     repo: str
+    build_system: str
     repo_env: tuple[str, ...]
     ref_env: tuple[str, ...]
     root_env: tuple[str, ...]
@@ -35,6 +36,7 @@ class ReferenceManifest:
     build_dir_env: tuple[str, ...]
     build_type_env: tuple[str, ...]
     cmake_args_env: tuple[str, ...]
+    cargo_args_env: tuple[str, ...]
     default_root: Path
     decoder_names: tuple[str, ...]
     encoder_names: tuple[str, ...]
@@ -108,6 +110,7 @@ def load_manifests(manifest_dir: Path) -> dict[str, ReferenceManifest]:
             codec=required_str(data, "codec", path),
             label=required_str(data, "label", path),
             repo=required_str(data, "repo", path),
+            build_system=data.get("build_system", "cmake"),
             repo_env=tuple(data.get("repo_env", [])),
             ref_env=tuple(data.get("ref_env", [])),
             root_env=tuple(data.get("root_env", [])),
@@ -116,6 +119,7 @@ def load_manifests(manifest_dir: Path) -> dict[str, ReferenceManifest]:
             build_dir_env=tuple(data.get("build_dir_env", [])),
             build_type_env=tuple(data.get("build_type_env", [])),
             cmake_args_env=tuple(data.get("cmake_args_env", [])),
+            cargo_args_env=tuple(data.get("cargo_args_env", [])),
             default_root=resolve_repo_path(required_str(data, "default_root", path)),
             decoder_names=tuple(data.get("decoder_names", [])),
             encoder_names=tuple(data.get("encoder_names", [])),
@@ -224,13 +228,14 @@ def setup_reference(manifest: ReferenceManifest) -> None:
     if not root.exists():
         clone_reference(manifest, root)
     build_reference(manifest, root)
-    decoder = find_tool(root, manifest.decoder_names)
+    decoder = find_tool(root, manifest.decoder_names) if manifest.decoder_names else None
     encoder = find_tool(root, manifest.encoder_names) if manifest.encoder_names else None
-    if decoder is None:
+    if manifest.decoder_names and decoder is None:
         raise SystemExit(f"{manifest.label} build produced no declared decoder under {root}")
     if manifest.encoder_names and encoder is None:
         raise SystemExit(f"{manifest.label} build produced no declared encoder under {root}")
-    print(f"{manifest.codec}: decoder={decoder}")
+    if decoder is not None:
+        print(f"{manifest.codec}: decoder={decoder}")
     if encoder is not None:
         print(f"{manifest.codec}: encoder={encoder}")
 
@@ -248,6 +253,16 @@ def clone_reference(manifest: ReferenceManifest, root: Path) -> None:
 
 
 def build_reference(manifest: ReferenceManifest, root: Path) -> None:
+    if manifest.build_system == "cmake":
+        build_cmake_reference(manifest, root)
+        return
+    if manifest.build_system == "cargo":
+        build_cargo_reference(manifest, root)
+        return
+    raise SystemExit(f"unsupported build_system '{manifest.build_system}' for {manifest.label}")
+
+
+def build_cmake_reference(manifest: ReferenceManifest, root: Path) -> None:
     if not shutil.which("cmake"):
         raise SystemExit(f"cmake is required to build {manifest.label}")
     build_dir = build_dir_for(manifest, root)
@@ -270,6 +285,22 @@ def build_reference(manifest: ReferenceManifest, root: Path) -> None:
     run(build)
 
 
+def build_cargo_reference(manifest: ReferenceManifest, root: Path) -> None:
+    if not shutil.which("cargo"):
+        raise SystemExit(f"cargo is required to build {manifest.label}")
+    build_type = (first_env(manifest.build_type_env) or "release").lower()
+    command = ["cargo", "build"]
+    if build_type == "release":
+        command.append("--release")
+    elif build_type not in {"debug", "dev"}:
+        command.extend(["--profile", build_type])
+    if jobs := os.environ.get("FRAMEFORGE_BUILD_JOBS"):
+        command.extend(["-j", jobs])
+    command.extend(cargo_args(manifest))
+    print(f"building {manifest.label}", file=sys.stderr)
+    run(command, cwd=root)
+
+
 def build_dir_for(manifest: ReferenceManifest, root: Path) -> Path:
     if value := first_env(manifest.build_dir_env):
         return Path(value)
@@ -281,6 +312,14 @@ def cmake_args(manifest: ReferenceManifest) -> list[str]:
         return shlex.split(value)
     if manifest.codec == "av2" and not shutil.which("yasm") and not shutil.which("nasm"):
         return ["-DAVM_TARGET_CPU=generic"]
+    return []
+
+
+def cargo_args(manifest: ReferenceManifest) -> list[str]:
+    if value := first_env(manifest.cargo_args_env):
+        return shlex.split(value)
+    if manifest.codec == "rav1e":
+        return ["--bin", "rav1e"]
     return []
 
 
@@ -313,13 +352,15 @@ def decode_bitstream(
         cmd = [decoder, "-b", str(bitstream), "-o", str(output)]
         if Path(decoder).name.startswith("DecoderAnalyserApp"):
             cmd.append("--Stats=0")
+    elif manifest.decode_style == "none":
+        raise SystemExit(f"{manifest.label} does not declare a reference decoder")
     else:
         raise SystemExit(f"unsupported decode_style '{manifest.decode_style}'")
     return subprocess.run(cmd, check=False).returncode
 
 
-def run(cmd: list[str]) -> None:
-    completed = subprocess.run(cmd, check=False)
+def run(cmd: list[str], cwd: Path | None = None) -> None:
+    completed = subprocess.run(cmd, check=False, cwd=cwd)
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
 
