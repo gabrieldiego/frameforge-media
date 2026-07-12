@@ -1,5 +1,6 @@
 const CDF_PROB_TOP: u32 = 1 << 15;
 const EC_PROB_SHIFT: u32 = 7;
+const AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE: usize = 512;
 // The forward AV2 pre-carry finalizer delays output while a future carry could
 // still change pending bytes. Each pending word is a 9-bit byte-plus-carry
 // value, so 32 words map to a small 288-bit RTL queue. This is intentionally
@@ -65,7 +66,11 @@ pub struct Av2EntropyWriter {
     symbol_bits: usize,
     adaptive_cdf_updates: bool,
     adaptive_cdfs: Vec<Av2AdaptiveCdf>,
+    adaptive_cdf_names: Vec<&'static str>,
+    adaptive_cdf_name_ptrs: Vec<Av2StaticNameCacheEntry>,
+    last_adaptive_cdf_name: Option<Av2StaticNameCacheEntry>,
     last_adaptive_cdf_index: Option<usize>,
+    adaptive_cdf_lookup_cache: [Option<usize>; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
     record_fields: bool,
 }
 
@@ -76,13 +81,42 @@ struct Av2PrecarryForwardFinalizer {
     max_pending_words: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Av2AdaptiveCdf {
-    name: &'static str,
+    name_index: usize,
     key: usize,
     nsymbs: usize,
-    initial: Vec<u16>,
+    initial: Av2CdfSignature,
     cdf: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Av2CdfSignature {
+    len: usize,
+    words: [u64; 5],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2StaticNameCacheEntry {
+    ptr: usize,
+    len: usize,
+    index: usize,
+}
+
+impl Av2AdaptiveCdf {
+    #[inline(always)]
+    fn matches(
+        &self,
+        name_index: usize,
+        key: usize,
+        nsymbs: usize,
+        initial: Av2CdfSignature,
+    ) -> bool {
+        self.name_index == name_index
+            && self.key == key
+            && self.nsymbs == nsymbs
+            && self.initial.matches(initial)
+    }
 }
 
 impl Av2EntropyWriter {
@@ -106,7 +140,11 @@ impl Av2EntropyWriter {
             symbol_bits: 0,
             adaptive_cdf_updates,
             adaptive_cdfs: Vec::new(),
+            adaptive_cdf_names: Vec::new(),
+            adaptive_cdf_name_ptrs: Vec::new(),
+            last_adaptive_cdf_name: None,
             last_adaptive_cdf_index: None,
+            adaptive_cdf_lookup_cache: [None; AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE],
             record_fields,
         }
     }
@@ -318,36 +356,78 @@ impl Av2EntropyWriter {
         cdf: &[u16],
         nsymbs: usize,
     ) -> usize {
-        let initial = &cdf[..nsymbs + 4];
+        let initial_len = nsymbs + 4;
+        let initial = Av2CdfSignature::from_cdf(&cdf[..initial_len]);
+        let name_index = self.adaptive_cdf_name_index(name);
+        let cache_slot = av2_adaptive_cdf_lookup_cache_slot(name_index, key, nsymbs, initial);
         if let Some(index) = self.last_adaptive_cdf_index {
             let entry = &self.adaptive_cdfs[index];
-            if entry.name == name
-                && entry.key == key
-                && entry.nsymbs == nsymbs
-                && entry.initial == initial
-            {
+            if entry.matches(name_index, key, nsymbs, initial) {
+                self.adaptive_cdf_lookup_cache[cache_slot] = Some(index);
                 return index;
             }
         }
-        if let Some(index) = self.adaptive_cdfs.iter().position(|entry| {
-            entry.name == name
-                && entry.key == key
-                && entry.nsymbs == nsymbs
-                && entry.initial == initial
-        }) {
+        if let Some(index) = self.adaptive_cdf_lookup_cache[cache_slot] {
+            let entry = &self.adaptive_cdfs[index];
+            if entry.matches(name_index, key, nsymbs, initial) {
+                self.last_adaptive_cdf_index = Some(index);
+                return index;
+            }
+        }
+        if let Some(index) = self
+            .adaptive_cdfs
+            .iter()
+            .position(|entry| entry.matches(name_index, key, nsymbs, initial))
+        {
             self.last_adaptive_cdf_index = Some(index);
+            self.adaptive_cdf_lookup_cache[cache_slot] = Some(index);
             return index;
         }
 
         self.adaptive_cdfs.push(Av2AdaptiveCdf {
-            name,
+            name_index,
             key,
             nsymbs,
-            initial: initial.to_vec(),
-            cdf: initial.to_vec(),
+            initial,
+            cdf: cdf[..initial_len].to_vec(),
         });
         let index = self.adaptive_cdfs.len() - 1;
         self.last_adaptive_cdf_index = Some(index);
+        self.adaptive_cdf_lookup_cache[cache_slot] = Some(index);
+        index
+    }
+
+    fn adaptive_cdf_name_index(&mut self, name: &'static str) -> usize {
+        let ptr = name.as_ptr() as usize;
+        let len = name.len();
+        if let Some(entry) = self.last_adaptive_cdf_name {
+            if entry.ptr == ptr && entry.len == len {
+                return entry.index;
+            }
+        }
+        if let Some(entry) = self
+            .adaptive_cdf_name_ptrs
+            .iter()
+            .find(|entry| entry.ptr == ptr && entry.len == len)
+            .copied()
+        {
+            self.last_adaptive_cdf_name = Some(entry);
+            return entry.index;
+        }
+
+        let index = if let Some(index) = self
+            .adaptive_cdf_names
+            .iter()
+            .position(|existing| *existing == name)
+        {
+            index
+        } else {
+            self.adaptive_cdf_names.push(name);
+            self.adaptive_cdf_names.len() - 1
+        };
+        let entry = Av2StaticNameCacheEntry { ptr, len, index };
+        self.adaptive_cdf_name_ptrs.push(entry);
+        self.last_adaptive_cdf_name = Some(entry);
         index
     }
 
@@ -409,6 +489,50 @@ impl Av2EntropyWriter {
         self.rng = rng << d;
         self.cnt = s;
     }
+}
+
+impl Av2CdfSignature {
+    #[inline(always)]
+    fn matches(self, other: Self) -> bool {
+        self.len == other.len
+            && self.words[0] == other.words[0]
+            && self.words[1] == other.words[1]
+            && self.words[2] == other.words[2]
+            && self.words[3] == other.words[3]
+            && self.words[4] == other.words[4]
+    }
+
+    fn from_cdf(cdf: &[u16]) -> Self {
+        debug_assert!(
+            cdf.len() <= 20,
+            "AV2 adaptive CDF signature expects nsymbs + 4 <= 20 entries"
+        );
+        let mut words = [0u64; 5];
+        for (index, &value) in cdf.iter().enumerate() {
+            words[index / 4] |= u64::from(value) << ((index % 4) * 16);
+        }
+        Self {
+            len: cdf.len(),
+            words,
+        }
+    }
+}
+
+fn av2_adaptive_cdf_lookup_cache_slot(
+    name_index: usize,
+    key: usize,
+    nsymbs: usize,
+    initial: Av2CdfSignature,
+) -> usize {
+    let mut hash = (name_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    hash ^= (key as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash ^= (nsymbs as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^= (initial.len as u64).wrapping_mul(0xd6e8_feb8_6659_fd93);
+    for word in initial.words {
+        hash ^= word;
+        hash = hash.rotate_left(13).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    (hash as usize) & (AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE - 1)
 }
 
 impl Av2PrecarryForwardFinalizer {
