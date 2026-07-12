@@ -271,7 +271,7 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
 }
 
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
-const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 32;
+const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 64;
 const AV2_LOSSLESS_BASE_LEAF_SIZE: usize = 16;
 const AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP: usize = 4;
 const AV2_LOSSLESS_ADAPTIVE_UNIQUE_LIMIT: usize = 8;
@@ -289,29 +289,30 @@ fn lossless_partition_features_for_source(
     bit_depth: SampleBitDepth,
     source: &[u8],
 ) -> Av2LosslessPartitionFeatures {
-    let cols_32x32 = region.width.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-    let rows_32x32 = region.height.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-    let mut simple_32x32 = Vec::with_capacity(cols_32x32 * rows_32x32);
-    for row in 0..rows_32x32 {
+    let cols = region.width.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    let rows = region.height.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    let mut simple_leaves = Vec::with_capacity(cols * rows);
+    for row in 0..rows {
         let y0 = region.origin_y + row * AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE;
         let height =
             (region.origin_y + region.height - y0).min(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-        for col in 0..cols_32x32 {
+        for col in 0..cols {
             let x0 = region.origin_x + col * AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE;
             let width =
                 (region.origin_x + region.width - x0).min(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-            simple_32x32.push(lossless_luma_region_is_simple_for_32_leaf(
+            simple_leaves.push(lossless_luma_region_is_simple_for_adaptive_leaf(
                 geometry, bit_depth, source, x0, y0, width, height,
             ));
         }
     }
     Av2LosslessPartitionFeatures {
-        simple_32x32,
-        cols_32x32,
+        simple_leaves,
+        cols,
+        leaf_size: AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE,
     }
 }
 
-fn lossless_luma_region_is_simple_for_32_leaf(
+fn lossless_luma_region_is_simple_for_adaptive_leaf(
     geometry: Av2VideoGeometry,
     bit_depth: SampleBitDepth,
     source: &[u8],

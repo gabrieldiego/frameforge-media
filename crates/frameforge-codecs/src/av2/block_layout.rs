@@ -476,8 +476,9 @@ enum Av2PartitionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2LosslessPartitionFeatures {
-    simple_32x32: Vec<bool>,
-    cols_32x32: usize,
+    simple_leaves: Vec<bool>,
+    cols: usize,
+    leaf_size: usize,
 }
 
 impl Av2LosslessPartitionFeatures {
@@ -490,7 +491,7 @@ impl Av2LosslessPartitionFeatures {
         if block_size.width <= 16 && block_size.height <= 16 {
             return true;
         }
-        if block_size.width > 32 || block_size.height > 32 {
+        if block_size.width > self.leaf_size || block_size.height > self.leaf_size {
             return false;
         }
 
@@ -498,14 +499,14 @@ impl Av2LosslessPartitionFeatures {
         let y0 = row_mi * MI_SIZE;
         let x1 = x0 + block_size.width;
         let y1 = y0 + block_size.height;
-        let col0 = x0 / 32;
-        let row0 = y0 / 32;
-        let col1 = (x1 - 1) / 32;
-        let row1 = (y1 - 1) / 32;
+        let col0 = x0 / self.leaf_size;
+        let row0 = y0 / self.leaf_size;
+        let col1 = (x1 - 1) / self.leaf_size;
+        let row1 = (y1 - 1) / self.leaf_size;
         for row in row0..=row1 {
             for col in col0..=col1 {
-                let index = row * self.cols_32x32 + col;
-                if !self.simple_32x32.get(index).copied().unwrap_or(false) {
+                let index = row * self.cols + col;
+                if !self.simple_leaves.get(index).copied().unwrap_or(false) {
                     return false;
                 }
             }
