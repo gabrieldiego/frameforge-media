@@ -566,11 +566,15 @@ impl Av2PrecarryForwardFinalizer {
             return;
         }
 
-        let (_, carry0_bytes) = eval_precarry_suffix(&self.pending, 0);
-        let (_, carry1_bytes) = eval_precarry_suffix(&self.pending, 1);
-        let (_, carry2_bytes) = eval_precarry_suffix(&self.pending, 2);
+        let len = self.pending.len();
+        let mut carry0_bytes = [0u8; AV2_PRE_CARRY_PENDING_LIMIT];
+        let mut carry1_bytes = [0u8; AV2_PRE_CARRY_PENDING_LIMIT];
+        let mut carry2_bytes = [0u8; AV2_PRE_CARRY_PENDING_LIMIT];
+        eval_precarry_suffix_into(&self.pending, 0, &mut carry0_bytes[..len]);
+        eval_precarry_suffix_into(&self.pending, 1, &mut carry1_bytes[..len]);
+        eval_precarry_suffix_into(&self.pending, 2, &mut carry2_bytes[..len]);
         let mut common = 0usize;
-        while common < self.pending.len()
+        while common < len
             && carry0_bytes[common] == carry1_bytes[common]
             && carry0_bytes[common] == carry2_bytes[common]
         {
@@ -608,13 +612,22 @@ fn finalize_precarry_forward(precarry: &[u16]) -> (Vec<u8>, usize) {
 
 fn eval_precarry_suffix(precarry: &[u16], terminal_carry: u16) -> (u16, Vec<u8>) {
     let mut out = vec![0; precarry.len()];
+    let carry = eval_precarry_suffix_into(precarry, terminal_carry, &mut out);
+    (carry, out)
+}
+
+fn eval_precarry_suffix_into(precarry: &[u16], terminal_carry: u16, out: &mut [u8]) -> u16 {
+    assert!(
+        out.len() >= precarry.len(),
+        "AV2 pre-carry output scratch must cover the pending suffix"
+    );
     let mut carry = terminal_carry;
     for index in (0..precarry.len()).rev() {
         carry += precarry[index];
         out[index] = carry as u8;
         carry >>= 8;
     }
-    (carry, out)
+    carry
 }
 
 impl Default for Av2EntropyWriter {
