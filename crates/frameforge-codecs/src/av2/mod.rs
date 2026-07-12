@@ -17,6 +17,7 @@ use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
+    av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields,
     av2_lossy_420_tile_entropy_payload_for_region,
     av2_lossy_420_tile_entropy_payload_for_region_with_fields,
@@ -326,6 +327,75 @@ impl Av2TileLayout {
         })
     }
 
+    fn uniform_for_geometry(geometry: Av2VideoGeometry, log2_cols: u8, log2_rows: u8) -> Self {
+        let limits = Av2TileLimits::for_geometry(geometry);
+        assert!(log2_cols >= limits.min_log2_cols);
+        assert!(log2_cols <= limits.max_log2_cols);
+        assert!(log2_rows <= limits.max_log2_rows);
+        assert!(log2_cols + log2_rows >= limits.min_log2);
+        let mi_cols = align_power_of_two(geometry.width, 3) / AV2_MI_SIZE;
+        let mi_rows = align_power_of_two(geometry.height, 3) / AV2_MI_SIZE;
+        let col_starts_sb = uniform_tile_starts_sb(mi_cols, log2_cols);
+        let row_starts_sb = uniform_tile_starts_sb(mi_rows, log2_rows);
+        let cols = col_starts_sb.len() - 1;
+        let rows = row_starts_sb.len() - 1;
+        let mut regions = Vec::with_capacity(cols * rows);
+        for tile_row in 0..rows {
+            let origin_sb_y = row_starts_sb[tile_row];
+            let end_sb_y = row_starts_sb[tile_row + 1];
+            let origin_y = origin_sb_y * AV2_MVP_SUPERBLOCK_SIZE;
+            let end_y = (end_sb_y * AV2_MVP_SUPERBLOCK_SIZE).min(geometry.height);
+            for tile_col in 0..cols {
+                let origin_sb_x = col_starts_sb[tile_col];
+                let end_sb_x = col_starts_sb[tile_col + 1];
+                let origin_x = origin_sb_x * AV2_MVP_SUPERBLOCK_SIZE;
+                let end_x = (end_sb_x * AV2_MVP_SUPERBLOCK_SIZE).min(geometry.width);
+                regions.push(Av2TileRegion {
+                    origin_x,
+                    origin_y,
+                    width: end_x - origin_x,
+                    height: end_y - origin_y,
+                });
+            }
+        }
+        let min_log2_rows = limits.min_log2.saturating_sub(log2_cols);
+        Self {
+            regions,
+            cols,
+            rows,
+            log2_cols: ceil_log2_usize(cols),
+            log2_rows: ceil_log2_usize(rows),
+            min_log2_cols: limits.min_log2_cols,
+            min_log2_rows,
+            max_log2_cols: limits.max_log2_cols,
+            max_log2_rows: limits.max_log2_rows,
+        }
+    }
+
+    fn lossless_subsampled_fast_for_geometry(geometry: Av2VideoGeometry) -> Self {
+        let limits = Av2TileLimits::for_geometry(geometry);
+        let target_log2_cols = if geometry.width >= 1920 {
+            2
+        } else if geometry.width >= 1024 {
+            1
+        } else {
+            0
+        };
+        let log2_cols = target_log2_cols
+            .max(limits.min_log2_cols)
+            .min(limits.max_log2_cols);
+        let target_log2_rows = if geometry.height >= 1080 { 1 } else { 0 };
+        let min_log2_rows = limits.min_log2.saturating_sub(log2_cols);
+        let log2_rows = target_log2_rows
+            .max(min_log2_rows)
+            .min(limits.max_log2_rows);
+        if log2_cols == 0 && log2_rows == 0 {
+            Self::single_for_geometry(geometry)
+        } else {
+            Self::uniform_for_geometry(geometry, log2_cols, log2_rows)
+        }
+    }
+
     fn tile_count(&self) -> usize {
         self.regions.len()
     }
@@ -382,6 +452,29 @@ impl Av2TileLimits {
             min_log2,
         }
     }
+}
+
+fn uniform_tile_starts_sb(mi_size: usize, log2_tiles: u8) -> Vec<usize> {
+    let aligned_mi = align_power_of_two(mi_size, AV2_MIB_SIZE_LOG2_64X64 as usize);
+    let sb_count = aligned_mi >> AV2_MIB_SIZE_LOG2_64X64;
+    let seq_mib_size_log2 = AV2_SEQ_MIB_SIZE_LOG2_64X64 as usize;
+    let seq_sb_count = align_power_of_two(mi_size, seq_mib_size_log2) >> seq_mib_size_log2;
+    let full_sb_count = mi_size >> seq_mib_size_log2;
+    let target_tiles = 1usize << log2_tiles;
+    let base_size_sb = full_sb_count >> log2_tiles;
+    let mut extra_sbs = full_sb_count - (base_size_sb << log2_tiles);
+    if base_size_sb == 0 {
+        extra_sbs += seq_sb_count - full_sb_count;
+    }
+    let mut starts = Vec::with_capacity(target_tiles + 1);
+    let mut start_sb = 0usize;
+    while start_sb < seq_sb_count && starts.len() < target_tiles {
+        starts.push(start_sb);
+        start_sb += base_size_sb + usize::from(extra_sbs > 0);
+        extra_sbs = extra_sbs.saturating_sub(1);
+    }
+    starts.push(sb_count);
+    starts
 }
 
 fn align_power_of_two(value: usize, power: usize) -> usize {
@@ -1639,28 +1732,61 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
     profile: Av2Black444MvpProfile,
     ibc: Option<&Av2LocalIbc444>,
 ) -> Av2SyntaxPayload {
-    let tile_layout = Av2TileLayout::try_single_for_geometry(geometry)
-        .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry));
+    let tile_layout = if ibc.is_none() {
+        Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry)
+    } else {
+        Av2TileLayout::try_single_for_geometry(geometry)
+            .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry))
+    };
     let allow_intrabc = ibc.is_some();
     let mut payload =
         av2_mvp_444_closed_loop_key_header_payload(allow_intrabc, allow_intrabc, &tile_layout);
-    let tile_payloads: Vec<_> = tile_layout
-        .regions
-        .iter()
-        .map(|&region| {
-            av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields(
-                region,
-                profile,
-                geometry,
-                stream_format.chroma_format,
-                stream_format.bit_depth,
-                frame,
-                reconstruction,
-                ibc,
-                false,
-            )
+    let tile_payloads: Vec<_> = if ibc.is_none() && tile_layout.tile_count() > 1 {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = tile_layout
+                .regions
+                .iter()
+                .map(|&region| {
+                    scope.spawn(move || {
+                        av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields(
+                            region,
+                            profile,
+                            geometry,
+                            stream_format.chroma_format,
+                            stream_format.bit_depth,
+                            frame,
+                            false,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("AV2 tile entropy worker panicked"))
+                .collect()
         })
-        .collect();
+    } else {
+        tile_layout
+            .regions
+            .iter()
+            .map(|&region| {
+                av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    geometry,
+                    stream_format.chroma_format,
+                    stream_format.bit_depth,
+                    frame,
+                    reconstruction,
+                    ibc,
+                    false,
+                )
+            })
+            .collect()
+    };
+    if ibc.is_none() && tile_layout.tile_count() > 1 {
+        reconstruction.copy_from_slice(frame);
+    }
     let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
     let bit_offset = payload.bytes.len() * 8;
     payload.fields.push(syntax::Av2SyntaxField {

@@ -237,6 +237,36 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
     payload
 }
 
+pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    debug_assert!(matches!(
+        chroma_format,
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+    ));
+    debug_assert!(use_fast_lossless_subsampled_path(region));
+    let mut scratch_recon = vec![0; source.len()];
+    av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
+        region,
+        profile,
+        geometry,
+        chroma_format,
+        bit_depth,
+        source,
+        &mut scratch_recon,
+        Av2PartitionPolicy::LosslessAdaptive32,
+        Av2LosslessSubsampledModeSearch::FastScreenContent,
+        None,
+        record_fields,
+    )
+}
+
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
 const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 32;
 const AV2_LOSSLESS_BASE_LEAF_SIZE: usize = 16;
