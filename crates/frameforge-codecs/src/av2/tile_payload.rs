@@ -301,6 +301,9 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         recon,
     );
     plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless);
+    if mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
+        lossless.copy_source_to_recon_region();
+    }
     writer.finish()
 }
 

@@ -53,6 +53,7 @@ struct Av2LosslessSubsampledTileState<'a> {
     c_width: usize,
     c_height: usize,
     c_len: usize,
+    source_backed_recon: bool,
 }
 
 impl<'a> Av2LosslessSubsampledTileState<'a> {
@@ -87,6 +88,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             source.len(),
             "AV2 subsampled lossless reconstruction length must match source"
         );
+        let source_backed_recon = mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent;
         Self {
             geometry,
             region,
@@ -99,6 +101,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             c_width,
             c_height,
             c_len,
+            source_backed_recon,
         }
     }
 
@@ -168,6 +171,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn recon_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
+        if self.source_backed_recon {
+            return self.source_sample(plane, x, y);
+        }
         read_validated_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
     }
 
@@ -1815,6 +1821,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn copy_source_to_recon_txb(&mut self, plane: Av2LosslessPlane, x0: usize, y0: usize) {
+        if self.source_backed_recon {
+            return;
+        }
         let (plane_width, plane_height) = self.plane_geometry(plane);
         let bytes_per_sample = self.bit_depth.bytes_per_sample();
         for local_y in 0..TX4X4_SIZE {
@@ -1825,6 +1834,31 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             let row_samples = TX4X4_SIZE.min(plane_width.saturating_sub(x0));
             let offset = self.offset(plane, x0, y) * bytes_per_sample;
             let row_bytes = row_samples * bytes_per_sample;
+            self.recon[offset..offset + row_bytes]
+                .copy_from_slice(&self.source[offset..offset + row_bytes]);
+        }
+    }
+
+    fn copy_source_to_recon_region(&mut self) {
+        for plane in [Av2LosslessPlane::Y, Av2LosslessPlane::U, Av2LosslessPlane::V] {
+            self.copy_source_to_recon_plane_region(plane);
+        }
+    }
+
+    fn copy_source_to_recon_plane_region(&mut self, plane: Av2LosslessPlane) {
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        let (origin_x, origin_y) = self.plane_origin(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let end_x = ((self.region.origin_x + self.region.width).div_ceil(sub_x)).min(plane_width);
+        let end_y =
+            ((self.region.origin_y + self.region.height).div_ceil(sub_y)).min(plane_height);
+        if origin_x >= end_x || origin_y >= end_y {
+            return;
+        }
+        let bytes_per_sample = self.bit_depth.bytes_per_sample();
+        let row_bytes = (end_x - origin_x) * bytes_per_sample;
+        for y in origin_y..end_y {
+            let offset = self.offset(plane, origin_x, y) * bytes_per_sample;
             self.recon[offset..offset + row_bytes]
                 .copy_from_slice(&self.source[offset..offset + row_bytes]);
         }
