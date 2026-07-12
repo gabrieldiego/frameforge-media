@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -362,8 +363,8 @@ def run_case(
 
 
 def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    output_dir = args.out_dir / args.codec / args.set
-    log_dir = args.log_dir / args.codec
+    output_dir = (args.out_dir / args.codec / args.set).resolve()
+    log_dir = (args.log_dir / args.codec).resolve()
     if args.reference_backend != REFERENCE_BACKEND_NATIVE:
         output_dir = output_dir / args.reference_backend
         log_dir = log_dir / args.reference_backend
@@ -434,7 +435,48 @@ def reference_cache_valid(
         existing_metadata = json.loads(metadata_path.read_text())
     except json.JSONDecodeError:
         return False
-    return existing_metadata == expected_metadata
+    return cache_metadata_equivalent(existing_metadata, expected_metadata)
+
+
+def cache_metadata_equivalent(existing_metadata: dict, expected_metadata: dict) -> bool:
+    return normalize_cache_metadata(existing_metadata) == normalize_cache_metadata(
+        expected_metadata
+    )
+
+
+def normalize_cache_metadata(metadata: dict) -> dict:
+    normalized = copy.deepcopy(metadata)
+    if isinstance(normalized.get("input"), dict) and "path" in normalized["input"]:
+        normalized["input"]["path"] = normalize_cache_path(normalized["input"]["path"])
+    if (
+        isinstance(normalized.get("reference_encoder"), dict)
+        and "path" in normalized["reference_encoder"]
+    ):
+        normalized["reference_encoder"]["path"] = normalize_cache_path(
+            normalized["reference_encoder"]["path"]
+        )
+    if isinstance(normalized.get("reference_command"), list):
+        normalized["reference_command"] = [
+            normalize_cache_path(token) if isinstance(token, str) else token
+            for token in normalized["reference_command"]
+        ]
+    return normalized
+
+
+def normalize_cache_path(value: str) -> str:
+    if value.startswith("--"):
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return str(path.resolve(strict=False))
+    if (
+        value.startswith("./")
+        or value.startswith("../")
+        or "/" in value
+        or (REPO_ROOT / path).exists()
+    ):
+        return str((REPO_ROOT / path).resolve(strict=False))
+    return value
 
 
 def reference_cache_metadata(
