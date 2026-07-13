@@ -1293,7 +1293,7 @@ fn av2_entropy_payload_rate_key(payload: &entropy::Av2EntropyPayload) -> (usize,
     (payload.bytes.len(), payload.symbol_bits)
 }
 
-const AV2_LOSSLESS_RESIDUAL_SHORTCUT_SOURCE_DENOMINATOR: usize = 64;
+const AV2_LOSSLESS_RESIDUAL_SHORTCUT_SOURCE_DENOMINATOR: usize = 32;
 
 fn av2_lossless_residual_payload_is_decisive(
     payload: &entropy::Av2EntropyPayload,
