@@ -573,6 +573,36 @@ Raw totals for the lossless PSNR fast-path checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 10.10 fps.
 
+### Inter Skip-Only Leaf Merging
+
+The inter skip-only leaf merging checkpoint keeps larger merged predictive
+leaves only when every covered 8x8 block is an exact inter skip
+(`ZeroMv`/`NewMv`). Intra and zero-MV-residual portions of mixed predictive
+tiles now split back toward 8x8, recovering most of the bitrate lost by the
+homogeneous inter partition speedup while still retaining merged leaves for
+exact inter copies. The partition chooser also skips horizontal/vertical
+choices that do not have a valid subsize for the current block shape.
+
+| Vector | Previous Bytes | New Bytes | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 4,306,732 | 4,279,979 | -0.62% | 17.69 | 15.55 | -12.1% |
+| Scene 422 8-bit | 4,847,524 | 4,817,495 | -0.62% | 15.50 | 12.97 | -16.3% |
+| Scene 444 8-bit | 5,788,443 | 5,764,622 | -0.41% | 12.46 | 10.62 | -14.8% |
+| Mission 420 10-bit | 19,739,272 | 19,498,834 | -1.22% | 9.24 | 7.88 | -14.7% |
+| Mission 422 10-bit | 22,954,706 | 22,689,992 | -1.15% | 7.97 | 6.83 | -14.3% |
+| Mission 444 10-bit | 28,905,400 | 28,597,197 | -1.07% | 6.28 | 5.79 | -7.8% |
+| Total | 86,542,077 | 85,648,119 | -1.03% | 10.10 | 8.80 | -12.9% |
+
+Raw totals for the inter skip-only leaf merging checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,648,119.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 8.80 fps.
+- Compared with the pre-homogeneous-inter checkpoint, this is +7,209 bytes
+  (+0.008%) while remaining much faster than the 4.89 fps fixed-8x8
+  inter/intra payload path.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference

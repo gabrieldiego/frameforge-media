@@ -550,6 +550,20 @@ impl Av2LosslessInterTileBlockModes {
         }
         Some(first)
     }
+
+    fn homogeneous_skip_mode_for_leaf(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<Av2LosslessInterBlockMode> {
+        let mode = self.homogeneous_mode_for_leaf(row_mi, col_mi, block_size)?;
+        matches!(
+            mode,
+            Av2LosslessInterBlockMode::ZeroMv | Av2LosslessInterBlockMode::NewMv { .. }
+        )
+        .then_some(mode)
+    }
 }
 
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
@@ -808,7 +822,7 @@ fn choose_lossless_inter_partition(
     }
     if allowed.none
         && block_modes
-            .homogeneous_mode_for_leaf(row_mi, col_mi, block_size)
+            .homogeneous_skip_mode_for_leaf(row_mi, col_mi, block_size)
             .is_some()
     {
         return Av2MvpPartition::None;
@@ -816,7 +830,7 @@ fn choose_lossless_inter_partition(
 
     let mut best = None;
     for partition in [Av2MvpPartition::Horz, Av2MvpPartition::Vert] {
-        if !allowed.contains(partition) {
+        if !allowed.contains(partition) || block_size.subsize(partition).is_none() {
             continue;
         }
         let score =
@@ -860,7 +874,7 @@ fn lossless_inter_partition_homogeneous_area(
     };
     for (child_row_mi, child_col_mi) in children {
         if block_modes
-            .homogeneous_mode_for_leaf(child_row_mi, child_col_mi, subsize)
+            .homogeneous_skip_mode_for_leaf(child_row_mi, child_col_mi, subsize)
             .is_some()
         {
             score += subsize.width * subsize.height;
