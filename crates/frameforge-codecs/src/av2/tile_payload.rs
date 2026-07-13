@@ -320,6 +320,50 @@ pub(crate) fn av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fiel
     writer.finish()
 }
 
+pub(crate) fn av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    recon: &mut [u8],
+    palette: Option<&Av2LumaPalette444>,
+    block_modes: &Av2LosslessInterTileBlockModes,
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+        region,
+        profile,
+        chroma_format,
+        Av2PartitionPolicy::Fixed8x8Leaves,
+        false,
+        false,
+        None,
+        None,
+    );
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
+    let mut lossless = Av2LosslessSubsampledTileState::new(
+        geometry,
+        region,
+        chroma_format,
+        bit_depth,
+        Av2LosslessSubsampledModeSearch::FastScreenContent,
+        source,
+        recon,
+    );
+    plan.write_lossless_mixed_inter_intra_entropy(
+        &mut writer,
+        1,
+        block_modes,
+        &mut lossless,
+        palette,
+    );
+    lossless.copy_source_to_recon_region();
+    writer.finish()
+}
+
 pub(crate) fn av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
@@ -375,6 +419,7 @@ pub(crate) fn av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fie
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2LosslessInterBlockMode {
+    Intra,
     ZeroMv,
     NewMv { row_px: i16, col_px: i16 },
 }
@@ -1805,6 +1850,9 @@ impl Av2Black444TilePlan {
                     );
                     if partition == Av2MvpPartition::None {
                         match block_modes.mode_for_decision(*decision) {
+                            Av2LosslessInterBlockMode::Intra => {
+                                unreachable!("all-inter tile writer received an intra block")
+                            }
                             Av2LosslessInterBlockMode::ZeroMv => {
                                 write_inter_globalmv_skip(
                                     writer,
@@ -1868,6 +1916,379 @@ impl Av2Black444TilePlan {
                 | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::BlackDcResidualCoefficients
                 | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {}
+            }
+        }
+    }
+
+    fn write_lossless_mixed_inter_intra_entropy(
+        &self,
+        writer: &mut Av2EntropyWriter,
+        total_refs: usize,
+        block_modes: &Av2LosslessInterTileBlockModes,
+        lossless: &mut Av2LosslessSubsampledTileState<'_>,
+        palette: Option<&Av2LumaPalette444>,
+    ) {
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut txb_contexts =
+            Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut skip_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut coded_mi_context =
+            Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut palette_cache_context =
+            Av2PaletteColorCacheContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut luma_mode_context =
+            Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut fsc_mode_context =
+            Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut inter_context =
+            Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut mode_cache: Option<(Av2TileDecision, Av2LosslessSubsampledModeDecision)> = None;
+        let mut active_inter_leaf: Option<(usize, usize)> = None;
+        for decision in &self.decisions {
+            match decision.kind {
+                Av2TileDecisionKind::Partition(partition) => {
+                    active_inter_leaf = None;
+                    write_partition(
+                        writer,
+                        *decision,
+                        partition,
+                        &partition_context,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    if partition == Av2MvpPartition::None {
+                        match block_modes.mode_for_decision(*decision) {
+                            Av2LosslessInterBlockMode::Intra => {
+                                write_inter_intra_flag(writer, *decision, &inter_context, false);
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    false,
+                                    0,
+                                    false,
+                                    0,
+                                    0,
+                                );
+                            }
+                            Av2LosslessInterBlockMode::ZeroMv => {
+                                write_inter_globalmv_skip(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                );
+                                skip_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    false,
+                                    true,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    false,
+                                    0,
+                                    0,
+                                );
+                                txb_contexts.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    self.visible_rows_mi,
+                                    self.visible_cols_mi,
+                                    self.chroma_format,
+                                );
+                                coded_mi_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                palette_cache_context.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                lossless.copy_source_to_recon_leaf(
+                                    *decision,
+                                    self.visible_rows_mi,
+                                    self.visible_cols_mi,
+                                );
+                                active_inter_leaf = Some((decision.row, decision.col));
+                            }
+                            Av2LosslessInterBlockMode::NewMv { row_px, col_px } => {
+                                write_inter_newmv_skip(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                    row_px,
+                                    col_px,
+                                );
+                                skip_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    false,
+                                    true,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    true,
+                                    row_px,
+                                    col_px,
+                                );
+                                txb_contexts.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    self.visible_rows_mi,
+                                    self.visible_cols_mi,
+                                    self.chroma_format,
+                                );
+                                coded_mi_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                palette_cache_context.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                lossless.copy_source_to_recon_leaf(
+                                    *decision,
+                                    self.visible_rows_mi,
+                                    self.visible_cols_mi,
+                                );
+                                active_inter_leaf = Some((decision.row, decision.col));
+                            }
+                        }
+                        partition_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::IntrabcFlag(use_intrabc) => {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                        continue;
+                    }
+                    write_intrabc_flag(writer, *decision, &skip_context, use_intrabc);
+                }
+                Av2TileDecisionKind::IntrabcCopy {
+                    drl_idx,
+                    explicit_dv,
+                } => {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                        continue;
+                    }
+                    write_intrabc_copy(
+                        writer,
+                        *decision,
+                        &skip_context,
+                        self.profile_max_ref_bv_count(),
+                        drl_idx,
+                        explicit_dv,
+                    );
+                    skip_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        true,
+                        true,
+                    );
+                    txb_contexts.clear_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        self.chroma_format,
+                    );
+                    luma_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        Av2LumaIntraMode::Dc,
+                    );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        false,
+                    );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
+                    palette_cache_context.clear_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
+                    lossless.copy_source_to_recon_leaf(
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                }
+                Av2TileDecisionKind::IntraLumaMode {
+                    mode: _,
+                    use_dpcm_y: _,
+                    dpcm_horz: _,
+                    use_fsc: _,
+                } => {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                        continue;
+                    }
+                    let mode = cached_lossless_subsampled_mode(
+                        &mut mode_cache,
+                        lossless,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        &coded_mi_context,
+                        palette,
+                    );
+                    let coded_luma_mode = mode.coded_luma_mode();
+                    let mode_syntax = luma_mode_context.syntax_for_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
+                    let mode_index = mode_syntax.index_for(coded_luma_mode);
+                    write_intra_luma_mode(
+                        writer,
+                        *decision,
+                        coded_luma_mode,
+                        mode_syntax.context,
+                        mode_index,
+                        mode.luma_bdpcm_horz.is_some(),
+                        mode.luma_bdpcm_horz.unwrap_or(false),
+                        mode.use_fsc,
+                        3,
+                    );
+                    luma_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        coded_luma_mode,
+                    );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        mode.use_fsc,
+                    );
+                }
+                Av2TileDecisionKind::IntraChromaMode {
+                    use_bdpcm_uv: _,
+                    luma_mode: _,
+                    chroma_intra_mode: _,
+                } => {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                        continue;
+                    }
+                    let mode = cached_lossless_subsampled_mode(
+                        &mut mode_cache,
+                        lossless,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        &coded_mi_context,
+                        palette,
+                    );
+                    write_intra_chroma_mode(
+                        writer,
+                        *decision,
+                        mode.chroma_use_bdpcm,
+                        mode.coded_luma_mode(),
+                        mode.chroma_intra_mode,
+                    );
+                    if mode.use_luma_palette {
+                        if let Some(palette) = palette {
+                            write_luma_palette_mode_info(
+                                writer,
+                                *decision,
+                                palette,
+                                &mut palette_cache_context,
+                                self.origin_x,
+                                self.origin_y,
+                            );
+                            write_luma_palette_color_map(
+                                writer,
+                                *decision,
+                                palette,
+                                self.origin_x,
+                                self.origin_y,
+                            );
+                        }
+                    } else if (self.allow_intrabc || palette.is_some())
+                        && mode.coded_luma_mode() == Av2LumaIntraMode::Dc
+                        && mode.luma_bdpcm_horz.is_none()
+                    {
+                        write_luma_palette_absent_mode_info(
+                            writer,
+                            *decision,
+                            &mut palette_cache_context,
+                        );
+                    } else if palette.is_some() {
+                        palette_cache_context.clear_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::BlackDcResidualCoefficients => {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                        continue;
+                    }
+                    let mode = cached_lossless_subsampled_mode(
+                        &mut mode_cache,
+                        lossless,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        &coded_mi_context,
+                        palette,
+                    );
+                    write_lossless_subsampled_residual_coefficients(
+                        writer,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                        &mut txb_contexts,
+                        &coded_mi_context,
+                        lossless,
+                        mode,
+                        palette,
+                    );
+                    skip_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        false,
+                        false,
+                    );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
+                }
+                Av2TileDecisionKind::LumaPaletteModeInfo
+                | Av2TileDecisionKind::LumaPaletteColorMap
+                | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {
+                    unreachable!("AV2 planar lossless path emits palette inline")
+                }
             }
         }
     }
@@ -2343,6 +2764,14 @@ impl Av2InterModeContext {
             .checked_sub(1)
             .and_then(|row| self.state_at(row, col_mi))
     }
+}
+
+fn active_inter_leaf_matches(
+    active_inter_leaf: Option<(usize, usize)>,
+    decision: Av2TileDecision,
+) -> bool {
+    active_inter_leaf
+        .is_some_and(|(row, col)| row == decision.row && col == decision.col)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

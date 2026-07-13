@@ -22,6 +22,7 @@ use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
+    av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields,
@@ -1122,6 +1123,11 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                 .and_then(|map| lossless_tile_inter_block_modes(map, *region))
             {
                 Av2PredictiveTileMode::Mixed(blocks)
+            } else if let Some(blocks) = motion_map
+                .as_ref()
+                .and_then(|map| lossless_tile_inter_intra_block_modes(map, *region))
+            {
+                Av2PredictiveTileMode::MixedInterIntra(blocks)
             } else {
                 Av2PredictiveTileMode::Intra
             }
@@ -1177,6 +1183,20 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                     false,
                 )
             }
+            Av2PredictiveTileMode::MixedInterIntra(blocks) => {
+                av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    geometry,
+                    stream_format.chroma_format,
+                    stream_format.bit_depth,
+                    frame,
+                    &mut reconstruction,
+                    palette.as_ref(),
+                    blocks,
+                    false,
+                )
+            }
             Av2PredictiveTileMode::Intra => av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
                 region,
                 profile,
@@ -1218,6 +1238,7 @@ enum Av2PredictiveTileMode {
     ZeroMv,
     NewMv(Av2MotionVector),
     Mixed(Av2LosslessInterTileBlockModes),
+    MixedInterIntra(Av2LosslessInterTileBlockModes),
     Intra,
 }
 
@@ -1287,6 +1308,48 @@ fn lossless_tile_inter_block_modes(
         }
     }
     has_nonzero.then(|| Av2LosslessInterTileBlockModes::new(blocks_wide, blocks_high, blocks))
+}
+
+fn lossless_tile_inter_intra_block_modes(
+    motion_map: &Av2LosslessMotionMap,
+    region: Av2TileRegion,
+) -> Option<Av2LosslessInterTileBlockModes> {
+    if region.origin_x % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.origin_y % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.width % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.height % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+    {
+        return None;
+    }
+
+    let blocks_wide = region.width / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let blocks_high = region.height / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let mut blocks = Vec::with_capacity(blocks_wide * blocks_high);
+    let mut has_inter = false;
+    let mut has_intra = false;
+    for y in (region.origin_y..region.origin_y + region.height).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
+    {
+        for x in
+            (region.origin_x..region.origin_x + region.width).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
+        {
+            if let Some(block) = motion_map.candidate_at(x, y) {
+                has_inter = true;
+                if block.mv.row_px == 0 && block.mv.col_px == 0 {
+                    blocks.push(Av2LosslessInterBlockMode::ZeroMv);
+                } else {
+                    blocks.push(Av2LosslessInterBlockMode::NewMv {
+                        row_px: block.mv.row_px,
+                        col_px: block.mv.col_px,
+                    });
+                }
+            } else {
+                has_intra = true;
+                blocks.push(Av2LosslessInterBlockMode::Intra);
+            }
+        }
+    }
+    (has_inter && has_intra)
+        .then(|| Av2LosslessInterTileBlockModes::new(blocks_wide, blocks_high, blocks))
 }
 
 fn av2_order_hint_for_frame(frame_index: usize) -> u16 {

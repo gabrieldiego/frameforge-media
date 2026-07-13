@@ -153,6 +153,30 @@ Raw totals for the chunked planar hashing checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.15 fps.
 
+### Mixed Inter/Intra Tiles
+
+The mixed inter/intra tile checkpoint lets one fixed-8x8 regular-inter tile
+combine exact inter-copy leaves with normal lossless intra leaves. This avoids
+falling back to a full intra tile when only part of the tile has no exact
+motion match.
+
+| Vector | Previous Bytes | New Bytes | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 10,854,614 | 4,798,845 | -55.8% | 8.33 | 10.99 | +31.9% |
+| Scene 422 8-bit | 12,407,036 | 5,377,435 | -56.7% | 7.72 | 10.52 | +36.3% |
+| Scene 444 8-bit | 14,970,696 | 6,361,136 | -57.5% | 6.11 | 8.57 | +40.3% |
+| Mission 420 10-bit | 42,229,798 | 22,458,420 | -46.8% | 3.44 | 5.18 | +50.6% |
+| Mission 422 10-bit | 48,460,584 | 26,078,757 | -46.2% | 2.96 | 4.79 | +61.8% |
+| Mission 444 10-bit | 59,768,038 | 33,007,478 | -44.8% | 2.47 | 3.87 | +56.7% |
+| Total | 188,690,766 | 98,082,071 | -48.0% | 4.15 | 6.23 | +50.1% |
+
+Raw totals for the mixed inter/intra tile checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 98,082,071.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 6.23 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference
