@@ -65,6 +65,12 @@ def main() -> int:
         help="extra shell-style arguments appended to the reference encoder command",
     )
     parser.add_argument(
+        "--setting",
+        action="append",
+        default=[],
+        help="extra FrameForge --set key[=value] setting; repeat for multiple settings",
+    )
+    parser.add_argument(
         "--reference-backend",
         default=REFERENCE_BACKEND_NATIVE,
         help=(
@@ -312,6 +318,8 @@ def run_case(
     )
     if vector.lossless:
         frameforge_cmd.extend(["--set", "lossless"])
+    for setting in args.setting:
+        frameforge_cmd.extend(["--set", setting])
     reference_cmd = reference_encode_command(
         vector,
         vector_path,

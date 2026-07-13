@@ -9,6 +9,7 @@ make compare-compression CODEC=av2 \
   COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f \
   COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom \
   COMPRESSION_REFERENCE_PRESET=realtime-screen \
+  COMPRESSION_SETTINGS=predictive \
   COMPRESSION_DIRECT_SOURCE_FILES=1
 ```
 
