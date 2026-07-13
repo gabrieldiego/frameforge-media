@@ -6,7 +6,9 @@ mod decision;
 pub mod entropy;
 mod ibc;
 mod intra_prediction;
+mod motion;
 mod palette;
+mod planar;
 mod syntax;
 mod tile;
 

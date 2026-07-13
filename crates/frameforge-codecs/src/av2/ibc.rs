@@ -1,4 +1,5 @@
 use super::palette::Av2LumaPalette444;
+use super::planar::Av2PlanarYuvLayout;
 use super::tile::{
     av2_luma_palette_leaf_order_for_region, av2_mvp_8x8_leaf_order_for_region, Av2MvpLeafRegion,
 };
@@ -779,80 +780,17 @@ fn planar_yuv_8x8_regions_equal(
     ref_x0: usize,
     ref_y0: usize,
 ) -> bool {
-    let y_len = geometry.width * geometry.height;
-    let sub_x = match chroma_format {
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
-        Av2ChromaFormat::Yuv444 => 1,
-    };
-    let sub_y = match chroma_format {
-        Av2ChromaFormat::Yuv420 => 2,
-        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
-    };
-    let c_width = geometry.width / sub_x;
-    let c_height = geometry.height / sub_y;
-    let c_len = c_width * c_height;
-    let bytes_per_sample = bit_depth.bytes_per_sample();
-    let y_bytes = y_len * bytes_per_sample;
-    let c_bytes = c_len * bytes_per_sample;
-
-    if !plane_regions_equal(
-        &frame[..y_bytes],
-        geometry.width,
+    let layout = Av2PlanarYuvLayout::new(geometry, chroma_format, bit_depth)
+        .expect("AV2 IBC has already validated planar geometry");
+    layout.region_equal_in_frame(
+        frame,
         x0,
         y0,
         ref_x0,
         ref_y0,
         AV2_IBC_HASH_BLOCK_SIZE,
         AV2_IBC_HASH_BLOCK_SIZE,
-        bytes_per_sample,
-    ) {
-        return false;
-    }
-    let chroma_width = AV2_IBC_HASH_BLOCK_SIZE / sub_x;
-    let chroma_height = AV2_IBC_HASH_BLOCK_SIZE / sub_y;
-    for plane_data in [
-        &frame[y_bytes..y_bytes + c_bytes],
-        &frame[y_bytes + c_bytes..y_bytes + 2 * c_bytes],
-    ] {
-        if !plane_regions_equal(
-            plane_data,
-            c_width,
-            x0 / sub_x,
-            y0 / sub_y,
-            ref_x0 / sub_x,
-            ref_y0 / sub_y,
-            chroma_width,
-            chroma_height,
-            bytes_per_sample,
-        ) {
-            return false;
-        }
-    }
-    true
-}
-
-fn plane_regions_equal(
-    plane_data: &[u8],
-    stride: usize,
-    x0: usize,
-    y0: usize,
-    ref_x0: usize,
-    ref_y0: usize,
-    width: usize,
-    height: usize,
-    bytes_per_sample: usize,
-) -> bool {
-    let row_bytes = width * bytes_per_sample;
-    for local_y in 0..height {
-        let row_start = ((y0 + local_y) * stride + x0) * bytes_per_sample;
-        let ref_row_start = ((ref_y0 + local_y) * stride + ref_x0) * bytes_per_sample;
-        if &plane_data[row_start..row_start + row_bytes]
-            != &plane_data[ref_row_start..ref_row_start + row_bytes]
-        {
-            return false;
-        }
-    }
-    true
+    )
 }
 
 fn mix_ibc_hash_packet(hash: u32, packet: &[u8], component: u32, sample_offset: u32) -> u32 {
