@@ -1293,6 +1293,8 @@ fn av2_entropy_payload_rate_key(payload: &entropy::Av2EntropyPayload) -> (usize,
     (payload.bytes.len(), payload.symbol_bits)
 }
 
+const AV2_LOSSLESS_RESIDUAL_SHORTCUT_SOURCE_DENOMINATOR: usize = 64;
+
 fn av2_lossless_residual_payload_is_decisive(
     payload: &entropy::Av2EntropyPayload,
     region: Av2TileRegion,
@@ -1306,7 +1308,7 @@ fn av2_lossless_residual_payload_is_decisive(
     };
     let source_bytes =
         (region.width * region.height + chroma_samples) * bit_depth.bytes_per_sample();
-    payload.bytes.len() * 96 <= source_bytes
+    payload.bytes.len() * AV2_LOSSLESS_RESIDUAL_SHORTCUT_SOURCE_DENOMINATOR <= source_bytes
 }
 
 fn uniform_lossless_tile_motion(

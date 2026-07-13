@@ -326,6 +326,30 @@ Raw totals for the residual payload shortcut checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.25 fps.
 
+### Residual Shortcut Threshold Tuning
+
+The residual shortcut threshold tuning makes the tile-source-size budget
+explicit and relaxes it from 1/96 to 1/64 of the source bytes covered by the
+tile. The 50-frame baseline keeps identical bitstream sizes while avoiding more
+intra fallback searches.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 8.16 | 8.50 | +4.2% |
+| Scene 422 8-bit | 0 | 7.54 | 7.94 | +5.3% |
+| Scene 444 8-bit | 0 | 6.85 | 7.00 | +2.2% |
+| Mission 420 10-bit | 0 | 3.54 | 3.65 | +3.1% |
+| Mission 422 10-bit | 0 | 3.05 | 3.16 | +3.6% |
+| Mission 444 10-bit | 0 | 2.50 | 2.59 | +3.6% |
+| Total | 0 | 4.25 | 4.40 | +3.5% |
+
+Raw totals for the residual shortcut threshold tuning checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,632,514.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.40 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference
