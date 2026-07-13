@@ -270,6 +270,137 @@ fn write_lossless_subsampled_residual_coefficients(
     }
 }
 
+fn write_lossless_inter_residual_coefficients(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    contexts: &mut Av2TxbEntropyContexts,
+    lossless: &mut Av2LosslessSubsampledTileState<'_>,
+    reference: &[u8],
+    mv_row_px: i16,
+    mv_col_px: i16,
+) {
+    let txb_width = decision
+        .block_size
+        .tx4x4_width()
+        .min(visible_cols_mi.saturating_sub(decision.col));
+    let txb_height = decision
+        .block_size
+        .tx4x4_height()
+        .min(visible_rows_mi.saturating_sub(decision.row));
+    for row in 0..txb_height {
+        let abs_row = decision.row + row;
+        for col in 0..txb_width {
+            let abs_col = decision.col + col;
+            let skip_ctx =
+                luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
+            let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
+            let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::Y, abs_col, abs_row);
+            let residual = lossless.inter_residual4x4(
+                reference,
+                Av2LosslessPlane::Y,
+                x0,
+                y0,
+                mv_row_px,
+                mv_col_px,
+            );
+            let (context, _) = if tx4x4_residual_is_zero(&residual) {
+                write_y_txb_all_zero(writer, skip_ctx);
+                (0, false)
+            } else {
+                let coefficients = tx4x4_coefficients_from_residual(&residual, false);
+                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+            };
+            lossless.copy_source_to_recon_txb(Av2LosslessPlane::Y, x0, y0);
+            contexts.y_above[abs_col] = context;
+            contexts.y_left[abs_row] = context;
+        }
+    }
+
+    let chroma_span = chroma_tx4x4_span(
+        decision,
+        visible_rows_mi,
+        visible_cols_mi,
+        lossless.chroma_format,
+    );
+    let mut last_u_txb_nonzero = false;
+    for row in 0..chroma_span.height {
+        let abs_row = chroma_span.row + row;
+        for col in 0..chroma_span.width {
+            let abs_col = chroma_span.col + col;
+            let skip_ctx =
+                chroma_txb_skip_base_context(contexts.u_above[abs_col], contexts.u_left[abs_row])
+                    + 6;
+            let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::U, abs_col, abs_row);
+            let residual = lossless.inter_residual4x4(
+                reference,
+                Av2LosslessPlane::U,
+                x0,
+                y0,
+                mv_row_px,
+                mv_col_px,
+            );
+            let (context, nonzero) = if tx4x4_residual_is_zero(&residual) {
+                write_u_txb_all_zero(writer, skip_ctx, false);
+                (0, false)
+            } else {
+                let coefficients = tx4x4_coefficients_from_residual(&residual, false);
+                write_chroma_bdpcm_txb(
+                    writer,
+                    Av2ChromaPlane::U,
+                    skip_ctx,
+                    &coefficients,
+                    false,
+                )
+            };
+            lossless.copy_source_to_recon_txb(Av2LosslessPlane::U, x0, y0);
+            contexts.u_above[abs_col] = context;
+            contexts.u_left[abs_row] = context;
+            last_u_txb_nonzero = nonzero;
+        }
+    }
+
+    for row in 0..chroma_span.height {
+        let abs_row = chroma_span.row + row;
+        for col in 0..chroma_span.width {
+            let abs_col = chroma_span.col + col;
+            let skip_ctx = v_txb_skip_context_for_chroma_format(
+                contexts.v_above[abs_col],
+                contexts.v_left[abs_row],
+                last_u_txb_nonzero,
+                lossless.chroma_format,
+                decision.block_size,
+            );
+            let (x0, y0) = lossless.txb_origin(Av2LosslessPlane::V, abs_col, abs_row);
+            let residual = lossless.inter_residual4x4(
+                reference,
+                Av2LosslessPlane::V,
+                x0,
+                y0,
+                mv_row_px,
+                mv_col_px,
+            );
+            let (context, _) = if tx4x4_residual_is_zero(&residual) {
+                write_v_txb_all_zero(writer, skip_ctx);
+                (0, false)
+            } else {
+                let coefficients = tx4x4_coefficients_from_residual(&residual, false);
+                write_chroma_bdpcm_txb(
+                    writer,
+                    Av2ChromaPlane::V,
+                    skip_ctx,
+                    &coefficients,
+                    false,
+                )
+            };
+            lossless.copy_source_to_recon_txb(Av2LosslessPlane::V, x0, y0);
+            contexts.v_above[abs_col] = context;
+            contexts.v_left[abs_row] = context;
+        }
+    }
+}
+
 fn write_luma_palette_residual_coefficients(
     writer: &mut Av2EntropyWriter,
     decision: Av2TileDecision,

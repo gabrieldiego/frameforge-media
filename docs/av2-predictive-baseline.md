@@ -251,6 +251,31 @@ Raw totals for the sorted reference hash index checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 6.06 fps.
 
+### Residual Inter Tile Candidate
+
+The residual inter tile candidate lets a mixed inter/intra tile compare the old
+intra fallback against a zero-MV inter block with coded residual coefficients.
+This is an intentionally conservative first step: the encoder keeps whichever
+candidate has the smaller entropy payload for each tile, so the bitstream gains
+compression before the residual mode-selection path is optimized for speed.
+
+| Vector | Previous Bytes | New Bytes | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 4,768,470 | 4,280,592 | -10.2% | 10.53 | 7.52 | -28.6% |
+| Scene 422 8-bit | 5,338,169 | 4,816,324 | -9.8% | 9.94 | 7.06 | -29.0% |
+| Scene 444 8-bit | 6,313,168 | 5,762,473 | -8.7% | 8.12 | 6.02 | -25.9% |
+| Mission 420 10-bit | 22,443,304 | 19,494,499 | -13.1% | 5.17 | 3.37 | -34.8% |
+| Mission 422 10-bit | 26,062,159 | 22,685,653 | -13.0% | 4.59 | 2.93 | -36.2% |
+| Mission 444 10-bit | 32,989,639 | 28,592,973 | -13.3% | 3.83 | 2.28 | -40.5% |
+| Total | 97,914,909 | 85,632,514 | -12.5% | 6.06 | 3.96 | -34.7% |
+
+Raw totals for the residual inter tile candidate checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,632,514.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 3.96 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference

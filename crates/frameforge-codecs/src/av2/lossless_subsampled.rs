@@ -177,6 +177,16 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         read_validated_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
     }
 
+    fn reference_sample(
+        &self,
+        reference: &[u8],
+        plane: Av2LosslessPlane,
+        x: usize,
+        y: usize,
+    ) -> Av2Sample {
+        read_validated_planar_sample(reference, self.offset(plane, x, y), self.bit_depth)
+    }
+
     fn recon_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
         if self.source_backed_recon {
             return self.source_sample(plane, x, y);
@@ -462,6 +472,47 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 residual[local_y * TX4X4_SIZE + local_x] =
                     i32::from(self.source_sample(Av2LosslessPlane::Y, x, y))
                         - i32::from(palette.region_prediction_sample(region, x, y));
+            }
+        }
+        residual
+    }
+
+    fn inter_residual4x4(
+        &self,
+        reference: &[u8],
+        plane: Av2LosslessPlane,
+        x0: usize,
+        y0: usize,
+        mv_row_px: i16,
+        mv_col_px: i16,
+    ) -> [i32; TX4X4_SAMPLES] {
+        assert_eq!(
+            reference.len(),
+            self.source.len(),
+            "AV2 inter residual reference length must match source"
+        );
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        debug_assert_eq!(usize::from(mv_col_px.unsigned_abs()) % sub_x, 0);
+        debug_assert_eq!(usize::from(mv_row_px.unsigned_abs()) % sub_y, 0);
+        let ref_x0 = x0 as isize + isize::from(mv_col_px) / sub_x as isize;
+        let ref_y0 = y0 as isize + isize::from(mv_row_px) / sub_y as isize;
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        assert!(ref_x0 >= 0 && ref_y0 >= 0, "AV2 inter residual reference is out of bounds");
+        let ref_x0 = ref_x0 as usize;
+        let ref_y0 = ref_y0 as usize;
+        assert!(
+            ref_x0 + TX4X4_SIZE <= plane_width && ref_y0 + TX4X4_SIZE <= plane_height,
+            "AV2 inter residual reference is out of bounds"
+        );
+
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
+                let reference_sample =
+                    self.reference_sample(reference, plane, ref_x0 + local_x, ref_y0 + local_y);
+                residual[local_y * TX4X4_SIZE + local_x] =
+                    i32::from(source_sample) - i32::from(reference_sample);
             }
         }
         residual

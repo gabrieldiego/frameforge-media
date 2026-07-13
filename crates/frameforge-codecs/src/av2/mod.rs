@@ -1123,11 +1123,18 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                 .and_then(|map| lossless_tile_inter_block_modes(map, *region))
             {
                 Av2PredictiveTileMode::Mixed(blocks)
-            } else if let Some(blocks) = motion_map
+            } else if let Some(intra_blocks) = motion_map
                 .as_ref()
                 .and_then(|map| lossless_tile_inter_intra_block_modes(map, *region))
             {
-                Av2PredictiveTileMode::MixedInterIntra(blocks)
+                let residual_blocks = motion_map
+                    .as_ref()
+                    .and_then(|map| lossless_tile_inter_residual_block_modes(map, *region))
+                    .expect("mixed inter/intra blocks should also form residual candidates");
+                Av2PredictiveTileMode::MixedInterIntraOrResidual {
+                    intra_blocks,
+                    residual_blocks,
+                }
             } else {
                 Av2PredictiveTileMode::Intra
             }
@@ -1183,8 +1190,51 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                     false,
                 )
             }
-            Av2PredictiveTileMode::MixedInterIntra(blocks) => {
-                av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+            Av2PredictiveTileMode::MixedInterIntraOrResidual {
+                intra_blocks,
+                residual_blocks,
+            } => {
+                let mut intra_reconstruction = reconstruction.clone();
+                let intra_payload =
+                    av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                        region,
+                        profile,
+                        geometry,
+                        stream_format.chroma_format,
+                        stream_format.bit_depth,
+                        frame,
+                        reference,
+                        &mut intra_reconstruction,
+                        palette.as_ref(),
+                        intra_blocks,
+                        false,
+                    );
+                let mut residual_reconstruction = reconstruction.clone();
+                let residual_payload =
+                    av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                        region,
+                        profile,
+                        geometry,
+                        stream_format.chroma_format,
+                        stream_format.bit_depth,
+                        frame,
+                        reference,
+                        &mut residual_reconstruction,
+                        palette.as_ref(),
+                        residual_blocks,
+                        false,
+                    );
+                if av2_entropy_payload_rate_key(&residual_payload)
+                    < av2_entropy_payload_rate_key(&intra_payload)
+                {
+                    reconstruction = residual_reconstruction;
+                    residual_payload
+                } else {
+                    reconstruction = intra_reconstruction;
+                    intra_payload
+                }
+            }
+            Av2PredictiveTileMode::Intra => av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
                     region,
                     profile,
                     geometry,
@@ -1193,21 +1243,8 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                     frame,
                     &mut reconstruction,
                     palette.as_ref(),
-                    blocks,
                     false,
-                )
-            }
-            Av2PredictiveTileMode::Intra => av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
-                region,
-                profile,
-                geometry,
-                stream_format.chroma_format,
-                stream_format.bit_depth,
-                frame,
-                &mut reconstruction,
-                palette.as_ref(),
-                false,
-            ),
+                ),
         };
         tile_payloads.push(payload);
     }
@@ -1238,8 +1275,15 @@ enum Av2PredictiveTileMode {
     ZeroMv,
     NewMv(Av2MotionVector),
     Mixed(Av2LosslessInterTileBlockModes),
-    MixedInterIntra(Av2LosslessInterTileBlockModes),
+    MixedInterIntraOrResidual {
+        intra_blocks: Av2LosslessInterTileBlockModes,
+        residual_blocks: Av2LosslessInterTileBlockModes,
+    },
     Intra,
+}
+
+fn av2_entropy_payload_rate_key(payload: &entropy::Av2EntropyPayload) -> (usize, usize) {
+    (payload.bytes.len(), payload.symbol_bits)
 }
 
 fn uniform_lossless_tile_motion(
@@ -1314,6 +1358,25 @@ fn lossless_tile_inter_intra_block_modes(
     motion_map: &Av2LosslessMotionMap,
     region: Av2TileRegion,
 ) -> Option<Av2LosslessInterTileBlockModes> {
+    lossless_tile_mixed_inter_block_modes(motion_map, region, Av2LosslessInterBlockMode::Intra)
+}
+
+fn lossless_tile_inter_residual_block_modes(
+    motion_map: &Av2LosslessMotionMap,
+    region: Av2TileRegion,
+) -> Option<Av2LosslessInterTileBlockModes> {
+    lossless_tile_mixed_inter_block_modes(
+        motion_map,
+        region,
+        Av2LosslessInterBlockMode::ZeroMvResidual,
+    )
+}
+
+fn lossless_tile_mixed_inter_block_modes(
+    motion_map: &Av2LosslessMotionMap,
+    region: Av2TileRegion,
+    missing_block_mode: Av2LosslessInterBlockMode,
+) -> Option<Av2LosslessInterTileBlockModes> {
     if region.origin_x % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
         || region.origin_y % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
         || region.width % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
@@ -1325,15 +1388,13 @@ fn lossless_tile_inter_intra_block_modes(
     let blocks_wide = region.width / AV2_LOSSLESS_ME_BLOCK_SIZE;
     let blocks_high = region.height / AV2_LOSSLESS_ME_BLOCK_SIZE;
     let mut blocks = Vec::with_capacity(blocks_wide * blocks_high);
-    let mut has_inter = false;
-    let mut has_intra = false;
+    let mut exact_inter_blocks = 0usize;
     for y in (region.origin_y..region.origin_y + region.height).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
     {
         for x in
             (region.origin_x..region.origin_x + region.width).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
         {
             if let Some(block) = motion_map.candidate_at(x, y) {
-                has_inter = true;
                 if block.mv.row_px == 0 && block.mv.col_px == 0 {
                     blocks.push(Av2LosslessInterBlockMode::ZeroMv);
                 } else {
@@ -1342,14 +1403,20 @@ fn lossless_tile_inter_intra_block_modes(
                         col_px: block.mv.col_px,
                     });
                 }
+                exact_inter_blocks += 1;
             } else {
-                has_intra = true;
-                blocks.push(Av2LosslessInterBlockMode::Intra);
+                blocks.push(missing_block_mode);
             }
         }
     }
-    (has_inter && has_intra)
-        .then(|| Av2LosslessInterTileBlockModes::new(blocks_wide, blocks_high, blocks))
+    if exact_inter_blocks == 0 || exact_inter_blocks == blocks.len() {
+        return None;
+    }
+    Some(Av2LosslessInterTileBlockModes::new(
+        blocks_wide,
+        blocks_high,
+        blocks,
+    ))
 }
 
 fn av2_order_hint_for_frame(frame_index: usize) -> u16 {

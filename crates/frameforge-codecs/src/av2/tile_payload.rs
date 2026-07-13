@@ -327,6 +327,7 @@ pub(crate) fn av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_wit
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     source: &[u8],
+    reference: &[u8],
     recon: &mut [u8],
     palette: Option<&Av2LumaPalette444>,
     block_modes: &Av2LosslessInterTileBlockModes,
@@ -358,6 +359,7 @@ pub(crate) fn av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_wit
         1,
         block_modes,
         &mut lossless,
+        reference,
         palette,
     );
     lossless.copy_source_to_recon_region();
@@ -421,6 +423,7 @@ pub(crate) fn av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fie
 pub(crate) enum Av2LosslessInterBlockMode {
     Intra,
     ZeroMv,
+    ZeroMvResidual,
     NewMv { row_px: i16, col_px: i16 },
 }
 
@@ -1851,7 +1854,12 @@ impl Av2Black444TilePlan {
                     if partition == Av2MvpPartition::None {
                         match block_modes.mode_for_decision(*decision) {
                             Av2LosslessInterBlockMode::Intra => {
-                                unreachable!("all-inter tile writer received an intra block")
+                                unreachable!("all-inter skip tile writer received an intra block")
+                            }
+                            Av2LosslessInterBlockMode::ZeroMvResidual => {
+                                unreachable!(
+                                    "all-inter skip tile writer received a residual block"
+                                )
                             }
                             Av2LosslessInterBlockMode::ZeroMv => {
                                 write_inter_globalmv_skip(
@@ -1926,6 +1934,7 @@ impl Av2Black444TilePlan {
         total_refs: usize,
         block_modes: &Av2LosslessInterTileBlockModes,
         lossless: &mut Av2LosslessSubsampledTileState<'_>,
+        reference: &[u8],
         palette: Option<&Av2LumaPalette444>,
     ) {
         let mut partition_context =
@@ -1945,7 +1954,7 @@ impl Av2Black444TilePlan {
         let mut inter_context =
             Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut mode_cache: Option<(Av2TileDecision, Av2LosslessSubsampledModeDecision)> = None;
-        let mut active_inter_leaf: Option<(usize, usize)> = None;
+        let mut active_inter_leaf: Option<Av2ActiveInterLeaf> = None;
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -2021,7 +2030,45 @@ impl Av2Black444TilePlan {
                                     self.visible_rows_mi,
                                     self.visible_cols_mi,
                                 );
-                                active_inter_leaf = Some((decision.row, decision.col));
+                                active_inter_leaf = Some(Av2ActiveInterLeaf::Skip {
+                                    row: decision.row,
+                                    col: decision.col,
+                                });
+                            }
+                            Av2LosslessInterBlockMode::ZeroMvResidual => {
+                                write_inter_globalmv_residual(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                );
+                                skip_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    false,
+                                    false,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    false,
+                                    0,
+                                    0,
+                                );
+                                palette_cache_context.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                active_inter_leaf = Some(Av2ActiveInterLeaf::ZeroMvResidual {
+                                    row: decision.row,
+                                    col: decision.col,
+                                });
                             }
                             Av2LosslessInterBlockMode::NewMv { row_px, col_px } => {
                                 write_inter_newmv_skip(
@@ -2073,7 +2120,10 @@ impl Av2Black444TilePlan {
                                     self.visible_rows_mi,
                                     self.visible_cols_mi,
                                 );
-                                active_inter_leaf = Some((decision.row, decision.col));
+                                active_inter_leaf = Some(Av2ActiveInterLeaf::Skip {
+                                    row: decision.row,
+                                    col: decision.col,
+                                });
                             }
                         }
                         partition_context.update_leaf(
@@ -2084,7 +2134,7 @@ impl Av2Black444TilePlan {
                     }
                 }
                 Av2TileDecisionKind::IntrabcFlag(use_intrabc) => {
-                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision).is_some() {
                         continue;
                     }
                     write_intrabc_flag(writer, *decision, &skip_context, use_intrabc);
@@ -2093,7 +2143,7 @@ impl Av2Black444TilePlan {
                     drl_idx,
                     explicit_dv,
                 } => {
-                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision).is_some() {
                         continue;
                     }
                     write_intrabc_copy(
@@ -2149,7 +2199,7 @@ impl Av2Black444TilePlan {
                     dpcm_horz: _,
                     use_fsc: _,
                 } => {
-                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision).is_some() {
                         continue;
                     }
                     let mode = cached_lossless_subsampled_mode(
@@ -2197,7 +2247,7 @@ impl Av2Black444TilePlan {
                     luma_mode: _,
                     chroma_intra_mode: _,
                 } => {
-                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
+                    if active_inter_leaf_matches(active_inter_leaf, *decision).is_some() {
                         continue;
                     }
                     let mode = cached_lossless_subsampled_mode(
@@ -2252,8 +2302,31 @@ impl Av2Black444TilePlan {
                     }
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
-                    if active_inter_leaf_matches(active_inter_leaf, *decision) {
-                        continue;
+                    if let Some(active_inter_leaf) =
+                        active_inter_leaf_matches(active_inter_leaf, *decision)
+                    {
+                        match active_inter_leaf {
+                            Av2ActiveInterLeaf::Skip { .. } => continue,
+                            Av2ActiveInterLeaf::ZeroMvResidual { .. } => {
+                                write_lossless_inter_residual_coefficients(
+                                    writer,
+                                    *decision,
+                                    self.visible_rows_mi,
+                                    self.visible_cols_mi,
+                                    &mut txb_contexts,
+                                    lossless,
+                                    reference,
+                                    0,
+                                    0,
+                                );
+                                coded_mi_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                continue;
+                            }
+                        }
                     }
                     let mode = cached_lossless_subsampled_mode(
                         &mut mode_cache,
@@ -2766,12 +2839,27 @@ impl Av2InterModeContext {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Av2ActiveInterLeaf {
+    Skip { row: usize, col: usize },
+    ZeroMvResidual { row: usize, col: usize },
+}
+
+impl Av2ActiveInterLeaf {
+    fn origin(self) -> (usize, usize) {
+        match self {
+            Self::Skip { row, col } | Self::ZeroMvResidual { row, col } => (row, col),
+        }
+    }
+}
+
 fn active_inter_leaf_matches(
-    active_inter_leaf: Option<(usize, usize)>,
+    active_inter_leaf: Option<Av2ActiveInterLeaf>,
     decision: Av2TileDecision,
-) -> bool {
-    active_inter_leaf
-        .is_some_and(|(row, col)| row == decision.row && col == decision.col)
+) -> Option<Av2ActiveInterLeaf> {
+    let active_inter_leaf = active_inter_leaf?;
+    let (row, col) = active_inter_leaf.origin();
+    (row == decision.row && col == decision.col).then_some(active_inter_leaf)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2798,6 +2886,52 @@ fn write_inter_globalmv_skip(
         "tile.inter.skip_txfm",
         skip_ctx,
         1,
+        &mut skip_cdf,
+        2,
+        false,
+    );
+
+    if total_refs > 1 {
+        let single_ref_ctx = inter_context.single_ref_ctx(decision.row, decision.col, 0, total_refs);
+        let mut single_ref_cdf = DEFAULT_SINGLE_REF_CDFS[single_ref_ctx][0];
+        writer.write_symbol_with_key(
+            "tile.inter.single_ref",
+            single_ref_ctx,
+            1,
+            &mut single_ref_cdf,
+            2,
+            false,
+        );
+    }
+
+    let mode_ctx =
+        inter_context.inter_single_mode_ctx(decision.row, decision.col, decision.block_size, 0);
+    let mut mode_cdf = DEFAULT_INTER_SINGLE_MODE_CDFS[mode_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.single_mode",
+        mode_ctx,
+        1,
+        &mut mode_cdf,
+        3,
+        false,
+    );
+}
+
+fn write_inter_globalmv_residual(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    skip_context: &Av2IntrabcContext,
+    inter_context: &Av2InterModeContext,
+    total_refs: usize,
+) {
+    write_inter_intra_flag(writer, decision, inter_context, true);
+
+    let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
+    let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.skip_txfm",
+        skip_ctx,
+        0,
         &mut skip_cdf,
         2,
         false,
