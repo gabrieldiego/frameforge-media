@@ -5,7 +5,7 @@ use super::{Av2ChromaFormat, Av2VideoGeometry};
 use crate::picture::SampleBitDepth;
 
 pub(crate) const AV2_LOSSLESS_ME_BLOCK_SIZE: usize = 8;
-const AV2_LOSSLESS_ME_SEARCH_STEPS: [i16; 4] = [8, 16, 32, 64];
+const AV2_LOSSLESS_ME_SEARCH_BLOCK_STEPS: [i16; 4] = [1, 2, 4, 8];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Av2MotionVector {
@@ -18,6 +18,40 @@ impl Av2MotionVector {
         Self {
             row_px: 0,
             col_px: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2BlockMotionVector {
+    row_blocks: i16,
+    col_blocks: i16,
+}
+
+impl Av2BlockMotionVector {
+    fn zero() -> Self {
+        Self {
+            row_blocks: 0,
+            col_blocks: 0,
+        }
+    }
+
+    fn from_pixel_mv(mv: Av2MotionVector) -> Option<Self> {
+        if mv.row_px % AV2_LOSSLESS_ME_BLOCK_SIZE as i16 != 0
+            || mv.col_px % AV2_LOSSLESS_ME_BLOCK_SIZE as i16 != 0
+        {
+            return None;
+        }
+        Some(Self {
+            row_blocks: mv.row_px / AV2_LOSSLESS_ME_BLOCK_SIZE as i16,
+            col_blocks: mv.col_px / AV2_LOSSLESS_ME_BLOCK_SIZE as i16,
+        })
+    }
+
+    fn to_pixel_mv(self) -> Av2MotionVector {
+        Av2MotionVector {
+            row_px: self.row_blocks * AV2_LOSSLESS_ME_BLOCK_SIZE as i16,
+            col_px: self.col_blocks * AV2_LOSSLESS_ME_BLOCK_SIZE as i16,
         }
     }
 }
@@ -87,7 +121,7 @@ enum Av2MotionCandidateSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Av2MotionCandidate {
-    mv: Av2MotionVector,
+    mv: Av2BlockMotionVector,
     source: Av2MotionCandidateSource,
 }
 
@@ -232,7 +266,9 @@ fn build_lossless_motion_map_with_regions(
                             stats.selected_local_search_blocks += 1
                         }
                     }
-                    selected = Some(Av2LosslessInterBlock { mv: candidate.mv });
+                    selected = Some(Av2LosslessInterBlock {
+                        mv: candidate.mv.to_pixel_mv(),
+                    });
                     break;
                 }
             }
@@ -330,7 +366,7 @@ fn motion_candidates(
     candidates.clear();
     push_unique_candidate(
         candidates,
-        Av2MotionVector::zero(),
+        Av2BlockMotionVector::zero(),
         Av2MotionCandidateSource::Zero,
     );
 
@@ -349,7 +385,9 @@ fn motion_candidates(
     {
         if neighbor_x < blocks_wide && neighbor_y < blocks_high {
             if let Some(block) = blocks[neighbor_y * blocks_wide + neighbor_x] {
-                push_unique_candidate(candidates, block.mv, Av2MotionCandidateSource::Neighbor);
+                if let Some(mv) = Av2BlockMotionVector::from_pixel_mv(block.mv) {
+                    push_unique_candidate(candidates, mv, Av2MotionCandidateSource::Neighbor);
+                }
             }
         }
     }
@@ -357,7 +395,7 @@ fn motion_candidates(
     let predictor_count = candidates.len();
     for predictor_index in 0..predictor_count {
         let predictor = candidates[predictor_index].mv;
-        for step in AV2_LOSSLESS_ME_SEARCH_STEPS {
+        for step in AV2_LOSSLESS_ME_SEARCH_BLOCK_STEPS {
             for (row_delta, col_delta) in [
                 (-step, 0),
                 (0, -step),
@@ -378,7 +416,7 @@ fn motion_candidates(
 
 fn push_unique_candidate(
     candidates: &mut Vec<Av2MotionCandidate>,
-    mv: Av2MotionVector,
+    mv: Av2BlockMotionVector,
     source: Av2MotionCandidateSource,
 ) {
     if candidates.iter().any(|candidate| candidate.mv == mv) {
@@ -388,13 +426,13 @@ fn push_unique_candidate(
 }
 
 fn offset_motion_vector(
-    predictor: Av2MotionVector,
+    predictor: Av2BlockMotionVector,
     row_delta: i16,
     col_delta: i16,
-) -> Option<Av2MotionVector> {
-    Some(Av2MotionVector {
-        row_px: predictor.row_px.checked_add(row_delta)?,
-        col_px: predictor.col_px.checked_add(col_delta)?,
+) -> Option<Av2BlockMotionVector> {
+    Some(Av2BlockMotionVector {
+        row_blocks: predictor.row_blocks.checked_add(row_delta)?,
+        col_blocks: predictor.col_blocks.checked_add(col_delta)?,
     })
 }
 
@@ -403,17 +441,10 @@ fn reference_block_for_mv(
     blocks_high: usize,
     block_x: usize,
     block_y: usize,
-    mv: Av2MotionVector,
+    mv: Av2BlockMotionVector,
 ) -> Option<(usize, usize, usize, usize)> {
-    if mv.row_px % AV2_LOSSLESS_ME_BLOCK_SIZE as i16 != 0
-        || mv.col_px % AV2_LOSSLESS_ME_BLOCK_SIZE as i16 != 0
-    {
-        return None;
-    }
-    let ref_block_x = (block_x as isize)
-        .checked_add(isize::from(mv.col_px) / AV2_LOSSLESS_ME_BLOCK_SIZE as isize)?;
-    let ref_block_y = (block_y as isize)
-        .checked_add(isize::from(mv.row_px) / AV2_LOSSLESS_ME_BLOCK_SIZE as isize)?;
+    let ref_block_x = (block_x as isize).checked_add(isize::from(mv.col_blocks))?;
+    let ref_block_y = (block_y as isize).checked_add(isize::from(mv.row_blocks))?;
     if ref_block_x < 0
         || ref_block_y < 0
         || ref_block_x >= blocks_wide as isize

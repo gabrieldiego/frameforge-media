@@ -177,6 +177,31 @@ Raw totals for the mixed inter/intra tile checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 6.23 fps.
 
+### Block-Unit Motion Search
+
+The block-unit motion-search cleanup keeps candidate ordering and final pixel
+motion vectors unchanged, but carries internal candidates in 8x8 block units to
+avoid repeated per-candidate divisibility and division work. Bitstreams stayed
+byte-identical to the mixed inter/intra tile checkpoint; measured fps changes
+are within run-to-run noise on the six-vector pass.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 10.99 | 10.66 | -3.0% |
+| Scene 422 8-bit | 0 | 10.52 | 10.50 | -0.2% |
+| Scene 444 8-bit | 0 | 8.57 | 8.92 | +4.1% |
+| Mission 420 10-bit | 0 | 5.18 | 5.17 | -0.2% |
+| Mission 422 10-bit | 0 | 4.79 | 4.73 | -1.3% |
+| Mission 444 10-bit | 0 | 3.87 | 3.88 | +0.3% |
+| Total | 0 | 6.23 | 6.23 | 0.0% |
+
+Raw totals for the block-unit motion-search checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 98,082,071.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 6.23 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference
