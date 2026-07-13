@@ -549,6 +549,30 @@ Raw totals for the release range-coder invariant checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 9.89 fps.
 
+### Lossless PSNR Fast Path
+
+The lossless PSNR fast-path checkpoint keeps the encoded bytes unchanged, but
+lets the CLI metric reporter return `inf` PSNR immediately when the source and
+reconstruction slices are byte-identical. This avoids per-plane SSE work on
+lossless frames while preserving the existing frame log format.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 17.62 | 17.69 | +0.4% |
+| Scene 422 8-bit | 0 | 14.77 | 15.50 | +4.9% |
+| Scene 444 8-bit | 0 | 11.61 | 12.46 | +7.3% |
+| Mission 420 10-bit | 0 | 9.44 | 9.24 | -2.1% |
+| Mission 422 10-bit | 0 | 7.84 | 7.97 | +1.7% |
+| Mission 444 10-bit | 0 | 6.14 | 6.28 | +2.3% |
+| Total | 0 | 9.89 | 10.10 | +2.1% |
+
+Raw totals for the lossless PSNR fast-path checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 86,542,077.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 10.10 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference

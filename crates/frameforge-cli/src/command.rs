@@ -768,6 +768,14 @@ fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<F
     if source.len() != frame_len || reconstruction.len() != frame_len {
         return None;
     }
+    if source == reconstruction {
+        return Some(FramePsnr {
+            y: f64::INFINITY,
+            u: f64::INFINITY,
+            v: f64::INFINITY,
+            all: f64::INFINITY,
+        });
+    }
 
     let y_src = &source[..y_len];
     let y_rec = &reconstruction[..y_len];
