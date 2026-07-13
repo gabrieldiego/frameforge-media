@@ -43,7 +43,9 @@ const AV2_BITDEPTH_INDEX_10BIT: u32 = 0;
 const AV2_BITDEPTH_INDEX_8BIT: u32 = 1;
 const AV2_BITDEPTH_INDEX_12BIT: u32 = 2;
 const AV2_DELTA_DCQUANT_MIN: i8 = -23;
+const AV2_MAX_MAX_DRL_BITS_MINUS_MIN_PLUS_ONE: u16 = 5;
 const AV2_MAX_MAX_IBC_DRL_BITS_MINUS_MIN_PLUS_ONE: u16 = 3;
+const AV2_PREDICTIVE_ORDER_HINT_BITS: u8 = 8;
 const AV2_MVP_SUPERBLOCK_SIZE: usize = 64;
 const AV2_TILE_SIZE_BYTES: usize = 4;
 const AV2_MIN_TILE_SIZE_BYTES: usize = 1;
@@ -234,6 +236,7 @@ enum Av2ObuType {
     SequenceHeader = 1,
     TemporalDelimiter = 2,
     ClosedLoopKey = 4,
+    RegularSef = 12,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +521,7 @@ pub struct Av2EncodeRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Av2EncodeOptions {
     pub lossless: bool,
+    pub predictive: bool,
 }
 
 pub struct Av2EncodeFrameMetrics<'a> {
@@ -648,8 +652,13 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
+    if options.predictive && !options.lossless {
+        return Err("AV2 predictive mode is currently implemented only for lossless encode".into());
+    }
 
     let expected_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+    let mut predictive_started = false;
+    let mut predictive_reference: Option<Vec<u8>> = None;
     for frame_index in 0..request.params.frames {
         let mut frame = vec![0; expected_len];
         input.read_exact(&mut frame).map_err(|err| {
@@ -669,12 +678,32 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
             )
         {
-            let (bitstream, reconstruction) =
+            let (bitstream, reconstruction) = if options.predictive {
+                let order_hint = av2_order_hint_for_frame(frame_index);
+                if predictive_reference.as_deref() == Some(frame.as_slice()) {
+                    av2_lossless_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
+                        &frame, order_hint,
+                    )
+                } else {
+                    let result =
+                        av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+                            geometry,
+                            stream_format,
+                            &frame,
+                            !predictive_started,
+                            order_hint,
+                        );
+                    predictive_started = true;
+                    predictive_reference = Some(frame.clone());
+                    result
+                }
+            } else {
                 av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
                     geometry,
                     stream_format,
                     &frame,
-                );
+                )
+            };
             output
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
@@ -893,6 +922,105 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
         ),
     );
     (out, reconstruction)
+}
+
+fn av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    include_sequence_header: bool,
+    order_hint: u16,
+) -> (Vec<u8>, Vec<u8>) {
+    debug_assert!(matches!(
+        stream_format.chroma_format,
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
+    ));
+    let expected_len = Picture::expected_len(
+        geometry.width,
+        geometry.height,
+        stream_format.pixel_format(),
+    );
+    assert_eq!(
+        frame.len(),
+        expected_len,
+        "AV2 predictive lossless input length must match geometry"
+    );
+    let ibc = if AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC {
+        ibc::build_local_ibc_subsampled(
+            frame,
+            geometry,
+            stream_format.chroma_format,
+            stream_format.bit_depth,
+        )
+        .ok()
+        .filter(|ibc| ibc.stats().selected_copy_blocks() > 0)
+    } else {
+        None
+    };
+    let profile = if ibc.is_some() {
+        Av2Black444MvpProfile::current().with_local_ibc_candidates()
+    } else {
+        Av2Black444MvpProfile::current()
+    };
+    let palette = palette::build_luma_palette_lossless(
+        frame,
+        geometry,
+        stream_format.chroma_format,
+        stream_format.bit_depth,
+    )
+    .ok();
+    let mut reconstruction = vec![0; expected_len];
+    let mut out = Vec::new();
+    append_obu(
+        &mut out,
+        Av2ObuType::TemporalDelimiter,
+        &Av2SyntaxPayload::default(),
+    );
+    if include_sequence_header {
+        append_obu(
+            &mut out,
+            Av2ObuType::SequenceHeader,
+            &av2_mvp_predictive_sequence_header_payload(geometry, profile, stream_format),
+        );
+    }
+    append_obu(
+        &mut out,
+        Av2ObuType::ClosedLoopKey,
+        &av2_lossless_subsampled_predictive_closed_loop_key_payload(
+            geometry,
+            stream_format,
+            frame,
+            &mut reconstruction,
+            profile,
+            palette.as_ref(),
+            ibc.as_ref(),
+            order_hint,
+        ),
+    );
+    (out, reconstruction)
+}
+
+fn av2_lossless_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
+    frame: &[u8],
+    order_hint: u16,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut out = Vec::new();
+    append_obu(
+        &mut out,
+        Av2ObuType::TemporalDelimiter,
+        &Av2SyntaxPayload::default(),
+    );
+    append_obu(
+        &mut out,
+        Av2ObuType::RegularSef,
+        &av2_regular_sef_payload(order_hint),
+    );
+    (out, frame.to_vec())
+}
+
+fn av2_order_hint_for_frame(frame_index: usize) -> u16 {
+    let mask = (1u16 << AV2_PREDICTIVE_ORDER_HINT_BITS) - 1;
+    (frame_index as u16) & mask
 }
 
 fn av2_mvp_444_bitstream_for_mode(
@@ -1352,6 +1480,23 @@ fn av2_mvp_sequence_header_payload(
     profile: Av2Black444MvpProfile,
     stream_format: Av2StreamFormat,
 ) -> Av2SyntaxPayload {
+    av2_mvp_sequence_header_payload_with_mode(geometry, profile, stream_format, true)
+}
+
+fn av2_mvp_predictive_sequence_header_payload(
+    geometry: Av2VideoGeometry,
+    profile: Av2Black444MvpProfile,
+    stream_format: Av2StreamFormat,
+) -> Av2SyntaxPayload {
+    av2_mvp_sequence_header_payload_with_mode(geometry, profile, stream_format, false)
+}
+
+fn av2_mvp_sequence_header_payload_with_mode(
+    geometry: Av2VideoGeometry,
+    profile: Av2Black444MvpProfile,
+    stream_format: Av2StreamFormat,
+    single_picture_header: bool,
+) -> Av2SyntaxPayload {
     let mut writer = Av2SyntaxWriter::new();
     let width_bits = av2_frame_dimension_bits(geometry.width);
     let height_bits = av2_frame_dimension_bits(geometry.height);
@@ -1364,12 +1509,18 @@ fn av2_mvp_sequence_header_payload(
         u64::from(stream_format.sequence_profile_idc()),
         AV2_PROFILE_BITS,
     );
-    writer.write_flag("sequence_header.single_picture_header_flag", true);
+    writer.write_flag(
+        "sequence_header.single_picture_header_flag",
+        single_picture_header,
+    );
     writer.write_literal(
         "sequence_header.seq_max_level_idx",
         u64::from(av2_sequence_level_for_geometry(geometry)),
         AV2_LEVEL_BITS,
     );
+    if av2_sequence_level_for_geometry(geometry) >= 4 && !single_picture_header {
+        writer.write_flag("sequence_header.seq_tier", false);
+    }
     writer.write_uvlc(
         "sequence_header.seq_chroma_format_idc",
         stream_format.chroma_format.sequence_header_idc(),
@@ -1378,6 +1529,13 @@ fn av2_mvp_sequence_header_payload(
         "sequence_header.bitdepth_lut_idx",
         stream_format.bitdepth_lut_index(),
     );
+    if !single_picture_header {
+        writer.write_literal("sequence_header.seq_lcr_id", 0, 3);
+        writer.write_flag("sequence_header.still_picture", false);
+        writer.write_literal("sequence_header.max_tlayer_id", 0, 2);
+        writer.write_literal("sequence_header.max_mlayer_id", 0, 3);
+        writer.write_flag("sequence_header.monotonic_output_order_flag", true);
+    }
     writer.write_literal(
         "sequence_header.num_bits_width_minus_1",
         (width_bits - 1) as u64,
@@ -1400,7 +1558,15 @@ fn av2_mvp_sequence_header_payload(
     );
     writer.write_flag("sequence_header.conf_win_enabled_flag", false);
 
-    write_fixed_black_444_sequence_tools(&mut writer, profile);
+    if !single_picture_header {
+        writer.write_flag(
+            "sequence_header.seq_max_display_model_info_present_flag",
+            false,
+        );
+        writer.write_flag("sequence_header.decoder_model_info_present_flag", false);
+    }
+
+    write_fixed_black_444_sequence_tools(&mut writer, profile, single_picture_header);
 
     writer.write_flag("sequence_header.film_grain_params_present", false);
     writer.write_flag("sequence_header.seq_extension_present_flag", false);
@@ -1441,6 +1607,7 @@ fn av2_frame_dimension_bits(dimension: usize) -> u8 {
 fn write_fixed_black_444_sequence_tools(
     writer: &mut Av2SyntaxWriter,
     profile: Av2Black444MvpProfile,
+    single_picture_header: bool,
 ) {
     // AV2 v1.0.0 sequence_header() tool groups, mirrored from AVM
     // write_sequence_header(). Values are the fixed AVM choices for one
@@ -1474,6 +1641,18 @@ fn write_fixed_black_444_sequence_tools(
     writer.write_flag("sequence_intra.enable_mhccp", profile.enable_mhccp);
     writer.write_flag("sequence_intra.enable_ibp", profile.enable_ibp);
 
+    if !single_picture_header {
+        for _ in 1..5 {
+            writer.write_flag("sequence_inter.motion_mode_enabled", false);
+        }
+        writer.write_flag("sequence_inter.enable_masked_compound", false);
+        writer.write_flag("sequence_inter.enable_ref_frame_mvs", false);
+        writer.write_literal(
+            "sequence_inter.order_hint_bits_minus_1",
+            u64::from(AV2_PREDICTIVE_ORDER_HINT_BITS - 1),
+            4,
+        );
+    }
     writer.write_flag("sequence_inter.enable_refmvbank", profile.enable_refmvbank);
     writer.write_flag(
         "sequence_inter.is_drl_reorder_disable",
@@ -1481,6 +1660,18 @@ fn write_fixed_black_444_sequence_tools(
     );
     if !profile.is_drl_reorder_disable {
         writer.write_flag("sequence_inter.enable_drl_reorder_constraint", false);
+    }
+    if !single_picture_header {
+        writer.write_flag("sequence_inter.enable_explicit_ref_frame_map", false);
+        writer.write_flag("sequence_inter.signal_dpb_explicit", true);
+        writer.write_literal("sequence_inter.ref_frames_minus_1", 1, 4);
+        writer.write_literal("sequence_inter.number_of_bits_for_lt_frame_id", 0, 3);
+        writer.write_quniform(
+            "sequence_inter.def_max_drl_bits_minus_min",
+            AV2_MAX_MAX_DRL_BITS_MINUS_MIN_PLUS_ONE,
+            0,
+        );
+        writer.write_flag("sequence_inter.allow_frame_max_drl_bits", false);
     }
     writer.write_quniform(
         "sequence_inter.def_max_bvp_drl_bits_minus_min",
@@ -1491,7 +1682,30 @@ fn write_fixed_black_444_sequence_tools(
         "sequence_inter.allow_frame_max_bvp_drl_bits",
         profile.allow_frame_max_bvp_drl_bits,
     );
+    if !single_picture_header {
+        writer.write_literal("sequence_inter.num_same_ref_compound", 0, 2);
+        writer.write_flag("sequence_inter.enable_tip", false);
+        writer.write_flag("sequence_inter.enable_mv_traj", false);
+    }
     writer.write_flag("sequence_inter.enable_bawp", profile.enable_bawp);
+    if !single_picture_header {
+        writer.write_flag("sequence_inter.enable_cwp", false);
+        writer.write_flag("sequence_inter.enable_imp_msk_bld", false);
+        writer.write_flag("sequence_inter.enable_lf_sub_pu", false);
+        writer.write_literal("sequence_inter.enable_opfl_refine", 0, 2);
+        writer.write_flag("sequence_inter.enable_refinemv", false);
+        writer.write_flag("sequence_inter.enable_bru", false);
+        writer.write_flag("sequence_inter.enable_adaptive_mvd", false);
+        writer.write_flag("sequence_inter.enable_mvd_sign_derive", false);
+        writer.write_flag("sequence_inter.enable_flex_mvres", false);
+        writer.write_flag("sequence_inter.enable_global_motion", false);
+        writer.write_flag("sequence_inter.enable_short_refresh_frame_flags", false);
+    }
+
+    if !single_picture_header {
+        writer.write_flag("sequence_scc.force_screen_content_tools_select", true);
+        writer.write_flag("sequence_scc.force_integer_mv_select", true);
+    }
 
     writer.write_flag("sequence_transform.enable_fsc", profile.enable_fsc);
     if !profile.enable_fsc {
@@ -1506,10 +1720,17 @@ fn write_fixed_black_444_sequence_tools(
         "sequence_transform.enable_chroma_dctonly",
         profile.enable_chroma_dctonly,
     );
+    if !single_picture_header {
+        writer.write_flag("sequence_transform.enable_inter_ddt", false);
+    }
     writer.write_flag("sequence_transform.reduced_tx_part_set", false);
     writer.write_flag("sequence_transform.enable_cctx", profile.enable_cctx);
     writer.write_flag("sequence_transform.enable_tcq_nonzero", false);
     writer.write_flag("sequence_transform.enable_parity_hiding", false);
+    if !single_picture_header {
+        writer.write_flag("sequence_transform.enable_avg_cdf", true);
+        writer.write_flag("sequence_transform.avg_cdf_type", true);
+    }
     writer.write_flag("sequence_transform.separate_uv_delta_q", false);
     writer.write_flag("sequence_transform.equal_ac_dc_q", true);
     writer.write_literal(
@@ -1524,6 +1745,10 @@ fn write_fixed_black_444_sequence_tools(
     writer.write_flag("sequence_filter.enable_gdf", false);
     writer.write_flag("sequence_filter.enable_restoration", false);
     writer.write_flag("sequence_filter.enable_ccso", false);
+    if !single_picture_header {
+        writer.write_flag("sequence_filter.enable_cdef_on_skip_txfm_always_on", false);
+        writer.write_flag("sequence_filter.enable_cdef_on_skip_txfm_disabled", true);
+    }
     writer.write_literal("sequence_filter.df_par_bits_minus2", 1, 2);
 
     writer.write_flag("sequence_tile_config.seq_tile_info_present_flag", false);
@@ -1546,6 +1771,37 @@ fn av2_mvp_444_closed_loop_key_header_payload(
     allow_intrabc: bool,
     tile_layout: &Av2TileLayout,
 ) -> Av2SyntaxPayload {
+    av2_mvp_444_closed_loop_key_header_payload_with_mode(
+        allow_screen_content_tools,
+        allow_intrabc,
+        tile_layout,
+        true,
+        0,
+    )
+}
+
+fn av2_mvp_444_predictive_closed_loop_key_header_payload(
+    allow_screen_content_tools: bool,
+    allow_intrabc: bool,
+    tile_layout: &Av2TileLayout,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
+    av2_mvp_444_closed_loop_key_header_payload_with_mode(
+        allow_screen_content_tools,
+        allow_intrabc,
+        tile_layout,
+        false,
+        order_hint,
+    )
+}
+
+fn av2_mvp_444_closed_loop_key_header_payload_with_mode(
+    allow_screen_content_tools: bool,
+    allow_intrabc: bool,
+    tile_layout: &Av2TileLayout,
+    single_picture_header: bool,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
     let profile = Av2Black444MvpProfile::current();
     let mut writer = Av2SyntaxWriter::new();
 
@@ -1558,6 +1814,15 @@ fn av2_mvp_444_closed_loop_key_header_payload(
     writer.write_flag("tile_group.first_tile_group_in_frame", true);
     writer.write_uvlc("uncompressed_header.cur_mfh_id", 0);
     writer.write_uvlc("uncompressed_header.seq_header_id", 0);
+    if !single_picture_header {
+        writer.write_flag("uncompressed_header.immediate_output_picture", true);
+        writer.write_flag("uncompressed_header.frame_size_override_flag", false);
+        writer.write_literal(
+            "uncompressed_header.order_hint",
+            u64::from(order_hint),
+            AV2_PREDICTIVE_ORDER_HINT_BITS,
+        );
+    }
     writer.write_flag(
         "uncompressed_header.allow_screen_content_tools",
         allow_screen_content_tools,
@@ -1812,6 +2077,105 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
     });
     payload.bytes.extend_from_slice(&tile_payload);
     payload
+}
+
+fn av2_lossless_subsampled_predictive_closed_loop_key_payload(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    reconstruction: &mut [u8],
+    profile: Av2Black444MvpProfile,
+    palette: Option<&Av2LumaPalette444>,
+    ibc: Option<&Av2LocalIbc444>,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
+    let tile_layout = if ibc.is_none() {
+        Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry)
+    } else {
+        Av2TileLayout::try_single_for_geometry(geometry)
+            .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry))
+    };
+    let allow_intrabc = ibc.is_some();
+    let allow_screen_content_tools = allow_intrabc || palette.is_some();
+    let mut payload = av2_mvp_444_predictive_closed_loop_key_header_payload(
+        allow_screen_content_tools,
+        allow_intrabc,
+        &tile_layout,
+        order_hint,
+    );
+    let tile_payloads: Vec<_> = if ibc.is_none() && tile_layout.tile_count() > 1 {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = tile_layout
+                .regions
+                .iter()
+                .map(|&region| {
+                    scope.spawn(move || {
+                        av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields(
+                            region,
+                            profile,
+                            geometry,
+                            stream_format.chroma_format,
+                            stream_format.bit_depth,
+                            frame,
+                            palette,
+                            false,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("AV2 tile entropy worker panicked"))
+                .collect()
+        })
+    } else {
+        tile_layout
+            .regions
+            .iter()
+            .map(|&region| {
+                av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    geometry,
+                    stream_format.chroma_format,
+                    stream_format.bit_depth,
+                    frame,
+                    reconstruction,
+                    palette,
+                    ibc,
+                    false,
+                )
+            })
+            .collect()
+    };
+    if ibc.is_none() && tile_layout.tile_count() > 1 {
+        reconstruction.copy_from_slice(frame);
+    }
+    let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
+    let bit_offset = payload.bytes.len() * 8;
+    payload.fields.push(syntax::Av2SyntaxField {
+        name: "tile_group.tile_entropy_payload",
+        code: syntax::Av2SyntaxCode::TileEntropyPayload,
+        bit_offset,
+        bit_count: tile_payload.len() * 8,
+    });
+    payload.bytes.extend_from_slice(&tile_payload);
+    payload
+}
+
+fn av2_regular_sef_payload(order_hint: u16) -> Av2SyntaxPayload {
+    let mut writer = Av2SyntaxWriter::new();
+    writer.write_uvlc("uncompressed_header.cur_mfh_id", 0);
+    writer.write_uvlc("uncompressed_header.seq_header_id", 0);
+    writer.write_literal("show_existing_frame.existing_frame_idx", 0, 1);
+    writer.write_flag("show_existing_frame.derive_sef_order_hint", false);
+    writer.write_literal(
+        "show_existing_frame.order_hint",
+        u64::from(order_hint),
+        AV2_PREDICTIVE_ORDER_HINT_BITS,
+    );
+    writer.trailing_bits();
+    writer.finish()
 }
 
 fn av2_mvp_444_closed_loop_key_payload(
@@ -2188,6 +2552,55 @@ mod tests {
     }
 
     #[test]
+    fn av2_lossless_predictive_reuses_repeated_frames_as_sef() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 3 },
+            geometry,
+            format: PixelFormat::Yuv420p8,
+        };
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+        let frame: Vec<u8> = (0..frame_len)
+            .map(|index| ((index * 17 + 23) & 0xff) as u8)
+            .collect();
+        let mut input = Vec::with_capacity(frame_len * request.params.frames);
+        for _ in 0..request.params.frames {
+            input.extend_from_slice(&frame);
+        }
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+        let mut frame_sizes = Vec::new();
+        let mut metrics = |metrics: Av2EncodeFrameMetrics<'_>| {
+            assert_eq!(metrics.source, metrics.reconstruction);
+            frame_sizes.push(metrics.bitstream_bytes);
+        };
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: true,
+                predictive: true,
+            },
+            Some(&mut metrics),
+        )
+        .expect("AV2 lossless predictive repeated-frame encode should succeed");
+
+        assert_eq!(recon, input);
+        assert_eq!(frame_sizes.len(), 3);
+        assert!(frame_sizes[0] > frame_sizes[1]);
+        assert_eq!(frame_sizes[1], 6);
+        assert_eq!(frame_sizes[2], 6);
+        assert_eq!(output.len(), frame_sizes.iter().sum());
+    }
+
+    #[test]
     fn av2_mvp_444_accepts_high_bit_depth_yuv444_without_downscaling() {
         let geometry = Av2VideoGeometry {
             width: 8,
@@ -2431,7 +2844,10 @@ mod tests {
             &mut output,
             Some(&mut recon),
             request,
-            Av2EncodeOptions { lossless: true },
+            Av2EncodeOptions {
+                lossless: true,
+                ..Default::default()
+            },
             None,
         )
         .expect("AV2 lossless 4:2:0 should encode stream-exact");
@@ -2475,7 +2891,10 @@ mod tests {
             &mut output,
             Some(&mut recon),
             request,
-            Av2EncodeOptions { lossless: true },
+            Av2EncodeOptions {
+                lossless: true,
+                ..Default::default()
+            },
             None,
         )
         .expect("AV2 lossless 4:2:2 should encode stream-exact");

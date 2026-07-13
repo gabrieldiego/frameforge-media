@@ -160,7 +160,11 @@ file EOF. Filter options come next. Output/encoder options, such as
 `--recon output.yuv`, `--set lossless`, `--preset`, and repeated
 `--set key[=value]`, belong after `--encode codec:output`. Bare `--set` keys
 imply `true`. Global accepted settings are listed by `ff codecs`;
-codec-specific settings can be added later when a feature really needs them.
+codec-specific settings are listed with the codec that owns them. The current
+AV2-specific `--set predictive` mode is experimental and lossless-only. It
+starts a multi-picture AV2 stream and uses show-existing-frame for exact
+repeated frames; non-identical frames still fall back to the existing lossless
+key-frame path.
 
 The positional input is optional when the first filter is a source. The initial
 source filter is `pattern=<name>`, with `black`, `checker`, `gradient`, and

@@ -85,6 +85,6 @@ Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.
 Bare keys imply `true`, for example `--set lossless`. Shared settings such as
 `lossless` are global and apply to any codec. Codec-specific setting catalogs
-can be added later when a feature really needs codec-local control, while
-unknown options should still fail early instead of silently becoming unused
-metadata.
+carry codec-local controls such as AV2's experimental `--set predictive`
+lossless mode. Unknown options should still fail early instead of silently
+becoming unused metadata.

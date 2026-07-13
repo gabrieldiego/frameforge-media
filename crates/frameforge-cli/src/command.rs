@@ -833,6 +833,7 @@ struct EncodeJob {
     source_format: PixelFormat,
     format: PixelFormat,
     lossless: bool,
+    av2_predictive: bool,
 }
 
 fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
@@ -894,7 +895,8 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     let (width, height, source_format) = resolve_video_metadata(args, y4m_metadata.as_ref())?;
     let frames = resolve_frame_count(args, &input, source_format, width, height)?;
     let codec = args.codec.as_deref().expect("parser requires codec");
-    let lossless = lossless_setting_enabled(&args.settings)?;
+    let lossless = boolean_setting_enabled(&args.settings, "lossless")?;
+    let av2_predictive = boolean_setting_enabled(&args.settings, "predictive")?;
     let format = if lossless {
         source_format
     } else {
@@ -917,6 +919,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         source_format,
         format,
         lossless,
+        av2_predictive,
     })
 }
 
@@ -960,19 +963,21 @@ fn resolve_fps_metadata(args: &EncodeArgs, y4m_metadata: Option<&Y4mMetadata>) -
         .or_else(|| args.fps.clone())
 }
 
-fn lossless_setting_enabled(settings: &[String]) -> Result<bool, String> {
+fn boolean_setting_enabled(settings: &[String], setting_name: &str) -> Result<bool, String> {
     for spec in settings {
-        if args::setting_name(spec) != "lossless" {
+        if args::setting_name(spec) != setting_name {
             continue;
         }
         let value = args::setting_value(spec).unwrap_or("true");
-        if value == "true" {
-            return Ok(true);
+        match value {
+            "true" | "1" | "yes" | "on" => return Ok(true),
+            "false" | "0" | "no" | "off" => return Ok(false),
+            _ => {
+                return Err(format!(
+                    "{setting_name} expects true or false, got '{value}'"
+                ))
+            }
         }
-        if value == "false" {
-            return Ok(false);
-        }
-        return Err(format!("lossless expects true or false, got '{value}'"));
     }
     Ok(false)
 }
@@ -1195,6 +1200,7 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
     };
     let options = frameforge_codecs::av2::Av2EncodeOptions {
         lossless: job.lossless,
+        predictive: job.av2_predictive,
     };
     let mut input = open_job_reader(&job)?;
     let mut output = create_writer(&job.output)?;
@@ -1925,6 +1931,7 @@ mod tests {
             source_format: PixelFormat::Yuv420p8,
             format: PixelFormat::Yuv420p8,
             lossless: false,
+            av2_predictive: false,
         };
         let mut reader = open_job_reader(&job).expect("open reader");
         let mut bytes = Vec::new();

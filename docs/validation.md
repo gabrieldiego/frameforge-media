@@ -33,6 +33,7 @@ make test-vectors TEST_VECTOR_SET=smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke
 make validate-set CODEC=vvc VALIDATION_SET=smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SOURCE_FILTERS=1
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless
 make regression
 ```
 
@@ -56,6 +57,26 @@ When `VALIDATION_REFERENCE_MODE` is `auto` or `required` and a reference decoder
 is used, the reference reconstruction must also match the internal
 reconstruction. A lossless stream should only be enabled for a codec when both
 checks are expected to pass.
+
+Additional encoder settings can be passed to validation with
+`VALIDATION_SETTINGS="key key=value"`. This is intended for codec experiments
+that are not part of a manifest row yet, such as AV2's experimental lossless
+predictive mode:
+
+```sh
+make validate-set CODEC=av2 \
+  VALIDATION_SET=local-aomctc-b2-scc-predictive-sweep-3f \
+  VALIDATION_SETTINGS=predictive \
+  VALIDATION_REFERENCE_MODE=required
+```
+
+`scripts/generate_predictive_sweep.py` creates that local ignored manifest and
+384 local Y4M crops: six AOM CTC B2 screen-content variants, 64 geometries from
+8x8 through 64x64, and three frames per crop. Each crop currently repeats one
+randomly selected source frame three times so AV2 show-existing-frame and
+reference-buffer syntax are exercised across bit depth and subsampling
+variants. A future companion set should use consecutive frames once block-level
+inter prediction is implemented.
 
 The `high-depth-smoke` set uses deterministic lower-bit canary samples so
 truncation of 10-bit or 12-bit input is visible as a validation failure. VVC

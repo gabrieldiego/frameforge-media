@@ -62,7 +62,13 @@ pub const GLOBAL_SETTINGS: &[SettingInfo] = &[SettingInfo {
 
 const NO_SETTINGS: &[SettingInfo] = &[];
 
-const CODEC_SETTINGS: &[SettingInfo] = &[];
+const AV2_SETTINGS: &[SettingInfo] = &[SettingInfo {
+    name: "predictive",
+    value: SettingValue::Boolean,
+    summary: "enable experimental AV2 multi-picture predictive coding tools",
+}];
+
+const VVC_SETTINGS: &[SettingInfo] = &[];
 
 pub fn global_setting(name: &str) -> Option<SettingInfo> {
     GLOBAL_SETTINGS
@@ -98,7 +104,7 @@ pub const CODECS: &[StageInfo] = &[
         feature: "codec-av2",
         compiled: cfg!(feature = "codec-av2"),
         summary: "imported experimental AV2 encoder model",
-        settings: CODEC_SETTINGS,
+        settings: AV2_SETTINGS,
     },
     StageInfo {
         name: "vvc",
@@ -106,7 +112,7 @@ pub const CODECS: &[StageInfo] = &[
         feature: "codec-vvc",
         compiled: cfg!(feature = "codec-vvc"),
         summary: "imported experimental VVC/H.266 encoder model",
-        settings: CODEC_SETTINGS,
+        settings: VVC_SETTINGS,
     },
 ];
 
