@@ -1246,8 +1246,7 @@ fn write_eob_one_y(writer: &mut Av2EntropyWriter) {
 }
 
 fn write_eob_one_uv(writer: &mut Av2EntropyWriter) {
-    let mut cdf = DEFAULT_EOB_MULTI16_UV_CTX2_CDF;
-    writer.write_symbol("tile.coeff.uv.eob_pt_tx4x4_eob1", 0, &mut cdf, 5, false);
+    write_eob_uv(writer, 1);
 }
 
 fn write_y_dc_level(writer: &mut Av2EntropyWriter, level: u16) {

@@ -109,26 +109,58 @@ fn write_lossy_luma_txb(
     let delta = lossy.quantized_dc_delta(plane, x0, y0);
     let residual = lossy.exact_residual4x4(plane, x0, y0);
     let coefficients = tx4x4_coefficients_from_residual(&residual, false);
-    let distortion = lossy.quantized_recon_sse(plane, x0, y0, delta);
-    if use_exact_lossy_txb(
+    let dc_sse = lossy.quantized_recon_sse(plane, x0, y0, delta);
+    let quantized_candidate = if lossy_should_try_ac_quantized(dc_sse, lossy.quant_step()) {
+        let quantized_residual = lossy.quantized_residual4x4(plane, x0, y0);
+        Some((
+            quantized_residual,
+            lossy.residual_recon_sse(plane, x0, y0, &quantized_residual),
+        ))
+    } else {
+        None
+    };
+    let choice = choose_lossy_txb(
         delta,
+        &residual,
         &coefficients,
-        distortion,
         Av2CoefficientProxyKind::LumaTransform,
         lossy.quant_step(),
-    ) {
-        let (context, _) = if tx4x4_residual_is_zero(&residual) {
-            write_y_txb_all_zero(writer, skip_ctx);
-            (0, false)
-        } else {
-            write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
-        };
-        lossy.copy_source_to_recon_txb(plane, x0, y0);
-        context
-    } else {
-        let context = write_y_dc_delta_txb(writer, skip_ctx, dc_sign_ctx, delta);
-        lossy.fill_quantized_recon_txb(plane, x0, y0, delta);
-        context
+        dc_sse,
+        quantized_candidate,
+    );
+    match choice {
+        Av2LossyTxbChoice::Exact => {
+            let (context, _) = if tx4x4_residual_is_zero(&residual) {
+                write_y_txb_all_zero(writer, skip_ctx);
+                (0, false)
+            } else {
+                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+            };
+            lossy.copy_source_to_recon_txb(plane, x0, y0);
+            context
+        }
+        Av2LossyTxbChoice::QuantizedResidual(quantized_residual) => {
+            let quantized_coefficients =
+                tx4x4_coefficients_from_residual(&quantized_residual, false);
+            let (context, _) = if tx4x4_residual_is_zero(&quantized_residual) {
+                write_y_txb_all_zero(writer, skip_ctx);
+                (0, false)
+            } else {
+                write_luma_palette_residual_txb(
+                    writer,
+                    skip_ctx,
+                    dc_sign_ctx,
+                    &quantized_coefficients,
+                )
+            };
+            lossy.fill_residual_recon_txb(plane, x0, y0, &quantized_residual);
+            context
+        }
+        Av2LossyTxbChoice::DcDelta(delta) => {
+            let context = write_y_dc_delta_txb(writer, skip_ctx, dc_sign_ctx, delta);
+            lossy.fill_quantized_recon_txb(plane, x0, y0, delta);
+            context
+        }
     }
 }
 
@@ -147,45 +179,127 @@ fn write_lossy_chroma_txb(
     let delta = lossy.quantized_dc_delta(plane, x0, y0);
     let residual = lossy.exact_residual4x4(plane, x0, y0);
     let coefficients = tx4x4_coefficients_from_residual(&residual, false);
-    let distortion = lossy.quantized_recon_sse(plane, x0, y0, delta);
-    if use_exact_lossy_txb(
+    let dc_sse = lossy.quantized_recon_sse(plane, x0, y0, delta);
+    let quantized_candidate = if lossy_should_try_ac_quantized(dc_sse, lossy.quant_step()) {
+        let quantized_residual = lossy.quantized_residual4x4(plane, x0, y0);
+        Some((
+            quantized_residual,
+            lossy.residual_recon_sse(plane, x0, y0, &quantized_residual),
+        ))
+    } else {
+        None
+    };
+    let choice = choose_lossy_txb(
         delta,
+        &residual,
         &coefficients,
-        distortion,
         Av2CoefficientProxyKind::ChromaTransform,
         lossy.quant_step(),
-    ) {
-        let result = if tx4x4_residual_is_zero(&residual) {
-            match chroma_plane {
-                Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, false),
-                Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
-            }
-            (0, false)
-        } else {
-            write_chroma_bdpcm_txb(writer, chroma_plane, skip_ctx, &coefficients, false)
-        };
-        lossy.copy_source_to_recon_txb(plane, x0, y0);
-        result
-    } else {
-        let result = write_chroma_dc_delta_txb(writer, chroma_plane, skip_ctx, delta);
-        lossy.fill_quantized_recon_txb(plane, x0, y0, delta);
-        result
+        dc_sse,
+        quantized_candidate,
+    );
+    match choice {
+        Av2LossyTxbChoice::Exact => {
+            let result = if tx4x4_residual_is_zero(&residual) {
+                match chroma_plane {
+                    Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, false),
+                    Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
+                }
+                (0, false)
+            } else {
+                write_chroma_bdpcm_txb(writer, chroma_plane, skip_ctx, &coefficients, false)
+            };
+            lossy.copy_source_to_recon_txb(plane, x0, y0);
+            result
+        }
+        Av2LossyTxbChoice::QuantizedResidual(quantized_residual) => {
+            let quantized_coefficients =
+                tx4x4_coefficients_from_residual(&quantized_residual, false);
+            let result = if tx4x4_residual_is_zero(&quantized_residual) {
+                match chroma_plane {
+                    Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, false),
+                    Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
+                }
+                (0, false)
+            } else {
+                write_chroma_bdpcm_txb(
+                    writer,
+                    chroma_plane,
+                    skip_ctx,
+                    &quantized_coefficients,
+                    false,
+                )
+            };
+            lossy.fill_residual_recon_txb(plane, x0, y0, &quantized_residual);
+            result
+        }
+        Av2LossyTxbChoice::DcDelta(delta) => {
+            let result = write_chroma_dc_delta_txb(writer, chroma_plane, skip_ctx, delta);
+            lossy.fill_quantized_recon_txb(plane, x0, y0, delta);
+            result
+        }
     }
 }
 
-fn use_exact_lossy_txb(
+fn choose_lossy_txb(
     quantized_delta: i16,
+    exact_residual: &[i32; TX4X4_SAMPLES],
     exact_coefficients: &[i32; TX4X4_SAMPLES],
-    quantized_sse: usize,
     kind: Av2CoefficientProxyKind,
     quant_step: i32,
-) -> bool {
-    let mut quantized_coefficients = [0i32; TX4X4_SAMPLES];
-    quantized_coefficients[0] = i32::from(quantized_delta) * 32;
-    let quantized_score = coefficient_proxy_score(&quantized_coefficients, kind);
+    dc_sse: usize,
+    quantized_candidate: Option<([i32; TX4X4_SAMPLES], usize)>,
+) -> Av2LossyTxbChoice {
     let exact_score = coefficient_proxy_score(exact_coefficients, kind);
-    let distortion_score = quantized_sse / (quant_step.max(1) as usize);
-    exact_score <= quantized_score + distortion_score
+    let mut best_choice = Av2LossyTxbChoice::Exact;
+    let mut best_score = exact_score;
+
+    let mut dc_coefficients = [0i32; TX4X4_SAMPLES];
+    dc_coefficients[0] = i32::from(quantized_delta) * 32;
+    let dc_score = coefficient_proxy_score(&dc_coefficients, kind);
+    let dc_candidate_score = lossy_txb_score(dc_score, dc_sse, quant_step);
+    if dc_candidate_score < best_score {
+        best_score = dc_candidate_score;
+        best_choice = Av2LossyTxbChoice::DcDelta(quantized_delta);
+    }
+
+    if let Some((quantized_residual, quantized_sse)) = quantized_candidate {
+        let quantized_coefficients = tx4x4_coefficients_from_residual(&quantized_residual, false);
+        if lossy_ac_candidate_is_reference_clean(&quantized_coefficients) {
+            let quantized_score = coefficient_proxy_score(&quantized_coefficients, kind);
+            let quantized_candidate_score =
+                lossy_txb_score(quantized_score, quantized_sse, quant_step);
+            if quantized_candidate_score < best_score {
+                best_choice = if *exact_residual == quantized_residual {
+                    Av2LossyTxbChoice::Exact
+                } else {
+                    Av2LossyTxbChoice::QuantizedResidual(quantized_residual)
+                };
+            }
+        }
+    }
+
+    best_choice
+}
+
+fn lossy_txb_score(rate_score: usize, sse: usize, quant_step: i32) -> usize {
+    rate_score.saturating_add(sse / quant_step.max(1) as usize)
+}
+
+fn lossy_should_try_ac_quantized(dc_sse: usize, quant_step: i32) -> bool {
+    const AC_DISTORTION_GATE_MULTIPLIER: usize = 4;
+    let step = quant_step.max(1) as usize;
+    let threshold = step
+        .saturating_mul(step)
+        .saturating_mul(TX4X4_SAMPLES)
+        .saturating_mul(AC_DISTORTION_GATE_MULTIPLIER);
+    dc_sse >= threshold
+}
+
+fn lossy_ac_candidate_is_reference_clean(coefficients: &[i32; TX4X4_SAMPLES]) -> bool {
+    const MAX_REFERENCE_CLEAN_EOB: usize = 4;
+    let (_, bounds) = lossless_coefficient_levels_and_bounds(coefficients);
+    bounds.is_none_or(|(_, eob)| eob <= MAX_REFERENCE_CLEAN_EOB)
 }
 
 fn write_lossless_subsampled_residual_coefficients(
