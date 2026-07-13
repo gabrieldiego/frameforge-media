@@ -89,3 +89,35 @@ No full 1080p comparison was rerun for this scaffold because the new regular
 inter payload is test-only until it is reference-decoder clean and can replace
 part of the predictive key-frame fallback without regressing repeated-frame SEF
 compression.
+
+## Checkpoint 3: Integer NEWMV Entropy Scaffold
+
+Changes:
+
+- Generalized the AV2 one-pel MV shell writer so inter NEWMV and IntraBC DV
+  syntax share the same magnitude coding.
+- Added a test-only non-zero NEWMV regular-inter tile helper. It emits
+  `is_inter=1`, `skip_txfm=1`, single-reference selection, `NEWMV`, one-pel MV
+  magnitude, and row/column signs.
+- Extended the inter neighbor context scaffold to carry whether neighboring
+  blocks used NEWMV, matching AVM's mode-context progression.
+- Kept CLI-selected predictive bitstreams unchanged while regular-inter
+  reconstruction is still being brought up.
+
+Validation:
+
+```sh
+cargo test -p frameforge-codecs --all-features
+make build
+```
+
+Result: 163/163 codec tests passed, and the release CLI build passed.
+
+Compression comparison:
+
+| Scope | FF bytes | FF fps | Delta bytes vs checkpoint 2 | Delta fps vs checkpoint 2 |
+|---|---:|---:|---:|---:|
+| CLI-selected AV2 lossless paths | unchanged | unchanged | 0 | 0 |
+
+No full 1080p comparison was rerun for this checkpoint because the new NEWMV
+writer is not selected by the production encoder yet.

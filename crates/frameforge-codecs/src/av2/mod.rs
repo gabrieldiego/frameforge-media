@@ -15,8 +15,6 @@ mod tile;
 use ibc::{Av2LocalIbc444, Av2LocalIbcStats};
 use palette::Av2LumaPalette444;
 use syntax::{Av2SyntaxPayload, Av2SyntaxWriter};
-#[cfg(test)]
-use tile::av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields;
 use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
@@ -26,6 +24,11 @@ use tile::{
     av2_lossy_420_tile_entropy_payload_for_region,
     av2_lossy_420_tile_entropy_payload_for_region_with_fields,
     av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2TileRegion,
+};
+#[cfg(test)]
+use tile::{
+    av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields,
+    av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields,
 };
 
 pub const AV2_CODEC_NAME: &str = "av2";
@@ -2712,6 +2715,40 @@ mod tests {
         let mut obu = Vec::new();
         append_obu(&mut obu, Av2ObuType::RegularTileGroup, &payload);
         assert!(!obu.is_empty());
+    }
+
+    #[test]
+    fn av2_lossless_newmv_regular_inter_payload_emits_mv_symbols() {
+        let geometry = Av2VideoGeometry {
+            width: 16,
+            height: 16,
+        };
+        let stream_format = Av2StreamFormat::from_pixel_format(PixelFormat::Yuv420p8)
+            .expect("yuv420p8 is an AV2 stream format");
+        let profile = Av2Black444MvpProfile::current();
+        let entropy = av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields(
+            Av2TileRegion::root(geometry),
+            profile,
+            stream_format.chroma_format,
+            -8,
+            16,
+            true,
+        );
+        let fields: Vec<_> = entropy
+            .fields
+            .iter()
+            .map(|field| (field.name, field.symbol, field.literal_value))
+            .collect();
+
+        assert!(fields
+            .iter()
+            .any(|(name, symbol, _)| { *name == "tile.inter.single_mode" && *symbol == Some(2) }));
+        assert!(fields
+            .iter()
+            .any(|(name, _, _)| *name == "tile.inter.mv.shell_set"));
+        assert!(fields
+            .iter()
+            .any(|(name, _, literal)| { *name == "tile.inter.mv.sign" && *literal == Some(1) }));
     }
 
     #[test]

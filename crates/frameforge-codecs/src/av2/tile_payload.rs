@@ -295,6 +295,31 @@ pub(crate) fn av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fi
     writer.finish()
 }
 
+#[cfg(test)]
+pub(crate) fn av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    chroma_format: Av2ChromaFormat,
+    mv_row_px: i16,
+    mv_col_px: i16,
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+        region,
+        profile,
+        chroma_format,
+        Av2PartitionPolicy::Fixed8x8Leaves,
+        false,
+        false,
+        None,
+        None,
+    );
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
+    plan.write_lossless_new_mv_inter_entropy(&mut writer, 1, mv_row_px, mv_col_px);
+    writer.finish()
+}
+
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
 const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 64;
 const AV2_LOSSLESS_BASE_LEAF_SIZE: usize = 16;
@@ -1619,6 +1644,80 @@ impl Av2Black444TilePlan {
                             decision.block_size,
                             true,
                             0,
+                            false,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::IntrabcFlag(_)
+                | Av2TileDecisionKind::IntrabcCopy { .. }
+                | Av2TileDecisionKind::IntraLumaMode { .. }
+                | Av2TileDecisionKind::IntraChromaMode { .. }
+                | Av2TileDecisionKind::LumaPaletteModeInfo
+                | Av2TileDecisionKind::LumaPaletteColorMap
+                | Av2TileDecisionKind::BlackDcResidualCoefficients
+                | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {}
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn write_lossless_new_mv_inter_entropy(
+        &self,
+        writer: &mut Av2EntropyWriter,
+        total_refs: usize,
+        mv_row_px: i16,
+        mv_col_px: i16,
+    ) {
+        assert!(
+            mv_row_px != 0 || mv_col_px != 0,
+            "NEWMV entropy helper expects a non-zero motion vector"
+        );
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut skip_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut inter_context =
+            Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        for decision in &self.decisions {
+            match decision.kind {
+                Av2TileDecisionKind::Partition(partition) => {
+                    write_partition(
+                        writer,
+                        *decision,
+                        partition,
+                        &partition_context,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    if partition == Av2MvpPartition::None {
+                        write_inter_newmv_skip(
+                            writer,
+                            *decision,
+                            &skip_context,
+                            &inter_context,
+                            total_refs,
+                            mv_row_px,
+                            mv_col_px,
+                        );
+                        partition_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                        skip_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                            false,
+                            true,
+                        );
+                        inter_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                            true,
+                            0,
+                            true,
                         );
                     }
                 }
@@ -1848,6 +1947,7 @@ struct Av2InterModeContext {
     coded: Vec<bool>,
     inter: Vec<bool>,
     ref_frame: Vec<u8>,
+    newmv: Vec<bool>,
     rows: usize,
     cols: usize,
 }
@@ -1859,6 +1959,7 @@ impl Av2InterModeContext {
             coded: vec![false; visible_rows_mi * visible_cols_mi],
             inter: vec![false; visible_rows_mi * visible_cols_mi],
             ref_frame: vec![0; visible_rows_mi * visible_cols_mi],
+            newmv: vec![false; visible_rows_mi * visible_cols_mi],
             rows: visible_rows_mi,
             cols: visible_cols_mi,
         }
@@ -1885,15 +1986,20 @@ impl Av2InterModeContext {
         block_size: Av2MvpBlockSize,
         ref_frame: u8,
     ) -> usize {
-        let row_match = self
+        let row_state = self
             .above_right_state(row_mi, col_mi, block_size)
-            .or_else(|| self.above_state(row_mi, col_mi))
-            .is_some_and(|state| state.inter && state.ref_frame == ref_frame);
-        let col_match = self
+            .or_else(|| self.above_state(row_mi, col_mi));
+        let col_state = self
             .bottom_left_state(row_mi, col_mi, block_size)
-            .or_else(|| self.left_state(row_mi, col_mi))
-            .is_some_and(|state| state.inter && state.ref_frame == ref_frame);
-        usize::from(row_match) + usize::from(col_match)
+            .or_else(|| self.left_state(row_mi, col_mi));
+        let row_match = row_state.is_some_and(|state| state.inter && state.ref_frame == ref_frame);
+        let col_match = col_state.is_some_and(|state| state.inter && state.ref_frame == ref_frame);
+        let newmv_count = [row_state, col_state]
+            .into_iter()
+            .flatten()
+            .filter(|state| state.inter && state.ref_frame == ref_frame && state.newmv)
+            .count();
+        usize::from(row_match) + usize::from(col_match) + usize::from(newmv_count > 0) * 2
     }
 
     fn single_ref_ctx(
@@ -1932,6 +2038,7 @@ impl Av2InterModeContext {
         block_size: Av2MvpBlockSize,
         inter: bool,
         ref_frame: u8,
+        newmv: bool,
     ) {
         for row in row_mi..(row_mi + block_size.mi_height()).min(self.rows) {
             for col in col_mi..(col_mi + block_size.mi_width()).min(self.cols) {
@@ -1939,6 +2046,7 @@ impl Av2InterModeContext {
                 self.coded[index] = true;
                 self.inter[index] = inter;
                 self.ref_frame[index] = ref_frame;
+                self.newmv[index] = newmv;
             }
         }
     }
@@ -1951,6 +2059,7 @@ impl Av2InterModeContext {
         self.coded[index].then_some(Av2InterNeighborState {
             inter: self.inter[index],
             ref_frame: self.ref_frame[index],
+            newmv: self.newmv[index],
         })
     }
 
@@ -1994,6 +2103,7 @@ impl Av2InterModeContext {
 struct Av2InterNeighborState {
     inter: bool,
     ref_frame: u8,
+    newmv: bool,
 }
 
 #[cfg(test)]
@@ -2050,4 +2160,88 @@ fn write_inter_globalmv_skip(
         3,
         false,
     );
+}
+
+#[cfg(test)]
+const AV2_INTER_MV_FIELD_NAMES: Av2OnePelMvFieldNames = Av2OnePelMvFieldNames {
+    shell_set: "tile.inter.mv.shell_set",
+    shell_class0: "tile.inter.mv.shell_class0",
+    shell_class1: "tile.inter.mv.shell_class1",
+    shell_offset_low: "tile.inter.mv.shell_offset_low",
+    shell_offset_class2: "tile.inter.mv.shell_offset_class2",
+    shell_offset: "tile.inter.mv.shell_offset",
+    col_gt: "tile.inter.mv.col_gt",
+    col_remainder: "tile.inter.mv.col_remainder",
+    col_index: "tile.inter.mv.col_index",
+};
+
+#[cfg(test)]
+fn write_inter_newmv_skip(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    skip_context: &Av2IntrabcContext,
+    inter_context: &Av2InterModeContext,
+    total_refs: usize,
+    mv_row_px: i16,
+    mv_col_px: i16,
+) {
+    let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
+    let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.is_inter",
+        intra_inter_ctx,
+        1,
+        &mut intra_inter_cdf,
+        2,
+        false,
+    );
+
+    let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
+    let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.skip_txfm",
+        skip_ctx,
+        1,
+        &mut skip_cdf,
+        2,
+        false,
+    );
+
+    if total_refs > 1 {
+        let single_ref_ctx = inter_context.single_ref_ctx(decision.row, decision.col, 0, total_refs);
+        let mut single_ref_cdf = DEFAULT_SINGLE_REF_CDFS[single_ref_ctx][0];
+        writer.write_symbol_with_key(
+            "tile.inter.single_ref",
+            single_ref_ctx,
+            1,
+            &mut single_ref_cdf,
+            2,
+            false,
+        );
+    }
+
+    let mode_ctx =
+        inter_context.inter_single_mode_ctx(decision.row, decision.col, decision.block_size, 0);
+    let mut mode_cdf = DEFAULT_INTER_SINGLE_MODE_CDFS[mode_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.single_mode",
+        mode_ctx,
+        2,
+        &mut mode_cdf,
+        3,
+        false,
+    );
+
+    write_av2_one_pel_mv_magnitude(
+        writer,
+        AV2_INTER_MV_FIELD_NAMES,
+        usize::from(mv_row_px.unsigned_abs()),
+        usize::from(mv_col_px.unsigned_abs()),
+    );
+    if mv_row_px != 0 {
+        writer.write_literal_bit("tile.inter.mv.sign", mv_row_px < 0);
+    }
+    if mv_col_px != 0 {
+        writer.write_literal_bit("tile.inter.mv.sign", mv_col_px < 0);
+    }
 }
