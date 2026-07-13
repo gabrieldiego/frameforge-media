@@ -1,6 +1,79 @@
 // Keep 4:4:4 palette FSC gated until its chroma coefficient path is
 // reference-clean on larger screen-content frames.
 const AV2_ENABLE_LUMA_PALETTE_FSC_444: bool = false;
+const AV2_STATIC_CDF_INTER_IS_INTER_BASE: usize = 380;
+const AV2_STATIC_CDF_INTER_SKIP_TXFM_BASE: usize = 384;
+const AV2_STATIC_CDF_INTER_SINGLE_REF_BASE: usize = 390;
+const AV2_STATIC_CDF_INTER_SINGLE_MODE_BASE: usize = 394;
+const AV2_STATIC_CDF_INTER_DRL_BASE: usize = 400;
+const AV2_STATIC_CDF_INTRABC_USE_BASE: usize = 405;
+const AV2_STATIC_CDF_INTRABC_SKIP_TXFM_BASE: usize = 408;
+const AV2_STATIC_CDF_INTRABC_MODE: usize = 414;
+const AV2_STATIC_CDF_PARTITION_DO_SPLIT_BASE: usize = 415;
+const AV2_STATIC_CDF_INTRA_FSC_MODE_BASE: usize = 479;
+const AV2_STATIC_CDF_INTRA_Y_MODE_IDX_OFFSET_BASE: usize = 503;
+const AV2_STATIC_CDF_INTRA_Y_MODE_IDX_BASE: usize = 506;
+const AV2_STATIC_CDF_INTRA_UV_MODE_IDX_BASE: usize = 509;
+
+#[inline(always)]
+fn inter_is_inter_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTER_IS_INTER_BASE + ctx
+}
+
+#[inline(always)]
+fn inter_skip_txfm_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTER_SKIP_TXFM_BASE + ctx
+}
+
+#[inline(always)]
+fn inter_single_ref_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTER_SINGLE_REF_BASE + ctx
+}
+
+#[inline(always)]
+fn inter_single_mode_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTER_SINGLE_MODE_BASE + ctx
+}
+
+#[inline(always)]
+fn inter_drl_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTER_DRL_BASE + ctx
+}
+
+#[inline(always)]
+fn intrabc_use_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTRABC_USE_BASE + ctx
+}
+
+#[inline(always)]
+fn intrabc_skip_txfm_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_INTRABC_SKIP_TXFM_BASE + ctx
+}
+
+#[inline(always)]
+fn partition_do_split_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_PARTITION_DO_SPLIT_BASE + ctx
+}
+
+#[inline(always)]
+fn intra_fsc_mode_static_cdf_key(context: usize, size_group: usize) -> usize {
+    AV2_STATIC_CDF_INTRA_FSC_MODE_BASE + context * 6 + size_group
+}
+
+#[inline(always)]
+fn intra_y_mode_idx_offset_static_cdf_key(mode_context: u8) -> usize {
+    AV2_STATIC_CDF_INTRA_Y_MODE_IDX_OFFSET_BASE + usize::from(mode_context)
+}
+
+#[inline(always)]
+fn intra_y_mode_idx_static_cdf_key(mode_context: u8) -> usize {
+    AV2_STATIC_CDF_INTRA_Y_MODE_IDX_BASE + usize::from(mode_context)
+}
+
+#[inline(always)]
+fn intra_uv_mode_idx_static_cdf_key(mode_context: usize) -> usize {
+    AV2_STATIC_CDF_INTRA_UV_MODE_IDX_BASE + mode_context
+}
 
 #[cfg(test)]
 pub(crate) fn av2_black_444_tile_entropy_payload(
@@ -3015,9 +3088,9 @@ fn write_inter_globalmv_skip(
 
     let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.skip_txfm",
-        skip_ctx,
+        inter_skip_txfm_static_cdf_key(skip_ctx),
         1,
         &mut skip_cdf,
         2,
@@ -3027,9 +3100,9 @@ fn write_inter_globalmv_skip(
     if total_refs > 1 {
         let single_ref_ctx = inter_context.single_ref_ctx(decision.row, decision.col, 0, total_refs);
         let mut single_ref_cdf = DEFAULT_SINGLE_REF_CDFS[single_ref_ctx][0];
-        writer.write_symbol_with_key(
+        writer.write_symbol_with_static_cdf_key(
             "tile.inter.single_ref",
-            single_ref_ctx,
+            inter_single_ref_static_cdf_key(single_ref_ctx),
             1,
             &mut single_ref_cdf,
             2,
@@ -3040,9 +3113,9 @@ fn write_inter_globalmv_skip(
     let mode_ctx =
         inter_context.inter_single_mode_ctx(decision.row, decision.col, decision.block_size, 0);
     let mut mode_cdf = DEFAULT_INTER_SINGLE_MODE_CDFS[mode_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.single_mode",
-        mode_ctx,
+        inter_single_mode_static_cdf_key(mode_ctx),
         1,
         &mut mode_cdf,
         3,
@@ -3061,9 +3134,9 @@ fn write_inter_globalmv_residual(
 
     let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.skip_txfm",
-        skip_ctx,
+        inter_skip_txfm_static_cdf_key(skip_ctx),
         0,
         &mut skip_cdf,
         2,
@@ -3073,9 +3146,9 @@ fn write_inter_globalmv_residual(
     if total_refs > 1 {
         let single_ref_ctx = inter_context.single_ref_ctx(decision.row, decision.col, 0, total_refs);
         let mut single_ref_cdf = DEFAULT_SINGLE_REF_CDFS[single_ref_ctx][0];
-        writer.write_symbol_with_key(
+        writer.write_symbol_with_static_cdf_key(
             "tile.inter.single_ref",
-            single_ref_ctx,
+            inter_single_ref_static_cdf_key(single_ref_ctx),
             1,
             &mut single_ref_cdf,
             2,
@@ -3086,9 +3159,9 @@ fn write_inter_globalmv_residual(
     let mode_ctx =
         inter_context.inter_single_mode_ctx(decision.row, decision.col, decision.block_size, 0);
     let mut mode_cdf = DEFAULT_INTER_SINGLE_MODE_CDFS[mode_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.single_mode",
-        mode_ctx,
+        inter_single_mode_static_cdf_key(mode_ctx),
         1,
         &mut mode_cdf,
         3,
@@ -3104,9 +3177,9 @@ fn write_inter_intra_flag(
 ) {
     let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
     let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.is_inter",
-        intra_inter_ctx,
+        inter_is_inter_static_cdf_key(intra_inter_ctx),
         usize::from(is_inter),
         &mut intra_inter_cdf,
         2,
@@ -3137,9 +3210,9 @@ fn write_inter_newmv_skip(
 ) {
     let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
     let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.is_inter",
-        intra_inter_ctx,
+        inter_is_inter_static_cdf_key(intra_inter_ctx),
         1,
         &mut intra_inter_cdf,
         2,
@@ -3148,9 +3221,9 @@ fn write_inter_newmv_skip(
 
     let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.skip_txfm",
-        skip_ctx,
+        inter_skip_txfm_static_cdf_key(skip_ctx),
         1,
         &mut skip_cdf,
         2,
@@ -3160,9 +3233,9 @@ fn write_inter_newmv_skip(
     if total_refs > 1 {
         let single_ref_ctx = inter_context.single_ref_ctx(decision.row, decision.col, 0, total_refs);
         let mut single_ref_cdf = DEFAULT_SINGLE_REF_CDFS[single_ref_ctx][0];
-        writer.write_symbol_with_key(
+        writer.write_symbol_with_static_cdf_key(
             "tile.inter.single_ref",
-            single_ref_ctx,
+            inter_single_ref_static_cdf_key(single_ref_ctx),
             1,
             &mut single_ref_cdf,
             2,
@@ -3173,9 +3246,9 @@ fn write_inter_newmv_skip(
     let mode_ctx =
         inter_context.inter_single_mode_ctx(decision.row, decision.col, decision.block_size, 0);
     let mut mode_cdf = DEFAULT_INTER_SINGLE_MODE_CDFS[mode_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.single_mode",
-        mode_ctx,
+        inter_single_mode_static_cdf_key(mode_ctx),
         2,
         &mut mode_cdf,
         3,
@@ -3183,9 +3256,9 @@ fn write_inter_newmv_skip(
     );
 
     let mut drl_cdf = DEFAULT_DRL_CDFS[0][mode_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.inter.drl_idx",
-        mode_ctx,
+        inter_drl_static_cdf_key(mode_ctx),
         0,
         &mut drl_cdf,
         2,

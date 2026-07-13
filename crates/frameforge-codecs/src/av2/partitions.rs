@@ -376,8 +376,9 @@ fn write_partition(
     if allowed.none {
         let ctx = partition_context.split_context(decision.row, decision.col, decision.block_size);
         let mut cdf = DEFAULT_DO_SPLIT_CDFS[ctx];
-        writer.write_symbol(
+        writer.write_symbol_with_static_cdf_key(
             "tile.partition.do_split",
+            partition_do_split_static_cdf_key(ctx),
             usize::from(do_split),
             &mut cdf,
             2,
@@ -417,9 +418,9 @@ fn write_intrabc_flag(
     // set, each non-chroma leaf signals use_intrabc before normal intra modes.
     let ctx = context.intrabc_ctx(decision.row, decision.col, decision.block_size);
     let mut cdf = DEFAULT_INTRABC_CDFS[ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.intrabc.use_intrabc",
-        ctx,
+        intrabc_use_static_cdf_key(ctx),
         usize::from(use_intrabc),
         &mut cdf,
         2,
@@ -445,9 +446,9 @@ fn write_intrabc_copy(
     );
     let skip_ctx = context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.intrabc.skip_txfm",
-        skip_ctx,
+        intrabc_skip_txfm_static_cdf_key(skip_ctx),
         1,
         &mut skip_cdf,
         2,
@@ -460,8 +461,9 @@ fn write_intrabc_copy(
     // mode 0 for exact hash hits when the implicit BVP stack is not yet
     // modeled tightly enough for direct mode.
     let mut mode_cdf = DEFAULT_INTRABC_MODE_CDF;
-    writer.write_symbol(
+    writer.write_symbol_with_static_cdf_key(
         "tile.intrabc.mode",
+        AV2_STATIC_CDF_INTRABC_MODE,
         usize::from(explicit_dv.is_none()),
         &mut mode_cdf,
         2,
@@ -748,10 +750,9 @@ fn write_intra_luma_mode(
     let mode_context = mode_context.min(2);
     let mode_set_low = mode_index.min(7);
     let mut mode_idx_cdf = DEFAULT_Y_MODE_IDX_CDFS[usize::from(mode_context)];
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         mode.symbol_name(),
-        "tile.intra.y_mode_idx",
-        usize::from(mode_context),
+        intra_y_mode_idx_static_cdf_key(mode_context),
         mode_set_low,
         &mut mode_idx_cdf,
         8,
@@ -759,10 +760,9 @@ fn write_intra_luma_mode(
     );
     if mode_set_low == 7 {
         let mut offset_cdf = DEFAULT_Y_MODE_IDX_OFFSET_CDFS[usize::from(mode_context)];
-        writer.write_symbol_with_cdf_key(
+        writer.write_symbol_with_static_cdf_key(
             mode.symbol_name(),
-            "tile.intra.y_mode_idx_offset",
-            usize::from(mode_context),
+            intra_y_mode_idx_offset_static_cdf_key(mode_context),
             mode_index - mode_set_low,
             &mut offset_cdf,
             6,
@@ -783,9 +783,9 @@ fn write_fsc_mode(
 ) {
     let context = fsc_context.min(DEFAULT_FSC_MODE_CDFS.len() - 1);
     let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[context][size_group];
-    writer.write_symbol_with_key(
+    writer.write_symbol_with_static_cdf_key(
         "tile.intra.fsc_mode",
-        context * DEFAULT_FSC_MODE_CDFS[context].len() + size_group,
+        intra_fsc_mode_static_cdf_key(context, size_group),
         usize::from(use_fsc),
         &mut fsc_cdf,
         2,
@@ -832,10 +832,9 @@ fn write_intra_chroma_mode(
         DEFAULT_UV_MODE_CTX0_CDF
     };
     let (name, index) = chroma_uv_mode_symbol(luma_mode, chroma_intra_mode);
-    writer.write_symbol_with_cdf_key(
+    writer.write_symbol_with_static_cdf_key(
         name,
-        "tile.intra.uv_mode_idx",
-        uv_mode_context,
+        intra_uv_mode_idx_static_cdf_key(uv_mode_context),
         index.min(7),
         &mut uv_mode_cdf,
         8,

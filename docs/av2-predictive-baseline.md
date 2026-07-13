@@ -452,6 +452,29 @@ Raw totals for the homogeneous inter partitions checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 5.88 fps.
 
+### Static CDF Keys For Tile Syntax
+
+The static CDF key checkpoint keeps tile syntax and output bytes unchanged, but
+resolves hot inter, IntraBC, partition split, FSC, and intra mode-index CDFs by
+fixed numeric keys instead of the generic string/key adaptive-CDF path.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 13.02 | 13.71 | +5.3% |
+| Scene 422 8-bit | 0 | 11.69 | 12.12 | +3.7% |
+| Scene 444 8-bit | 0 | 9.69 | 9.76 | +0.7% |
+| Mission 420 10-bit | 0 | 5.05 | 4.90 | -3.0% |
+| Mission 422 10-bit | 0 | 4.09 | 4.12 | +0.7% |
+| Mission 444 10-bit | 0 | 3.20 | 3.25 | +1.6% |
+| Total | 0 | 5.88 | 5.93 | +0.9% |
+
+Raw totals for the static CDF key checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 86,542,077.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 5.93 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference
