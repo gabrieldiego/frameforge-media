@@ -287,7 +287,7 @@ fn lossy_should_try_ac_quantized(dc_sse: usize, quant_step: i32) -> bool {
 }
 
 fn lossy_ac_candidate_is_reference_clean(coefficients: &[i32; TX4X4_SAMPLES]) -> bool {
-    const MAX_REFERENCE_CLEAN_EOB: usize = 8;
+    const MAX_REFERENCE_CLEAN_EOB: usize = TX4X4_SAMPLES;
     let (_, bounds) = lossless_coefficient_levels_and_bounds(coefficients);
     bounds.is_none_or(|(_, eob)| eob <= MAX_REFERENCE_CLEAN_EOB)
 }

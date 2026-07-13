@@ -137,13 +137,13 @@ Delta columns compare against the previous current chart for this report.
 
 | Vector | Format | Lossless size | Lossless Mbps | Lossless fps | Lossless PSNR | Lossy size | Lossy Mbps | Lossy fps | Lossy PSNR | Lossy bytes delta | Lossy FPS delta | Lossy PSNR delta | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.82 | inf | 4.54 MiB | 11.43 | 6.42 | 24.22 | +1,638 | +31.0% | +0.01 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
-| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 12.56 | inf | 4.89 MiB | 12.30 | 5.24 | 25.36 | +1,581 | +22.1% | +0.01 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
-| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 10.51 | inf | 5.34 MiB | 13.43 | 3.69 | 26.96 | +1,652 | +17.1% | +0.01 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
-| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.52 | inf | 11.74 MiB | 118.19 | 4.62 | 25.14 | -167,694 | +28.3% | +0.01 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
-| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.83 | inf | 12.28 MiB | 123.57 | 3.86 | 26.18 | -167,891 | +29.9% | +0.01 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
-| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.77 | inf | 12.89 MiB | 129.73 | 2.84 | 27.60 | -167,662 | +28.5% | +0.00 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
-| Total | mixed | 81.68 MiB | n/a | 8.63 | inf | 51.67 MiB | n/a | 4.15 | n/a | -498,376 | +26.1% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
+| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.82 | inf | 4.55 MiB | 11.44 | 6.17 | 24.24 | +4,863 | -4.0% | +0.02 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
+| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 12.56 | inf | 4.89 MiB | 12.31 | 5.22 | 25.38 | +4,935 | -0.4% | +0.02 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
+| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 10.51 | inf | 5.34 MiB | 13.44 | 3.74 | 26.97 | +4,780 | +1.3% | +0.01 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
+| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.52 | inf | 11.77 MiB | 118.51 | 4.42 | 25.24 | +32,938 | -4.3% | +0.10 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
+| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.83 | inf | 12.31 MiB | 123.88 | 3.75 | 26.28 | +32,296 | -2.8% | +0.10 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
+| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.77 | inf | 12.92 MiB | 130.04 | 2.71 | 27.70 | +32,129 | -4.5% | +0.10 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
+| Total | mixed | 81.68 MiB | n/a | 8.63 | inf | 51.78 MiB | n/a | 4.05 | n/a | +111,941 | -2.4% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
 
 ### Reused Lossy TXB Analysis
 
@@ -168,6 +168,23 @@ This checkpoint allows the QP24 sparse quantized residual candidate to use
 low-frequency shapes through EOB 8 instead of EOB 4. The focused reference
 probe still passes, and the six-vector set improves from 52.15 MiB to 51.67
 MiB while total QP24 encode speed rises from 3.29 fps to 4.15 fps.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
+QP24 reference probe: checker_420_8, canary_422_10, canary_444_10 all pass
+```
+
+### Full Sparse Quantized Residual Candidate Window
+
+This checkpoint lets the QP24 quantized residual candidate use any 4x4 EOB
+position after the distortion gate has selected the block for AC testing. The
+tradeoff versus the previous EOB 8 checkpoint is quality-biased: total size
+rises from 51.67 MiB to 51.78 MiB and total speed moves from 4.15 fps to 4.05
+fps, while the 10-bit rows gain about 0.10 dB PSNR.
 
 Validation:
 
