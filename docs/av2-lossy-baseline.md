@@ -130,3 +130,15 @@ realtime-screen target:
 | MissionControlClip1_422 | yuv422p10le | 12.44 MiB | 125.18 | 2.07 | 26.17 | -76,781 | +1.5% | +0.00 | 0.70 MiB | 14.94 | 34.98 | 17.71x |
 | MissionControlClip1_444 | yuv444p10le | 13.05 MiB | 131.34 | 1.59 | 27.60 | -76,015 | -2.6% | -0.00 | 0.74 MiB | 14.21 | 36.74 | 17.46x |
 | Total | mixed | 52.15 MiB | n/a | 2.30 | n/a | -296,636 | -1.7% | n/a | 3.25 MiB | n/a | n/a | 16.06x |
+
+Current three-way comparison:
+
+| Vector | Format | Lossless size | Lossless Mbps | Lossless fps | Lossless PSNR | Lossy size | Lossy Mbps | Lossy fps | Lossy PSNR | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.82 | inf | 4.54 MiB | 11.43 | 3.59 | 24.21 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
+| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 12.56 | inf | 4.89 MiB | 12.30 | 2.93 | 25.35 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
+| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 10.51 | inf | 5.33 MiB | 13.43 | 2.15 | 26.95 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
+| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.52 | inf | 11.90 MiB | 119.80 | 2.44 | 25.13 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
+| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.83 | inf | 12.44 MiB | 125.18 | 2.07 | 26.17 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
+| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.77 | inf | 13.05 MiB | 131.34 | 1.59 | 27.60 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
+| Total | mixed | 81.68 MiB | n/a | 8.63 | inf | 52.15 MiB | n/a | 2.30 | n/a | 3.25 MiB | n/a | 20.47 | n/a |
