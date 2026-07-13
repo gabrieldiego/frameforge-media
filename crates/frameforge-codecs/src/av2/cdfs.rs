@@ -240,15 +240,15 @@ const DEFAULT_INTRABC_CDFS: [[u16; 6]; 3] = [
     avm_cdf2(4503, 0, 0, 0),
 ];
 const DEFAULT_INTRABC_MODE_CDF: [u16; 6] = avm_cdf2(29993, 0, -1, -1);
-const DEFAULT_NDVC_JOINT_SHELL_SET_CDF: [u16; 6] = avm_cdf2(31579, -1, 0, 0);
-const DEFAULT_NDVC_JOINT_SHELL_CLASS0_ONE_PEL_CDF: [u16; 11] =
+const DEFAULT_MV_JOINT_SHELL_SET_CDF: [u16; 6] = avm_cdf2(31579, -1, 0, 0);
+const DEFAULT_MV_JOINT_SHELL_CLASS0_ONE_PEL_CDF: [u16; 11] =
     avm_cdf7(8680, 13723, 18208, 22686, 26722, 30020, 0, -1, 0);
-const DEFAULT_NDVC_JOINT_SHELL_CLASS1_ONE_PEL_CDF: [u16; 11] =
+const DEFAULT_MV_JOINT_SHELL_CLASS1_ONE_PEL_CDF: [u16; 11] =
     avm_cdf7(19978, 30160, 32564, 32732, 32736, 32740, 0, 0, -1);
-const DEFAULT_NDVC_SHELL_OFFSET_LOW_CLASS_CDFS: [[u16; 6]; 2] =
+const DEFAULT_MV_SHELL_OFFSET_LOW_CLASS_CDFS: [[u16; 6]; 2] =
     [avm_cdf2(14587, -1, -2, -1), avm_cdf2(20966, 1, 0, 0)];
-const DEFAULT_NDVC_SHELL_OFFSET_CLASS2_CDF: [u16; 6] = avm_cdf2(13189, 0, 0, 0);
-const DEFAULT_NDVC_SHELL_OFFSET_OTHER_CLASS_CDFS: [[u16; 6]; 16] = [
+const DEFAULT_MV_SHELL_OFFSET_CLASS2_CDF: [u16; 6] = avm_cdf2(13189, 0, 0, 0);
+const DEFAULT_MV_SHELL_OFFSET_OTHER_CLASS_CDFS: [[u16; 6]; 16] = [
     avm_cdf2(17943, 1, 1, 1),
     avm_cdf2(18934, 1, 1, 1),
     avm_cdf2(18928, 1, 1, 1),
@@ -266,9 +266,9 @@ const DEFAULT_NDVC_SHELL_OFFSET_OTHER_CLASS_CDFS: [[u16; 6]; 16] = [
     avm_cdf2(16384, 0, 0, 0),
     avm_cdf2(16384, 0, 0, 0),
 ];
-const DEFAULT_NDVC_COL_MV_GREATER_FLAGS_CDFS: [[u16; 6]; 2] =
+const DEFAULT_MV_COL_MV_GREATER_FLAGS_CDFS: [[u16; 6]; 2] =
     [avm_cdf2(5663, -1, 0, 0), avm_cdf2(4856, 1, 1, 0)];
-const DEFAULT_NDVC_COL_MV_INDEX_CDFS: [[u16; 6]; 4] = [
+const DEFAULT_MV_COL_MV_INDEX_CDFS: [[u16; 6]; 4] = [
     avm_cdf2(13445, 0, 0, -1),
     avm_cdf2(13541, 0, 0, -1),
     avm_cdf2(14045, 0, 0, -1),

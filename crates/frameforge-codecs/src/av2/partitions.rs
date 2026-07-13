@@ -499,7 +499,7 @@ fn write_intrabc_explicit_dv(writer: &mut Av2EntropyWriter, dv: Av2IntrabcExplic
     let diff_col = mv_col - ref_col;
     let scaled_row = (diff_row.unsigned_abs() >> 3) as usize;
     let scaled_col = (diff_col.unsigned_abs() >> 3) as usize;
-    write_intrabc_dv_magnitude(writer, scaled_row, scaled_col);
+    write_av2_one_pel_mv_magnitude(writer, AV2_INTRABC_DV_FIELD_NAMES, scaled_row, scaled_col);
     if diff_row != 0 {
         writer.write_literal_bit("tile.intrabc.dv.sign", diff_row < 0);
     }
@@ -508,7 +508,37 @@ fn write_intrabc_explicit_dv(writer: &mut Av2EntropyWriter, dv: Av2IntrabcExplic
     }
 }
 
-fn write_intrabc_dv_magnitude(writer: &mut Av2EntropyWriter, scaled_row: usize, scaled_col: usize) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2OnePelMvFieldNames {
+    shell_set: &'static str,
+    shell_class0: &'static str,
+    shell_class1: &'static str,
+    shell_offset_low: &'static str,
+    shell_offset_class2: &'static str,
+    shell_offset: &'static str,
+    col_gt: &'static str,
+    col_remainder: &'static str,
+    col_index: &'static str,
+}
+
+const AV2_INTRABC_DV_FIELD_NAMES: Av2OnePelMvFieldNames = Av2OnePelMvFieldNames {
+    shell_set: "tile.intrabc.dv.shell_set",
+    shell_class0: "tile.intrabc.dv.shell_class0",
+    shell_class1: "tile.intrabc.dv.shell_class1",
+    shell_offset_low: "tile.intrabc.dv.shell_offset_low",
+    shell_offset_class2: "tile.intrabc.dv.shell_offset_class2",
+    shell_offset: "tile.intrabc.dv.shell_offset",
+    col_gt: "tile.intrabc.dv.col_gt",
+    col_remainder: "tile.intrabc.dv.col_remainder",
+    col_index: "tile.intrabc.dv.col_index",
+};
+
+fn write_av2_one_pel_mv_magnitude(
+    writer: &mut Av2EntropyWriter,
+    names: Av2OnePelMvFieldNames,
+    scaled_row: usize,
+    scaled_col: usize,
+) {
     let shell_index = scaled_row + scaled_col;
     let (shell_class, shell_offset) = if shell_index < 2 {
         (0usize, shell_index)
@@ -520,22 +550,22 @@ fn write_intrabc_dv_magnitude(writer: &mut Av2EntropyWriter, scaled_row: usize, 
     let num_class0 = num_shell_classes >> 1;
     let num_class1 = num_shell_classes - num_class0;
 
-    let mut set_cdf = DEFAULT_NDVC_JOINT_SHELL_SET_CDF;
+    let mut set_cdf = DEFAULT_MV_JOINT_SHELL_SET_CDF;
     if shell_class < num_class0 {
-        writer.write_symbol("tile.intrabc.dv.shell_set", 0, &mut set_cdf, 2, false);
-        let mut class_cdf = DEFAULT_NDVC_JOINT_SHELL_CLASS0_ONE_PEL_CDF;
+        writer.write_symbol(names.shell_set, 0, &mut set_cdf, 2, false);
+        let mut class_cdf = DEFAULT_MV_JOINT_SHELL_CLASS0_ONE_PEL_CDF;
         writer.write_symbol(
-            "tile.intrabc.dv.shell_class0",
+            names.shell_class0,
             shell_class,
             &mut class_cdf,
             num_class0,
             false,
         );
     } else {
-        writer.write_symbol("tile.intrabc.dv.shell_set", 1, &mut set_cdf, 2, false);
-        let mut class_cdf = DEFAULT_NDVC_JOINT_SHELL_CLASS1_ONE_PEL_CDF;
+        writer.write_symbol(names.shell_set, 1, &mut set_cdf, 2, false);
+        let mut class_cdf = DEFAULT_MV_JOINT_SHELL_CLASS1_ONE_PEL_CDF;
         writer.write_symbol(
-            "tile.intrabc.dv.shell_class1",
+            names.shell_class1,
             shell_class - num_class0,
             &mut class_cdf,
             num_class1,
@@ -544,21 +574,15 @@ fn write_intrabc_dv_magnitude(writer: &mut Av2EntropyWriter, scaled_row: usize, 
     }
 
     if shell_class < 2 {
-        let mut offset_cdf = DEFAULT_NDVC_SHELL_OFFSET_LOW_CLASS_CDFS[shell_class];
-        writer.write_symbol(
-            "tile.intrabc.dv.shell_offset_low",
-            shell_offset,
-            &mut offset_cdf,
-            2,
-            false,
-        );
+        let mut offset_cdf = DEFAULT_MV_SHELL_OFFSET_LOW_CLASS_CDFS[shell_class];
+        writer.write_symbol(names.shell_offset_low, shell_offset, &mut offset_cdf, 2, false);
     } else if shell_class == 2 {
-        write_intrabc_dv_truncated_unary(writer, 3, shell_offset);
+        write_av2_one_pel_mv_truncated_unary(writer, names, 3, shell_offset);
     } else {
         for bit_idx in 0..shell_class {
-            let mut offset_cdf = DEFAULT_NDVC_SHELL_OFFSET_OTHER_CLASS_CDFS[bit_idx];
+            let mut offset_cdf = DEFAULT_MV_SHELL_OFFSET_OTHER_CLASS_CDFS[bit_idx];
             writer.write_symbol(
-                "tile.intrabc.dv.shell_offset",
+                names.shell_offset,
                 (shell_offset >> bit_idx) & 1,
                 &mut offset_cdf,
                 2,
@@ -568,28 +592,23 @@ fn write_intrabc_dv_magnitude(writer: &mut Av2EntropyWriter, scaled_row: usize, 
     }
 
     if shell_index > 0 {
-        write_intrabc_dv_col_index(writer, shell_class, shell_index, scaled_col);
+        write_av2_one_pel_mv_col_index(writer, names, shell_class, shell_index, scaled_col);
     }
 }
 
-fn write_intrabc_dv_truncated_unary(
+fn write_av2_one_pel_mv_truncated_unary(
     writer: &mut Av2EntropyWriter,
+    names: Av2OnePelMvFieldNames,
     max_coded_value: usize,
     coded_value: usize,
 ) {
     for bit_idx in 0..max_coded_value {
         let bit = usize::from(coded_value != bit_idx);
         if bit_idx == 0 {
-            let mut cdf = DEFAULT_NDVC_SHELL_OFFSET_CLASS2_CDF;
-            writer.write_symbol(
-                "tile.intrabc.dv.shell_offset_class2",
-                bit,
-                &mut cdf,
-                2,
-                false,
-            );
+            let mut cdf = DEFAULT_MV_SHELL_OFFSET_CLASS2_CDF;
+            writer.write_symbol(names.shell_offset_class2, bit, &mut cdf, 2, false);
         } else {
-            writer.write_literal_bit("tile.intrabc.dv.shell_offset_class2", bit != 0);
+            writer.write_literal_bit(names.shell_offset_class2, bit != 0);
         }
         if coded_value == bit_idx {
             break;
@@ -597,8 +616,9 @@ fn write_intrabc_dv_truncated_unary(
     }
 }
 
-fn write_intrabc_dv_col_index(
+fn write_av2_one_pel_mv_col_index(
     writer: &mut Av2EntropyWriter,
+    names: Av2OnePelMvFieldNames,
     shell_class: usize,
     shell_index: usize,
     scaled_col: usize,
@@ -610,14 +630,14 @@ fn write_intrabc_dv_col_index(
         shell_index - scaled_col
     };
     if maximum_pair_index > 0 {
-        write_intrabc_dv_col_pair_index(writer, maximum_pair_index, this_pair_index);
+        write_av2_one_pel_mv_col_pair_index(writer, names, maximum_pair_index, this_pair_index);
     }
     let skip_col_bit = this_pair_index == maximum_pair_index && (shell_index % 2 == 0);
     if !skip_col_bit {
         let context = shell_class.min(3);
-        let mut cdf = DEFAULT_NDVC_COL_MV_INDEX_CDFS[context];
+        let mut cdf = DEFAULT_MV_COL_MV_INDEX_CDFS[context];
         writer.write_symbol(
-            "tile.intrabc.dv.col_index",
+            names.col_index,
             usize::from(scaled_col > maximum_pair_index),
             &mut cdf,
             2,
@@ -626,8 +646,9 @@ fn write_intrabc_dv_col_index(
     }
 }
 
-fn write_intrabc_dv_col_pair_index(
+fn write_av2_one_pel_mv_col_pair_index(
     writer: &mut Av2EntropyWriter,
+    names: Av2OnePelMvFieldNames,
     maximum_pair_index: usize,
     this_pair_index: usize,
 ) {
@@ -636,9 +657,9 @@ fn write_intrabc_dv_col_pair_index(
     let coded_col = this_pair_index.min(max_trunc_unary_value);
     for bit_idx in 0..max_idx_bits {
         let context = bit_idx.min(1);
-        let mut cdf = DEFAULT_NDVC_COL_MV_GREATER_FLAGS_CDFS[context];
+        let mut cdf = DEFAULT_MV_COL_MV_GREATER_FLAGS_CDFS[context];
         writer.write_symbol(
-            "tile.intrabc.dv.col_gt",
+            names.col_gt,
             usize::from(coded_col != bit_idx),
             &mut cdf,
             2,
@@ -651,11 +672,7 @@ fn write_intrabc_dv_col_pair_index(
     if maximum_pair_index > max_trunc_unary_value && this_pair_index >= max_trunc_unary_value {
         let remainder = this_pair_index - max_trunc_unary_value;
         let remainder_max = maximum_pair_index - max_trunc_unary_value;
-        writer.write_uniform(
-            "tile.intrabc.dv.col_remainder",
-            (remainder_max + 1) as u32,
-            remainder as u32,
-        );
+        writer.write_uniform(names.col_remainder, (remainder_max + 1) as u32, remainder as u32);
     }
 }
 
