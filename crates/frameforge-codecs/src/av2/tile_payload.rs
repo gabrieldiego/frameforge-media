@@ -220,7 +220,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             palette,
             partition_policy,
             Av2LosslessSubsampledModeSearch::Exhaustive,
-            None,
+            ibc,
             record_fields,
             true,
         );
@@ -1052,6 +1052,7 @@ impl Av2Black444TilePlan {
                         decision.block_size,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        self.chroma_format,
                     );
                     palette_cache_context.clear_leaf(
                         decision.row,
@@ -1377,6 +1378,7 @@ impl Av2Black444TilePlan {
                         decision.block_size,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        self.chroma_format,
                     );
                     luma_mode_context.update_leaf(
                         decision.row,
@@ -1471,8 +1473,8 @@ impl Av2Black444TilePlan {
                         mode.coded_luma_mode(),
                         mode.chroma_intra_mode,
                     );
-                    if let Some(palette) = palette {
-                        if mode.use_luma_palette {
+                    if mode.use_luma_palette {
+                        if let Some(palette) = palette {
                             write_luma_palette_mode_info(
                                 writer,
                                 *decision,
@@ -1488,21 +1490,22 @@ impl Av2Black444TilePlan {
                                 self.origin_x,
                                 self.origin_y,
                             );
-                        } else if mode.coded_luma_mode() == Av2LumaIntraMode::Dc
-                            && mode.luma_bdpcm_horz.is_none()
-                        {
-                            write_luma_palette_absent_mode_info(
-                                writer,
-                                *decision,
-                                &mut palette_cache_context,
-                            );
-                        } else {
-                            palette_cache_context.clear_leaf(
-                                decision.row,
-                                decision.col,
-                                decision.block_size,
-                            );
                         }
+                    } else if (self.allow_intrabc || palette.is_some())
+                        && mode.coded_luma_mode() == Av2LumaIntraMode::Dc
+                        && mode.luma_bdpcm_horz.is_none()
+                    {
+                        write_luma_palette_absent_mode_info(
+                            writer,
+                            *decision,
+                            &mut palette_cache_context,
+                        );
+                    } else if palette.is_some() {
+                        palette_cache_context.clear_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
                     }
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
@@ -1574,6 +1577,7 @@ impl Av2TxbEntropyContexts {
         block_size: Av2MvpBlockSize,
         visible_rows_mi: usize,
         visible_cols_mi: usize,
+        chroma_format: Av2ChromaFormat,
     ) {
         let txb_width = block_size
             .tx4x4_width()
@@ -1583,11 +1587,29 @@ impl Av2TxbEntropyContexts {
             .min(visible_rows_mi.saturating_sub(row_mi));
         for col in col_mi..(col_mi + txb_width).min(self.y_above.len()) {
             self.y_above[col] = 0;
-            self.u_above[col] = 0;
-            self.v_above[col] = 0;
         }
         for row in row_mi..(row_mi + txb_height).min(self.y_left.len()) {
             self.y_left[row] = 0;
+        }
+
+        let chroma_span = chroma_tx4x4_span(
+            Av2TileDecision {
+                kind: Av2TileDecisionKind::Partition(Av2MvpPartition::None),
+                row: row_mi,
+                col: col_mi,
+                block_size,
+            },
+            visible_rows_mi,
+            visible_cols_mi,
+            chroma_format,
+        );
+        for col in
+            chroma_span.col..(chroma_span.col + chroma_span.width).min(self.u_above.len())
+        {
+            self.u_above[col] = 0;
+            self.v_above[col] = 0;
+        }
+        for row in chroma_span.row..(chroma_span.row + chroma_span.height).min(self.u_left.len()) {
             self.u_left[row] = 0;
             self.v_left[row] = 0;
         }

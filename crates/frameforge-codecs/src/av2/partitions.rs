@@ -691,14 +691,7 @@ fn write_intra_luma_mode(
             false,
         );
         if let Some(size_group) = decision.block_size.fsc_size_group() {
-            let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
-            writer.write_symbol(
-                "tile.intra.fsc_mode",
-                usize::from(use_fsc),
-                &mut fsc_cdf,
-                2,
-                false,
-            );
+            write_fsc_mode(writer, fsc_context, size_group, use_fsc);
         }
         return;
     }
@@ -730,14 +723,7 @@ fn write_intra_luma_mode(
             4,
         );
         if let Some(size_group) = decision.block_size.fsc_size_group() {
-            let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
-            writer.write_symbol(
-                "tile.intra.fsc_mode",
-                usize::from(use_fsc),
-                &mut fsc_cdf,
-                2,
-                false,
-            );
+            write_fsc_mode(writer, fsc_context, size_group, use_fsc);
         }
         return;
     }
@@ -768,15 +754,26 @@ fn write_intra_luma_mode(
     }
 
     if let Some(size_group) = decision.block_size.fsc_size_group() {
-        let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[fsc_context.min(2)][size_group];
-        writer.write_symbol(
-            "tile.intra.fsc_mode",
-            usize::from(use_fsc),
-            &mut fsc_cdf,
-            2,
-            false,
-        );
+        write_fsc_mode(writer, fsc_context, size_group, use_fsc);
     }
+}
+
+fn write_fsc_mode(
+    writer: &mut Av2EntropyWriter,
+    fsc_context: usize,
+    size_group: usize,
+    use_fsc: bool,
+) {
+    let context = fsc_context.min(2);
+    let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[context][size_group];
+    writer.write_symbol_with_key(
+        "tile.intra.fsc_mode",
+        context * DEFAULT_FSC_MODE_CDFS[context].len() + size_group,
+        usize::from(use_fsc),
+        &mut fsc_cdf,
+        2,
+        false,
+    );
 }
 
 fn write_intra_chroma_mode(

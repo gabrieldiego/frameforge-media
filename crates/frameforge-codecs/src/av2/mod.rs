@@ -58,7 +58,7 @@ const AV2_MAX_TILE_COLS: usize = 64;
 const AV2_MAX_TILE_ROWS: usize = 64;
 const AV2_TILE_WIDTH_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_TILE_AREA_SCALING_LEVEL_2_0_TIER_0: usize = 4;
-const AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC: bool = false;
+const AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC: bool = true;
 const AV2_ENABLE_LUMA_PALETTE_INTRABC_444: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

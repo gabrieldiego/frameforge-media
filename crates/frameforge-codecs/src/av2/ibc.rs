@@ -157,9 +157,9 @@ pub(crate) fn build_local_ibc_subsampled(
     assert!(
         matches!(
             chroma_format,
-            Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422
+            Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
         ),
-        "AV2 subsampled IBC expects 4:2:0 or 4:2:2 input"
+        "AV2 planar IBC expects 4:2:0, 4:2:2, or 4:4:4 input"
     );
     build_local_ibc(frame, geometry, chroma_format, bit_depth, None)
 }
@@ -270,6 +270,10 @@ fn build_local_ibc(
                     visit_local_ibc_block(
                         &mut blocks,
                         &mut coded_blocks,
+                        frame,
+                        geometry,
+                        chroma_format,
+                        bit_depth,
                         blocks_wide,
                         blocks_high,
                         block_x,
@@ -305,6 +309,10 @@ fn build_local_ibc(
 fn visit_local_ibc_block(
     blocks: &mut [Av2LocalIbcBlock444],
     coded_blocks: &mut [bool],
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
     blocks_wide: usize,
     blocks_high: usize,
     block_x: usize,
@@ -325,8 +333,20 @@ fn visit_local_ibc_block(
     // slots. This permits DRL 0/1 when a neighbor already carries the
     // desired {0,-8} or {-8,0} vector, while still using DRL 2/3 when
     // the defaults are unshifted.
-    let left_in_same_tile = x0 % AV2_IBC_TILE_SIZE != 0;
-    let above_in_same_tile = y0 % AV2_IBC_TILE_SIZE != 0;
+    let left_in_same_tile = local_ibc_vector_is_valid_8x8(
+        block_x,
+        block_y,
+        blocks_wide,
+        blocks_high,
+        AV2_IBC_BV_LEFT_8X8,
+    );
+    let above_in_same_tile = local_ibc_vector_is_valid_8x8(
+        block_x,
+        block_y,
+        blocks_wide,
+        blocks_high,
+        AV2_IBC_BV_ABOVE_8X8,
+    );
     if left_in_same_tile {
         stats.blocks_with_left_in_tile += 1;
     }
@@ -367,9 +387,35 @@ fn visit_local_ibc_block(
     }
 
     let raw_above_match = above_in_same_tile
-        && above_index.is_some_and(|index| coded_blocks[index] && blocks[index].hash == hash);
+        && above_index.is_some_and(|index| {
+            coded_blocks[index]
+                && blocks[index].hash == hash
+                && planar_yuv_8x8_regions_equal(
+                    frame,
+                    geometry,
+                    chroma_format,
+                    bit_depth,
+                    x0,
+                    y0,
+                    x0,
+                    y0 - AV2_IBC_HASH_BLOCK_SIZE,
+                )
+        });
     let raw_left_match = left_in_same_tile
-        && left_index.is_some_and(|index| coded_blocks[index] && blocks[index].hash == hash);
+        && left_index.is_some_and(|index| {
+            coded_blocks[index]
+                && blocks[index].hash == hash
+                && planar_yuv_8x8_regions_equal(
+                    frame,
+                    geometry,
+                    chroma_format,
+                    bit_depth,
+                    x0,
+                    y0,
+                    x0 - AV2_IBC_HASH_BLOCK_SIZE,
+                    y0,
+                )
+        });
     let direct_above_match = raw_above_match && above_drl_idx.is_some();
     let direct_left_match = raw_left_match && left_drl_idx.is_some();
     if raw_above_match {
@@ -425,6 +471,10 @@ fn visit_local_ibc_block(
     let explicit_candidate = find_local_explicit_candidate(
         blocks,
         coded_blocks,
+        frame,
+        geometry,
+        chroma_format,
+        bit_depth,
         blocks_wide,
         blocks_high,
         block_x,
@@ -454,6 +504,10 @@ fn visit_local_ibc_block(
 fn find_local_explicit_candidate(
     blocks: &[Av2LocalIbcBlock444],
     coded_blocks: &[bool],
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
     blocks_wide: usize,
     blocks_high: usize,
     block_x: usize,
@@ -474,13 +528,29 @@ fn find_local_explicit_candidate(
             if !coded_blocks[ref_index] || blocks[ref_index].hash != hash {
                 continue;
             }
+            let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
+            let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
+            let ref_x0 = ref_block_x * AV2_IBC_HASH_BLOCK_SIZE;
+            let ref_y0 = ref_block_y * AV2_IBC_HASH_BLOCK_SIZE;
+            if !planar_yuv_8x8_regions_equal(
+                frame,
+                geometry,
+                chroma_format,
+                bit_depth,
+                x0,
+                y0,
+                ref_x0,
+                ref_y0,
+            ) {
+                continue;
+            }
             let vector = Av2LocalIbcVector {
                 row_px: ((ref_block_y as isize - block_y as isize)
                     * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
                 col_px: ((ref_block_x as isize - block_x as isize)
                     * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
             };
-            if !local_ibc_vector_is_valid_8x8(vector) {
+            if !local_ibc_vector_is_valid_8x8(block_x, block_y, blocks_wide, blocks_high, vector) {
                 continue;
             }
             update_best_explicit_candidate(&mut best, bvp_stack, vector);
@@ -490,10 +560,49 @@ fn find_local_explicit_candidate(
     best.map(|(copy, vector, _)| (copy, vector))
 }
 
-fn local_ibc_vector_is_valid_8x8(vector: Av2LocalIbcVector) -> bool {
-    let width = AV2_IBC_HASH_BLOCK_SIZE as i16;
-    let height = AV2_IBC_HASH_BLOCK_SIZE as i16;
-    vector.col_px + width <= 0 || vector.row_px + height <= 0
+fn local_ibc_vector_is_valid_8x8(
+    block_x: usize,
+    block_y: usize,
+    blocks_wide: usize,
+    blocks_high: usize,
+    vector: Av2LocalIbcVector,
+) -> bool {
+    const LOCAL_LEFT_SB_COUNT: isize = 4;
+    let width = AV2_IBC_HASH_BLOCK_SIZE as isize;
+    let height = AV2_IBC_HASH_BLOCK_SIZE as isize;
+    let frame_width = (blocks_wide * AV2_IBC_HASH_BLOCK_SIZE) as isize;
+    let frame_height = (blocks_high * AV2_IBC_HASH_BLOCK_SIZE) as isize;
+    let x0 = (block_x * AV2_IBC_HASH_BLOCK_SIZE) as isize;
+    let y0 = (block_y * AV2_IBC_HASH_BLOCK_SIZE) as isize;
+    let src_left_x = x0 + isize::from(vector.col_px);
+    let src_top_y = y0 + isize::from(vector.row_px);
+    let src_right_x = src_left_x + width - 1;
+    let src_bottom_y = src_top_y + height - 1;
+
+    if src_left_x < 0 || src_top_y < 0 || src_right_x >= frame_width || src_bottom_y >= frame_height
+    {
+        return false;
+    }
+
+    // AV2 v1.0.0 av2_is_dv_in_local_range(): the source must not overlap the
+    // uncoded bottom-right region of the active block.
+    if isize::from(vector.col_px) + width > 0 && isize::from(vector.row_px) + height > 0 {
+        return false;
+    }
+
+    let act_sb_col = x0 / AV2_IBC_TILE_SIZE as isize;
+    let act_sb_row = y0 / AV2_IBC_TILE_SIZE as isize;
+    let src_left_sb_col = src_left_x / AV2_IBC_TILE_SIZE as isize;
+    let src_right_sb_col = src_right_x / AV2_IBC_TILE_SIZE as isize;
+    let src_top_sb_row = src_top_y / AV2_IBC_TILE_SIZE as isize;
+    let src_bottom_sb_row = src_bottom_y / AV2_IBC_TILE_SIZE as isize;
+
+    // Local IntraBC references stay in the active superblock row and may look
+    // back only through the spec's 4x64x64 local reference buffer.
+    src_top_sb_row == act_sb_row
+        && src_bottom_sb_row == act_sb_row
+        && src_right_sb_col <= act_sb_col
+        && src_left_sb_col >= act_sb_col - LOCAL_LEFT_SB_COUNT
 }
 
 fn update_best_explicit_candidate(
@@ -658,6 +767,92 @@ fn hash_plane_region(
         }
     }
     hash
+}
+
+fn planar_yuv_8x8_regions_equal(
+    frame: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    x0: usize,
+    y0: usize,
+    ref_x0: usize,
+    ref_y0: usize,
+) -> bool {
+    let y_len = geometry.width * geometry.height;
+    let sub_x = match chroma_format {
+        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
+        Av2ChromaFormat::Yuv444 => 1,
+    };
+    let sub_y = match chroma_format {
+        Av2ChromaFormat::Yuv420 => 2,
+        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
+    };
+    let c_width = geometry.width / sub_x;
+    let c_height = geometry.height / sub_y;
+    let c_len = c_width * c_height;
+    let bytes_per_sample = bit_depth.bytes_per_sample();
+    let y_bytes = y_len * bytes_per_sample;
+    let c_bytes = c_len * bytes_per_sample;
+
+    if !plane_regions_equal(
+        &frame[..y_bytes],
+        geometry.width,
+        x0,
+        y0,
+        ref_x0,
+        ref_y0,
+        AV2_IBC_HASH_BLOCK_SIZE,
+        AV2_IBC_HASH_BLOCK_SIZE,
+        bytes_per_sample,
+    ) {
+        return false;
+    }
+    let chroma_width = AV2_IBC_HASH_BLOCK_SIZE / sub_x;
+    let chroma_height = AV2_IBC_HASH_BLOCK_SIZE / sub_y;
+    for plane_data in [
+        &frame[y_bytes..y_bytes + c_bytes],
+        &frame[y_bytes + c_bytes..y_bytes + 2 * c_bytes],
+    ] {
+        if !plane_regions_equal(
+            plane_data,
+            c_width,
+            x0 / sub_x,
+            y0 / sub_y,
+            ref_x0 / sub_x,
+            ref_y0 / sub_y,
+            chroma_width,
+            chroma_height,
+            bytes_per_sample,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn plane_regions_equal(
+    plane_data: &[u8],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    ref_x0: usize,
+    ref_y0: usize,
+    width: usize,
+    height: usize,
+    bytes_per_sample: usize,
+) -> bool {
+    let row_bytes = width * bytes_per_sample;
+    for local_y in 0..height {
+        let row_start = ((y0 + local_y) * stride + x0) * bytes_per_sample;
+        let ref_row_start = ((ref_y0 + local_y) * stride + ref_x0) * bytes_per_sample;
+        if &plane_data[row_start..row_start + row_bytes]
+            != &plane_data[ref_row_start..ref_row_start + row_bytes]
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn mix_ibc_hash_packet(hash: u32, packet: &[u8], component: u32, sample_offset: u32) -> u32 {
