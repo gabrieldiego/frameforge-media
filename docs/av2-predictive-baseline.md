@@ -525,6 +525,30 @@ Raw totals for the parallel predictive tile payload checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 9.53 fps.
 
+### Release Range-Coder Invariants
+
+The release range-coder invariant checkpoint keeps public CDF validation in
+place, but makes the internal range-coder invariants debug-only and marks the
+small arithmetic helpers as explicit inline candidates. The emitted bitstreams
+stayed byte-identical on the 50-frame baseline.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 16.51 | 17.62 | +6.7% |
+| Scene 422 8-bit | 0 | 14.60 | 14.77 | +1.2% |
+| Scene 444 8-bit | 0 | 11.37 | 11.61 | +2.1% |
+| Mission 420 10-bit | 0 | 8.63 | 9.44 | +9.4% |
+| Mission 422 10-bit | 0 | 7.50 | 7.84 | +4.5% |
+| Mission 444 10-bit | 0 | 6.12 | 6.14 | +0.3% |
+| Total | 0 | 9.53 | 9.89 | +3.8% |
+
+Raw totals for the release range-coder invariant checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 86,542,077.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 9.89 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference

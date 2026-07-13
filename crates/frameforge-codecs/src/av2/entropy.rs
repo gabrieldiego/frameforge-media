@@ -398,6 +398,7 @@ impl Av2EntropyWriter {
         }
     }
 
+    #[inline(always)]
     fn encode_literal_bypass(&mut self, value: u32, bits: u8) {
         assert!(
             bits <= 31,
@@ -545,12 +546,13 @@ impl Av2EntropyWriter {
         index
     }
 
+    #[inline(always)]
     fn push_precarry(&mut self, word: u16) {
         // AVM stores pre-carry values as uint16_t, but the AV2 range coder
         // normalize()/exit_symbol() process is expected to emit a 9-bit
         // byte-plus-carry value. Keeping this invariant explicit is what makes
         // a VVC-style forward delayed-carry finalizer possible.
-        assert!(
+        debug_assert!(
             word <= 0x01ff,
             "AV2 pre-carry word exceeded the 9-bit forward-carry invariant: {word:#06x}"
         );
@@ -559,9 +561,10 @@ impl Av2EntropyWriter {
         self.reverse_precarry.push(word);
     }
 
+    #[inline(always)]
     fn encode_q15(&mut self, fl: u32, fh: u32, symbol: usize, nsymbs: usize) {
-        assert!(fh <= fl, "AV2 inverse CDF must be monotonic");
-        assert!(fl <= CDF_PROB_TOP, "AV2 inverse CDF exceeds Q15 top");
+        debug_assert!(fh <= fl, "AV2 inverse CDF must be monotonic");
+        debug_assert!(fl <= CDF_PROB_TOP, "AV2 inverse CDF exceeds Q15 top");
         let mut low = self.low;
         let mut rng = self.rng;
         if fl < CDF_PROB_TOP {
@@ -576,8 +579,9 @@ impl Av2EntropyWriter {
         self.normalize(low, rng, 0);
     }
 
+    #[inline(always)]
     fn normalize(&mut self, mut low: u64, rng: u32, bypass_bits: i32) {
-        assert!(rng <= 65535, "AV2 range must fit 16 bits before normalize");
+        debug_assert!(rng <= 65535, "AV2 range must fit 16 bits before normalize");
         let mut c = self.cnt;
         let d = if bypass_bits > 0 {
             c += bypass_bits;
@@ -806,6 +810,7 @@ fn update_cdf_counts(cdf: &mut [u16], symbol: usize, nsymbs: usize) {
     }
 }
 
+#[inline(always)]
 fn prob_scale(p: u32, rng: u32, symbol: usize, nsymbs: usize) -> u32 {
     let rr = rng >> 8;
     let mut pp = ((p >> EC_PROB_SHIFT) << 4) as i32;
@@ -813,11 +818,13 @@ fn prob_scale(p: u32, rng: u32, symbol: usize, nsymbs: usize) -> u32 {
     (((rr as i32 * pp) >> 7) as u32) << 3
 }
 
+#[inline(always)]
 fn ilog_nz(value: u32) -> i32 {
     debug_assert!(value != 0);
     (u32::BITS - value.leading_zeros()) as i32
 }
 
+#[inline(always)]
 fn mask(bits: i32) -> u64 {
     if bits <= 0 {
         0
