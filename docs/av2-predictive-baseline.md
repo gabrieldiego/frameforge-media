@@ -475,6 +475,30 @@ Raw totals for the static CDF key checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 5.93 fps.
 
+### Dense Reference Hash Cache
+
+The dense reference hash cache checkpoint stores lazy per-block reference
+hashes in a sentinel-backed `u64` vector instead of an `Option<u64>` vector.
+Motion-search candidate order and final bitstreams stay unchanged while the
+hot hash-cache probe avoids the larger optional payload.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 13.71 | 14.20 | +3.6% |
+| Scene 422 8-bit | 0 | 12.12 | 12.17 | +0.4% |
+| Scene 444 8-bit | 0 | 9.76 | 9.67 | -0.9% |
+| Mission 420 10-bit | 0 | 4.90 | 5.03 | +2.7% |
+| Mission 422 10-bit | 0 | 4.12 | 4.12 | 0.0% |
+| Mission 444 10-bit | 0 | 3.25 | 3.25 | 0.0% |
+| Total | 0 | 5.93 | 5.97 | +0.7% |
+
+Raw totals for the dense reference hash cache checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 86,542,077.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 5.97 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference

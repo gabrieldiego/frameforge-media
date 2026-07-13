@@ -7,6 +7,7 @@ use crate::picture::SampleBitDepth;
 pub(crate) const AV2_LOSSLESS_ME_BLOCK_SIZE: usize = 8;
 const AV2_LOSSLESS_ME_HASH_BUCKET_LIMIT: usize = 8;
 const AV2_LOSSLESS_ME_SEARCH_BLOCK_STEPS: [i16; 4] = [1, 2, 4, 8];
+const AV2_REFERENCE_HASH_UNSET: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Av2MotionVector {
@@ -218,7 +219,7 @@ fn build_lossless_motion_map_with_regions(
         });
     }
 
-    let mut reference_hashes = vec![None; blocks_wide * blocks_high];
+    let mut reference_hashes = vec![AV2_REFERENCE_HASH_UNSET; blocks_wide * blocks_high];
     let mut reference_hash_index = None;
     let mut candidates = Vec::with_capacity(48);
     for block_y in 0..blocks_high {
@@ -347,7 +348,7 @@ fn build_lossless_motion_map_with_regions(
 }
 
 fn reference_hash_for_block(
-    reference_hashes: &mut [Option<u64>],
+    reference_hashes: &mut [u64],
     layout: Av2PlanarYuvLayout,
     reference: &[u8],
     blocks_wide: usize,
@@ -355,8 +356,9 @@ fn reference_hash_for_block(
     block_y: usize,
 ) -> u64 {
     let index = block_y * blocks_wide + block_x;
-    if let Some(hash) = reference_hashes[index] {
-        return hash;
+    let cached_hash = reference_hashes[index];
+    if cached_hash != AV2_REFERENCE_HASH_UNSET {
+        return cached_hash;
     }
     let hash = layout.hash_region(
         reference,
@@ -365,12 +367,14 @@ fn reference_hash_for_block(
         AV2_LOSSLESS_ME_BLOCK_SIZE,
         AV2_LOSSLESS_ME_BLOCK_SIZE,
     );
-    reference_hashes[index] = Some(hash);
+    if hash != AV2_REFERENCE_HASH_UNSET {
+        reference_hashes[index] = hash;
+    }
     hash
 }
 
 fn build_reference_hash_index(
-    reference_hashes: &mut [Option<u64>],
+    reference_hashes: &mut [u64],
     layout: Av2PlanarYuvLayout,
     reference: &[u8],
     blocks_wide: usize,
@@ -457,7 +461,7 @@ fn hash_index_candidate(
 fn select_first_exact_candidate(
     candidates: &[Av2MotionCandidate],
     stats: &mut Av2LosslessMotionStats,
-    reference_hashes: &mut [Option<u64>],
+    reference_hashes: &mut [u64],
     layout: Av2PlanarYuvLayout,
     current: &[u8],
     reference: &[u8],
