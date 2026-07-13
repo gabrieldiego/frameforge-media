@@ -223,22 +223,44 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
-    fn quantized_dc_delta(&self, plane: Av2LossyPlane, x0: usize, y0: usize) -> i16 {
+    fn analyze_txb(&self, plane: Av2LossyPlane, x0: usize, y0: usize) -> Av2LossyTxbAnalysis {
+        let mut source = [0; TX4X4_SAMPLES];
+        let mut predictor = [0; TX4X4_SAMPLES];
+        let mut residual = [0i32; TX4X4_SAMPLES];
         let mut sum = 0i32;
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
-                let predictor =
-                    i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                sum += i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
-                    - predictor;
+                let index = local_y * TX4X4_SIZE + local_x;
+                let predictor_sample = self.predictor_sample(plane, x0, y0, local_x, local_y);
+                let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
+                let diff = i32::from(source_sample) - i32::from(predictor_sample);
+                source[index] = source_sample;
+                predictor[index] = predictor_sample;
+                residual[index] = diff;
+                sum += diff;
             }
         }
         let average = round_div_i32(sum, TX4X4_SAMPLES as i32);
         let max_delta = i32::from(self.bit_depth.max_sample());
-        quantize_i32_to_step(average, self.quant_step()).clamp(-max_delta, max_delta) as i16
+        let delta = quantize_i32_to_step(average, self.quant_step()).clamp(-max_delta, max_delta)
+            as i16;
+        let dc_sse = txb_dc_recon_sse(&source, &predictor, delta, self.bit_depth);
+        Av2LossyTxbAnalysis {
+            source,
+            predictor,
+            residual,
+            delta,
+            dc_sse,
+        }
     }
 
-    fn fill_quantized_recon_txb(&mut self, plane: Av2LossyPlane, x0: usize, y0: usize, delta: i16) {
+    fn fill_quantized_recon_txb(
+        &mut self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        analysis: &Av2LossyTxbAnalysis,
+    ) {
         let (plane_width, plane_height) = self.plane_geometry(plane);
         for local_y in 0..TX4X4_SIZE {
             let y = y0 + local_y;
@@ -248,9 +270,9 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             for local_x in 0..TX4X4_SIZE {
                 let x = x0 + local_x;
                 if x < plane_width {
-                    let predictor =
-                        i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                    let sample = (predictor + i32::from(delta))
+                    let index = local_y * TX4X4_SIZE + local_x;
+                    let predictor = i32::from(analysis.predictor[index]);
+                    let sample = (predictor + i32::from(analysis.delta))
                         .clamp(0, i32::from(self.bit_depth.max_sample()))
                         as Av2Sample;
                     self.set_recon_sample(plane, x, y, sample);
@@ -264,6 +286,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         plane: Av2LossyPlane,
         x0: usize,
         y0: usize,
+        analysis: &Av2LossyTxbAnalysis,
         residual: &[i32; TX4X4_SAMPLES],
     ) {
         let (plane_width, plane_height) = self.plane_geometry(plane);
@@ -275,9 +298,9 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             for local_x in 0..TX4X4_SIZE {
                 let x = x0 + local_x;
                 if x < plane_width {
-                    let predictor =
-                        i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                    let sample = (predictor + residual[local_y * TX4X4_SIZE + local_x])
+                    let index = local_y * TX4X4_SIZE + local_x;
+                    let predictor = i32::from(analysis.predictor[index]);
+                    let sample = (predictor + residual[index])
                         .clamp(0, i32::from(self.bit_depth.max_sample()))
                         as Av2Sample;
                     self.set_recon_sample(plane, x, y, sample);
@@ -286,7 +309,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
-    fn copy_source_to_recon_txb(&mut self, plane: Av2LossyPlane, x0: usize, y0: usize) {
+    fn copy_source_to_recon_txb(
+        &mut self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        analysis: &Av2LossyTxbAnalysis,
+    ) {
         let (plane_width, plane_height) = self.plane_geometry(plane);
         for local_y in 0..TX4X4_SIZE {
             let y = y0 + local_y;
@@ -296,93 +325,53 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             for local_x in 0..TX4X4_SIZE {
                 let x = x0 + local_x;
                 if x < plane_width {
-                    self.set_recon_sample(plane, x, y, self.source_sample(plane, x, y));
+                    let index = local_y * TX4X4_SIZE + local_x;
+                    self.set_recon_sample(plane, x, y, analysis.source[index]);
                 }
             }
         }
     }
 
-    fn exact_residual4x4(
+    fn quantized_residual_candidate(
         &self,
-        plane: Av2LossyPlane,
-        x0: usize,
-        y0: usize,
-    ) -> [i32; TX4X4_SAMPLES] {
-        let mut residual = [0i32; TX4X4_SAMPLES];
-        for local_y in 0..TX4X4_SIZE {
-            for local_x in 0..TX4X4_SIZE {
-                let source = i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
-                let predictor = i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                residual[local_y * TX4X4_SIZE + local_x] = source - predictor;
-            }
-        }
-        residual
-    }
-
-    fn quantized_residual4x4(
-        &self,
-        plane: Av2LossyPlane,
-        x0: usize,
-        y0: usize,
-    ) -> [i32; TX4X4_SAMPLES] {
+        analysis: &Av2LossyTxbAnalysis,
+    ) -> ([i32; TX4X4_SAMPLES], usize) {
         let mut residual = [0i32; TX4X4_SAMPLES];
         let step = self.quant_step();
         let max_sample = i32::from(self.bit_depth.max_sample());
-        for local_y in 0..TX4X4_SIZE {
-            for local_x in 0..TX4X4_SIZE {
-                let predictor =
-                    i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                let source = i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
-                let diff = source - predictor;
-                residual[local_y * TX4X4_SIZE + local_x] =
-                    quantize_i32_to_step(diff, step).clamp(-predictor, max_sample - predictor);
-            }
-        }
-        residual
-    }
-
-    fn quantized_recon_sse(&self, plane: Av2LossyPlane, x0: usize, y0: usize, delta: i16) -> usize {
         let mut sse = 0usize;
-        for local_y in 0..TX4X4_SIZE {
-            for local_x in 0..TX4X4_SIZE {
-                let predictor =
-                    i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                let recon = (predictor + i32::from(delta))
-                    .clamp(0, i32::from(self.bit_depth.max_sample()));
-                let source = i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
-                let diff = source - recon;
-                sse += (diff * diff) as usize;
-            }
+        for index in 0..TX4X4_SAMPLES {
+            let predictor = i32::from(analysis.predictor[index]);
+            let source = i32::from(analysis.source[index]);
+            let quantized = quantize_i32_to_step(analysis.residual[index], step)
+                .clamp(-predictor, max_sample - predictor);
+            residual[index] = quantized;
+            let recon = (predictor + quantized).clamp(0, max_sample);
+            let diff = source - recon;
+            sse += (diff * diff) as usize;
         }
-        sse
-    }
-
-    fn residual_recon_sse(
-        &self,
-        plane: Av2LossyPlane,
-        x0: usize,
-        y0: usize,
-        residual: &[i32; TX4X4_SAMPLES],
-    ) -> usize {
-        let mut sse = 0usize;
-        let max_sample = i32::from(self.bit_depth.max_sample());
-        for local_y in 0..TX4X4_SIZE {
-            for local_x in 0..TX4X4_SIZE {
-                let predictor =
-                    i32::from(self.predictor_sample(plane, x0, y0, local_x, local_y));
-                let recon = (predictor + residual[local_y * TX4X4_SIZE + local_x])
-                    .clamp(0, max_sample);
-                let source = i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
-                let diff = source - recon;
-                sse += (diff * diff) as usize;
-            }
-        }
-        sse
+        (residual, sse)
     }
 
     fn quant_step(&self) -> i32 {
         i32::from(self.qp) << u32::from(self.bit_depth.bits() - 8)
     }
+}
+
+fn txb_dc_recon_sse(
+    source: &[Av2Sample; TX4X4_SAMPLES],
+    predictor: &[Av2Sample; TX4X4_SAMPLES],
+    delta: i16,
+    bit_depth: SampleBitDepth,
+) -> usize {
+    let mut sse = 0usize;
+    let max_sample = i32::from(bit_depth.max_sample());
+    for index in 0..TX4X4_SAMPLES {
+        let recon = (i32::from(predictor[index]) + i32::from(delta)).clamp(0, max_sample);
+        let diff = i32::from(source[index]) - recon;
+        sse += (diff * diff) as usize;
+    }
+    sse
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,6 +386,15 @@ enum Av2LossyTxbChoice {
     DcDelta(i16),
     QuantizedResidual([i32; TX4X4_SAMPLES]),
     Exact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2LossyTxbAnalysis {
+    source: [Av2Sample; TX4X4_SAMPLES],
+    predictor: [Av2Sample; TX4X4_SAMPLES],
+    residual: [i32; TX4X4_SAMPLES],
+    delta: i16,
+    dc_sse: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
