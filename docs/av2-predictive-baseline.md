@@ -130,6 +130,29 @@ Raw totals for the motion candidate/hash reuse checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.04 fps.
 
+### Chunked Planar Hashing
+
+The chunked planar hashing checkpoint keeps motion-search candidate order and
+exact reconstruction checks unchanged, but folds planar hash rows in 8-byte
+chunks instead of byte-by-byte.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 8.45 | 8.33 | -1.4% |
+| Scene 422 8-bit | 0 | 7.52 | 7.72 | +2.7% |
+| Scene 444 8-bit | 0 | 5.93 | 6.11 | +3.0% |
+| Mission 420 10-bit | 0 | 3.37 | 3.44 | +2.1% |
+| Mission 422 10-bit | 0 | 2.88 | 2.96 | +2.8% |
+| Mission 444 10-bit | 0 | 2.37 | 2.47 | +4.2% |
+| Total | 0 | 4.04 | 4.15 | +2.7% |
+
+Raw totals for the chunked planar hashing checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 188,690,766.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.15 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference

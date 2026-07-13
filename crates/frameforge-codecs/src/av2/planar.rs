@@ -1,6 +1,8 @@
 use super::{Av2ChromaFormat, Av2VideoGeometry};
 use crate::picture::{Picture, PixelFormat, SampleBitDepth};
 
+const AV2_PLANAR_HASH_PRIME: u64 = 0x1000_0000_01b3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Av2PlanarYuvLayout {
     geometry: Av2VideoGeometry,
@@ -272,14 +274,25 @@ fn hash_plane_region(
     bytes_per_sample: usize,
 ) -> u64 {
     hash ^= plane.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    hash = hash.wrapping_mul(0x1000_0000_01b3);
+    hash = hash.wrapping_mul(AV2_PLANAR_HASH_PRIME);
     let row_bytes = width * bytes_per_sample;
     for local_y in 0..height {
         let row_start = ((y0 + local_y) * stride + x0) * bytes_per_sample;
-        for byte in &plane_data[row_start..row_start + row_bytes] {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x1000_0000_01b3);
-        }
+        hash = hash_bytes(hash, &plane_data[row_start..row_start + row_bytes]);
+    }
+    hash
+}
+
+fn hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        hash ^= word;
+        hash = hash.wrapping_mul(AV2_PLANAR_HASH_PRIME);
+    }
+    for byte in chunks.remainder() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(AV2_PLANAR_HASH_PRIME);
     }
     hash
 }
