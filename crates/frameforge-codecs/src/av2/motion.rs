@@ -27,6 +27,14 @@ pub(crate) struct Av2LosslessInterBlock {
     pub(crate) mv: Av2MotionVector,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Av2MotionSearchRegion {
+    pub(crate) x0: usize,
+    pub(crate) y0: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Av2LosslessMotionStats {
     pub(crate) total_blocks: usize,
@@ -90,6 +98,42 @@ pub(crate) fn build_lossless_motion_map(
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
 ) -> Result<Av2LosslessMotionMap, String> {
+    build_lossless_motion_map_with_regions(
+        current,
+        reference,
+        geometry,
+        chroma_format,
+        bit_depth,
+        None,
+    )
+}
+
+pub(crate) fn build_lossless_motion_map_for_regions(
+    current: &[u8],
+    reference: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    search_regions: &[Av2MotionSearchRegion],
+) -> Result<Av2LosslessMotionMap, String> {
+    build_lossless_motion_map_with_regions(
+        current,
+        reference,
+        geometry,
+        chroma_format,
+        bit_depth,
+        Some(search_regions),
+    )
+}
+
+fn build_lossless_motion_map_with_regions(
+    current: &[u8],
+    reference: &[u8],
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    search_regions: Option<&[Av2MotionSearchRegion]>,
+) -> Result<Av2LosslessMotionMap, String> {
     let layout = Av2PlanarYuvLayout::new(geometry, chroma_format, bit_depth)?;
     layout.validate_frame_len(current, "current frame")?;
     layout.validate_frame_len(reference, "reference frame")?;
@@ -104,6 +148,19 @@ pub(crate) fn build_lossless_motion_map(
 
     let blocks_wide = geometry.width / AV2_LOSSLESS_ME_BLOCK_SIZE;
     let blocks_high = geometry.height / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let search_mask = motion_search_mask(blocks_wide, blocks_high, geometry, search_regions)?;
+    let search_any = search_mask.iter().any(|search| *search);
+    let mut blocks = vec![None; blocks_wide * blocks_high];
+    let mut stats = Av2LosslessMotionStats::default();
+    if !search_any {
+        return Ok(Av2LosslessMotionMap {
+            blocks,
+            blocks_wide,
+            blocks_high,
+            stats,
+        });
+    }
+
     let mut reference_hashes = vec![0u64; blocks_wide * blocks_high];
     for block_y in 0..blocks_high {
         for block_x in 0..blocks_wide {
@@ -119,10 +176,12 @@ pub(crate) fn build_lossless_motion_map(
         }
     }
 
-    let mut blocks = vec![None; blocks_wide * blocks_high];
-    let mut stats = Av2LosslessMotionStats::default();
     for block_y in 0..blocks_high {
         for block_x in 0..blocks_wide {
+            let block_index = block_y * blocks_wide + block_x;
+            if !search_mask[block_index] {
+                continue;
+            }
             stats.total_blocks += 1;
             let x0 = block_x * AV2_LOSSLESS_ME_BLOCK_SIZE;
             let y0 = block_y * AV2_LOSSLESS_ME_BLOCK_SIZE;
@@ -176,7 +235,7 @@ pub(crate) fn build_lossless_motion_map(
                     break;
                 }
             }
-            blocks[block_y * blocks_wide + block_x] = selected;
+            blocks[block_index] = selected;
         }
     }
 
@@ -186,6 +245,54 @@ pub(crate) fn build_lossless_motion_map(
         blocks_high,
         stats,
     })
+}
+
+fn motion_search_mask(
+    blocks_wide: usize,
+    blocks_high: usize,
+    geometry: Av2VideoGeometry,
+    search_regions: Option<&[Av2MotionSearchRegion]>,
+) -> Result<Vec<bool>, String> {
+    let Some(search_regions) = search_regions else {
+        return Ok(vec![true; blocks_wide * blocks_high]);
+    };
+
+    let mut mask = vec![false; blocks_wide * blocks_high];
+    for region in search_regions {
+        if region.width == 0 || region.height == 0 {
+            continue;
+        }
+        if region.x0 % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+            || region.y0 % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+            || region.width % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+            || region.height % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        {
+            return Err(format!(
+                "AV2 lossless motion search region must be aligned to {} pixels, got {}x{}+{}+{}",
+                AV2_LOSSLESS_ME_BLOCK_SIZE, region.width, region.height, region.x0, region.y0
+            ));
+        }
+        let x1 = region
+            .x0
+            .checked_add(region.width)
+            .ok_or("AV2 lossless motion search region width overflow")?;
+        let y1 = region
+            .y0
+            .checked_add(region.height)
+            .ok_or("AV2 lossless motion search region height overflow")?;
+        if x1 > geometry.width || y1 > geometry.height {
+            return Err(format!(
+                "AV2 lossless motion search region {}x{}+{}+{} exceeds {}x{} frame",
+                region.width, region.height, region.x0, region.y0, geometry.width, geometry.height
+            ));
+        }
+        for block_y in region.y0 / AV2_LOSSLESS_ME_BLOCK_SIZE..y1 / AV2_LOSSLESS_ME_BLOCK_SIZE {
+            for block_x in region.x0 / AV2_LOSSLESS_ME_BLOCK_SIZE..x1 / AV2_LOSSLESS_ME_BLOCK_SIZE {
+                mask[block_y * blocks_wide + block_x] = true;
+            }
+        }
+    }
+    Ok(mask)
 }
 
 fn motion_candidates(

@@ -75,6 +75,38 @@ Raw totals across all six rows:
 - FrameForge elapsed: 35.021 s.
 - ffmpeg/libaom elapsed: 15.612 s.
 
+## Later Checkpoints
+
+### Mixed Motion Baseline
+
+The first NEWMV plus mixed 8x8 inter-tile checkpoint reduced FrameForge bytes
+to 188,690,766 for the same 300 frames, with total FrameForge encode speed at
+3.67 fps. That is a 36.5% byte reduction from the initial predictive baseline,
+with lower speed while motion estimation is still scalar and single-threaded.
+
+### Region-Aware Motion Search
+
+The region-aware motion-search checkpoint preclassifies exact zero-MV tiles and
+only builds the 8x8 motion map for tiles that still need NEWMV or mixed inter
+search. Bitstreams stayed byte-identical to the mixed-motion baseline.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 6.74 | 8.18 | +21.4% |
+| Scene 422 8-bit | 0 | 6.09 | 7.29 | +19.7% |
+| Scene 444 8-bit | 0 | 4.94 | 5.91 | +19.6% |
+| Mission 420 10-bit | 0 | 3.16 | 3.27 | +3.5% |
+| Mission 422 10-bit | 0 | 2.79 | 2.90 | +3.9% |
+| Mission 444 10-bit | 0 | 2.24 | 2.31 | +3.1% |
+| Total | 0 | 3.67 | 3.97 | +8.2% |
+
+Raw totals for the region-aware checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 188,690,766.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 3.97 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference

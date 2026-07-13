@@ -13,7 +13,9 @@ mod syntax;
 mod tile;
 
 use ibc::{Av2LocalIbc444, Av2LocalIbcStats};
-use motion::{Av2LosslessMotionMap, Av2MotionVector, AV2_LOSSLESS_ME_BLOCK_SIZE};
+use motion::{
+    Av2LosslessMotionMap, Av2MotionSearchRegion, Av2MotionVector, AV2_LOSSLESS_ME_BLOCK_SIZE,
+};
 use palette::Av2LumaPalette444;
 use syntax::{Av2SyntaxPayload, Av2SyntaxWriter};
 use tile::{
@@ -1067,28 +1069,48 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
         return None;
     }
 
-    let motion_map = motion::build_lossless_motion_map(
+    let mut zero_mv_tiles = Vec::with_capacity(tile_layout.tile_count());
+    let mut motion_search_regions = Vec::new();
+    for region in &tile_layout.regions {
+        let zero_mv = layout.regions_equal_between(
+            frame,
+            region.origin_x,
+            region.origin_y,
+            reference,
+            region.origin_x,
+            region.origin_y,
+            region.width,
+            region.height,
+        );
+        zero_mv_tiles.push(zero_mv);
+        if !zero_mv {
+            motion_search_regions.push(Av2MotionSearchRegion {
+                x0: region.origin_x,
+                y0: region.origin_y,
+                width: region.width,
+                height: region.height,
+            });
+        }
+    }
+    if motion_search_regions.is_empty() {
+        return None;
+    }
+
+    let motion_map = motion::build_lossless_motion_map_for_regions(
         frame,
         reference,
         geometry,
         stream_format.chroma_format,
         stream_format.bit_depth,
+        &motion_search_regions,
     )
     .ok();
     let tile_modes: Vec<_> = tile_layout
         .regions
         .iter()
-        .map(|region| {
-            if layout.regions_equal_between(
-                frame,
-                region.origin_x,
-                region.origin_y,
-                reference,
-                region.origin_x,
-                region.origin_y,
-                region.width,
-                region.height,
-            ) {
+        .zip(zero_mv_tiles.iter())
+        .map(|(region, zero_mv)| {
+            if *zero_mv {
                 Av2PredictiveTileMode::ZeroMv
             } else if let Some(mv) = motion_map
                 .as_ref()
