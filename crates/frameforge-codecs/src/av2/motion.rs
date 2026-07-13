@@ -3,8 +3,10 @@
 use super::planar::Av2PlanarYuvLayout;
 use super::{Av2ChromaFormat, Av2VideoGeometry};
 use crate::picture::SampleBitDepth;
+use std::collections::HashMap;
 
 pub(crate) const AV2_LOSSLESS_ME_BLOCK_SIZE: usize = 8;
+const AV2_LOSSLESS_ME_HASH_BUCKET_LIMIT: usize = 8;
 const AV2_LOSSLESS_ME_SEARCH_BLOCK_STEPS: [i16; 4] = [1, 2, 4, 8];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +24,7 @@ impl Av2MotionVector {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Av2BlockMotionVector {
     row_blocks: i16,
     col_blocks: i16,
@@ -79,6 +81,7 @@ pub(crate) struct Av2LosslessMotionStats {
     pub(crate) selected_zero_mv_blocks: usize,
     pub(crate) selected_neighbor_mv_blocks: usize,
     pub(crate) selected_local_search_blocks: usize,
+    pub(crate) selected_hash_index_blocks: usize,
 }
 
 impl Av2LosslessMotionStats {
@@ -86,6 +89,7 @@ impl Av2LosslessMotionStats {
         self.selected_zero_mv_blocks
             + self.selected_neighbor_mv_blocks
             + self.selected_local_search_blocks
+            + self.selected_hash_index_blocks
     }
 }
 
@@ -117,6 +121,7 @@ enum Av2MotionCandidateSource {
     Zero,
     Neighbor,
     LocalSearch,
+    HashIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +201,7 @@ fn build_lossless_motion_map_with_regions(
     }
 
     let mut reference_hashes = vec![None; blocks_wide * blocks_high];
+    let mut reference_hash_index = None;
     let mut candidates = Vec::with_capacity(48);
     for block_y in 0..blocks_high {
         for block_x in 0..blocks_wide {
@@ -265,11 +271,45 @@ fn build_lossless_motion_map_with_regions(
                         Av2MotionCandidateSource::LocalSearch => {
                             stats.selected_local_search_blocks += 1
                         }
+                        Av2MotionCandidateSource::HashIndex => {
+                            stats.selected_hash_index_blocks += 1
+                        }
                     }
                     selected = Some(Av2LosslessInterBlock {
                         mv: candidate.mv.to_pixel_mv(),
                     });
                     break;
+                }
+            }
+            if selected.is_none() {
+                let hash_index = reference_hash_index.get_or_insert_with(|| {
+                    build_reference_hash_index(
+                        &mut reference_hashes,
+                        layout,
+                        reference,
+                        blocks_wide,
+                        blocks_high,
+                    )
+                });
+                if let Some(candidate) = hash_index_candidate(
+                    hash_index,
+                    &candidates,
+                    layout,
+                    current,
+                    reference,
+                    blocks_wide,
+                    block_x,
+                    block_y,
+                    x0,
+                    y0,
+                    current_hash,
+                ) {
+                    stats.candidate_checks += 1;
+                    stats.exact_candidate_checks += 1;
+                    stats.selected_hash_index_blocks += 1;
+                    selected = Some(Av2LosslessInterBlock {
+                        mv: candidate.mv.to_pixel_mv(),
+                    });
                 }
             }
             blocks[block_index] = selected;
@@ -305,6 +345,89 @@ fn reference_hash_for_block(
     );
     reference_hashes[index] = Some(hash);
     hash
+}
+
+fn build_reference_hash_index(
+    reference_hashes: &mut [Option<u64>],
+    layout: Av2PlanarYuvLayout,
+    reference: &[u8],
+    blocks_wide: usize,
+    blocks_high: usize,
+) -> HashMap<u64, Vec<usize>> {
+    let mut index: HashMap<u64, Vec<usize>> = HashMap::with_capacity(blocks_wide * blocks_high);
+    for block_y in 0..blocks_high {
+        for block_x in 0..blocks_wide {
+            let block_index = block_y * blocks_wide + block_x;
+            let hash = reference_hash_for_block(
+                reference_hashes,
+                layout,
+                reference,
+                blocks_wide,
+                block_x,
+                block_y,
+            );
+            index.entry(hash).or_default().push(block_index);
+        }
+    }
+    index
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hash_index_candidate(
+    hash_index: &HashMap<u64, Vec<usize>>,
+    already_tested: &[Av2MotionCandidate],
+    layout: Av2PlanarYuvLayout,
+    current: &[u8],
+    reference: &[u8],
+    blocks_wide: usize,
+    block_x: usize,
+    block_y: usize,
+    x0: usize,
+    y0: usize,
+    current_hash: u64,
+) -> Option<Av2MotionCandidate> {
+    let bucket = hash_index.get(&current_hash)?;
+    if bucket.len() > AV2_LOSSLESS_ME_HASH_BUCKET_LIMIT {
+        return None;
+    }
+
+    let mut best = None;
+    for &ref_block_index in bucket {
+        let ref_block_x = ref_block_index % blocks_wide;
+        let ref_block_y = ref_block_index / blocks_wide;
+        let Some(mv) = block_motion_between(block_x, block_y, ref_block_x, ref_block_y) else {
+            continue;
+        };
+        if already_tested.iter().any(|candidate| candidate.mv == mv) {
+            continue;
+        }
+
+        let ref_x0 = ref_block_x * AV2_LOSSLESS_ME_BLOCK_SIZE;
+        let ref_y0 = ref_block_y * AV2_LOSSLESS_ME_BLOCK_SIZE;
+        if !layout.regions_equal_between(
+            current,
+            x0,
+            y0,
+            reference,
+            ref_x0,
+            ref_y0,
+            AV2_LOSSLESS_ME_BLOCK_SIZE,
+            AV2_LOSSLESS_ME_BLOCK_SIZE,
+        ) {
+            continue;
+        }
+
+        let cost = fallback_motion_cost(mv);
+        if best.as_ref().is_none_or(|(best_cost, best_mv)| {
+            cost < *best_cost || (cost == *best_cost && mv < *best_mv)
+        }) {
+            best = Some((cost, mv));
+        }
+    }
+    best.map(|(_, mv)| Av2MotionCandidate {
+        mv,
+        source: Av2MotionCandidateSource::HashIndex,
+    })
 }
 
 fn motion_search_mask(
@@ -425,6 +548,22 @@ fn push_unique_candidate(
     candidates.push(Av2MotionCandidate { mv, source });
 }
 
+fn block_motion_between(
+    block_x: usize,
+    block_y: usize,
+    ref_block_x: usize,
+    ref_block_y: usize,
+) -> Option<Av2BlockMotionVector> {
+    Some(Av2BlockMotionVector {
+        row_blocks: i16::try_from(ref_block_y as isize - block_y as isize).ok()?,
+        col_blocks: i16::try_from(ref_block_x as isize - block_x as isize).ok()?,
+    })
+}
+
+fn fallback_motion_cost(mv: Av2BlockMotionVector) -> u32 {
+    u32::from(mv.row_blocks.unsigned_abs()) + u32::from(mv.col_blocks.unsigned_abs())
+}
+
 fn offset_motion_vector(
     predictor: Av2BlockMotionVector,
     row_delta: i16,
@@ -539,6 +678,45 @@ mod tests {
             assert_eq!(map.stats().selected_inter_blocks(), 1);
             assert_eq!(map.stats().selected_local_search_blocks, 1);
         }
+    }
+
+    #[test]
+    fn hash_index_finds_exact_block_when_local_steps_miss() {
+        let geometry = Av2VideoGeometry {
+            width: 32,
+            height: 16,
+        };
+        let chroma_format = Av2ChromaFormat::Yuv444;
+        let bit_depth = SampleBitDepth::new(8).expect("8-bit depth is supported");
+        let reference = block_pattern_frame(geometry, chroma_format, bit_depth);
+        let mut current = vec![0xee; reference.len()];
+        copy_planar_block(
+            &reference,
+            0,
+            0,
+            &mut current,
+            24,
+            0,
+            geometry,
+            chroma_format,
+            bit_depth,
+        );
+
+        let map =
+            build_lossless_motion_map(&current, &reference, geometry, chroma_format, bit_depth)
+                .expect("hash index fallback should find non-step exact block");
+
+        assert_eq!(
+            map.candidate_at(24, 0)
+                .expect("shifted block should match through hash index")
+                .mv,
+            Av2MotionVector {
+                row_px: 0,
+                col_px: -24,
+            }
+        );
+        assert_eq!(map.stats().selected_inter_blocks(), 1);
+        assert_eq!(map.stats().selected_hash_index_blocks, 1);
     }
 
     #[test]

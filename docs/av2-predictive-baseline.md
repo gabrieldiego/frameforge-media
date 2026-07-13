@@ -202,6 +202,31 @@ Raw totals for the block-unit motion-search checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 6.23 fps.
 
+### Bounded Hash-Index Motion Fallback
+
+The bounded hash-index fallback keeps the existing zero/neighbor/local motion
+candidate order as the primary path, then uses a lazily-built reference 8x8
+hash index for blocks that still have no exact match. The fallback only scans
+hash buckets with at most eight reference blocks, which keeps it focused on
+distinct screen-content blocks and avoids broad flat-region searches.
+
+| Vector | Previous Bytes | New Bytes | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 4,798,845 | 4,768,470 | -0.6% | 10.66 | 10.52 | -1.3% |
+| Scene 422 8-bit | 5,377,435 | 5,338,169 | -0.7% | 10.50 | 9.64 | -8.2% |
+| Scene 444 8-bit | 6,361,136 | 6,313,168 | -0.8% | 8.92 | 8.60 | -3.6% |
+| Mission 420 10-bit | 22,458,420 | 22,443,304 | -0.1% | 5.17 | 4.96 | -4.1% |
+| Mission 422 10-bit | 26,078,757 | 26,062,159 | -0.1% | 4.73 | 4.50 | -4.9% |
+| Mission 444 10-bit | 33,007,478 | 32,989,639 | -0.1% | 3.88 | 3.76 | -3.1% |
+| Total | 98,082,071 | 97,914,909 | -0.2% | 6.23 | 5.97 | -4.2% |
+
+Raw totals for the bounded hash-index checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 97,914,909.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 5.97 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference
