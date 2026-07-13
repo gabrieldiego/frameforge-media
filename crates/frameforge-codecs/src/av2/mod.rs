@@ -1933,8 +1933,14 @@ fn append_obu(out: &mut Vec<u8>, obu_type: Av2ObuType, payload: &Av2SyntaxPayloa
     if obu_type == Av2ObuType::ClosedLoopKey {
         // AV2 v1.0.0 Section 5.3 defines OBU lengths as unsigned LEB128.
         // The RTL reserves three bytes for closed-loop frame OBUs so it can
-        // stream tile payloads once and patch the final length afterward.
-        write_leb128_fixed_width(obu_payload_len, 3, out);
+        // stream tile payloads once and patch the final length afterward. Very
+        // large software-only high-depth frames can exceed that envelope, so
+        // fall back to the normal variable-width LEB128 form when needed.
+        if leb128_len(obu_payload_len) <= 3 {
+            write_leb128_fixed_width(obu_payload_len, 3, out);
+        } else {
+            write_leb128(obu_payload_len, out);
+        }
     } else {
         write_leb128(obu_payload_len, out);
     }
@@ -1962,6 +1968,15 @@ fn write_leb128(mut value: u32, out: &mut Vec<u8>) {
             break;
         }
     }
+}
+
+fn leb128_len(mut value: u32) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
 }
 
 fn write_leb128_fixed_width(mut value: u32, width: usize, out: &mut Vec<u8>) {
@@ -2757,6 +2772,16 @@ mod tests {
         };
 
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn av2_closed_loop_key_uses_variable_leb_for_large_payloads() {
+        assert_eq!(leb128_len((1 << 21) - 1), 3);
+        assert_eq!(leb128_len(1 << 21), 4);
+
+        let mut out = Vec::new();
+        write_leb128(1 << 21, &mut out);
+        assert_eq!(out, [0x80, 0x80, 0x80, 0x01]);
     }
 
     fn assert_has_field(

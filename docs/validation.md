@@ -99,15 +99,39 @@ AV2 does not currently have a fast dav1d-like production encoder separate from
 AVM. For faster lossy iteration, `COMPRESSION_REFERENCE_BACKEND=rav1e` uses
 the rav1e AV1 encoder as an explicit AV1 size/time baseline. rav1e does not
 currently implement lossless encoding, so lossless manifests should keep the
-default `COMPRESSION_REFERENCE_BACKEND=reference` path. The rav1e result is
-not an AV2 reference result, and it is written under a backend-specific
-subdirectory such as
+default `COMPRESSION_REFERENCE_BACKEND=reference` path when a lossless AV1
+baseline is required. The rav1e result is not an AV2 reference result, and it
+is written under a backend-specific subdirectory such as
 `verification/generated/compression_compare/av2/<set>/rav1e/` so it does not
 clobber cached AVM results. Build it with:
 
 ```sh
 make reference-setup REFERENCE_CODEC=rav1e
 make compare-compression CODEC=av2 COMPRESSION_SET=smoke COMPRESSION_REFERENCE_BACKEND=rav1e
+```
+
+For realtime AV1 production-ceiling checks, `COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom`
+uses the system `ffmpeg` binary with `libaom-av1`. The
+`COMPRESSION_REFERENCE_PRESET=realtime-screen` preset enables realtime,
+low-latency, screen-content-oriented libaom settings. This baseline may be
+lossy even when the FrameForge row has `lossless=true`; use it to compare
+speed and size against a realistic AV1 screen-share profile, not as a
+stream-exact reference. Set `COMPRESSION_REFERENCE_PRESET=lossless` when an
+AV1 lossless libaom baseline is needed instead. ffmpeg/libaom outputs are
+cached under a backend-specific directory such as
+`verification/generated/compression_compare/av2/<set>/ffmpeg-libaom/`.
+
+For local source-file manifests backed by large Y4M inputs, set
+`COMPRESSION_DIRECT_SOURCE_FILES=1` to feed the source path directly and use
+the manifest `frames` value as the total-frame limiter instead of materializing
+a frame-limited raw copy first:
+
+```sh
+make compare-compression CODEC=av2 \
+  COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f \
+  COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom \
+  COMPRESSION_REFERENCE_PRESET=realtime-screen \
+  COMPRESSION_DIRECT_SOURCE_FILES=1
 ```
 
 For AV2 native reference comparisons, the Makefile defaults to

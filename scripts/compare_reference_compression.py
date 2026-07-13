@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
@@ -29,6 +30,7 @@ VVC_MIN_BIT_DEPTH = 8
 VVC_MAX_BIT_DEPTH = 12
 REFERENCE_BACKEND_NATIVE = "reference"
 REFERENCE_BACKEND_RAV1E = "rav1e"
+REFERENCE_BACKEND_FFMPEG_LIBAOM = "ffmpeg-libaom"
 
 
 @dataclass(frozen=True)
@@ -66,15 +68,19 @@ def main() -> int:
         "--reference-backend",
         default=REFERENCE_BACKEND_NATIVE,
         help=(
-            "compression baseline backend: reference for AVM/VTM, or rav1e "
-            "for an AV1 rav1e baseline"
+            "compression baseline backend: reference for AVM/VTM, rav1e "
+            "for an AV1 rav1e baseline, or ffmpeg-libaom for an AV1 libaom baseline"
         ),
     )
     parser.add_argument(
         "--reference-preset",
-        choices=("default", "fast"),
+        choices=("default", "fast", "realtime-screen", "lossless"),
         default="fast",
-        help="reference encoder preset; 'default' keeps legacy AVM/VTM arguments",
+        help=(
+            "reference encoder preset; 'default' keeps legacy AVM/VTM arguments, "
+            "'realtime-screen' selects ffmpeg/libaom realtime screen-share settings, "
+            "and 'lossless' selects ffmpeg/libaom AV1 lossless"
+        ),
     )
     parser.add_argument(
         "--reference-threads",
@@ -96,6 +102,14 @@ def main() -> int:
         action="store_true",
         help="rerun reference encoders instead of reusing matching cached outputs",
     )
+    parser.add_argument(
+        "--direct-source-files",
+        action="store_true",
+        help=(
+            "for source_file manifest rows, feed the source path directly and use the "
+            "manifest frame count as the limiter instead of materializing a raw clip"
+        ),
+    )
     args = parser.parse_args()
     args.reference_backend = normalize_reference_backend(args.reference_backend)
     args.reference_threads = parse_auto_int(args.reference_threads, "reference threads", 1)
@@ -107,18 +121,17 @@ def main() -> int:
         return 2
 
     reference_encoder = resolve_reference_encoder(args.codec, args.reference_backend)
-    vectors = generate_test_vectors.generate_vectors(args.set, args.vector_dir, args.set_dir)
+    cases = comparison_cases(args)
     enabled_vectors = []
     skipped = 0
-    for vector_path in vectors:
-        vector = vector_for_path(args.set, args.set_dir, vector_path)
+    for vector, vector_path in cases:
         if vector.codecs is not None and args.codec.lower() not in vector.codecs:
             skipped += 1
             continue
-        enabled_vectors.append(vector_path)
-    vectors = enabled_vectors
+        enabled_vectors.append((vector, vector_path))
+    cases = enabled_vectors
     if args.limit:
-        vectors = vectors[: args.limit]
+        cases = cases[: args.limit]
     if skipped:
         print(
             f"Skipped {skipped} vector(s) not enabled for codec {args.codec}",
@@ -126,9 +139,8 @@ def main() -> int:
         )
 
     results: list[ComparisonResult] = []
-    for index, vector_path in enumerate(vectors, start=1):
-        vector = vector_for_path(args.set, args.set_dir, vector_path)
-        print(f"[{index:03d}/{len(vectors):03d}] {vector_path.name}", flush=True)
+    for index, (vector, vector_path) in enumerate(cases, start=1):
+        print(f"[{index:03d}/{len(cases):03d}] {vector.filename}", flush=True)
         result = run_case(vector, vector_path, reference_encoder, args)
         results.append(result)
         print(
@@ -198,6 +210,8 @@ def normalize_reference_backend(value: str) -> str:
         return REFERENCE_BACKEND_NATIVE
     if normalized in {"rav1e", "av1-rav1e"}:
         return REFERENCE_BACKEND_RAV1E
+    if normalized in {"ffmpeg-libaom", "ffmpeg_libaom", "libaom", "av1-libaom"}:
+        return REFERENCE_BACKEND_FFMPEG_LIBAOM
     if normalized == "dav1d":
         raise SystemExit(
             "dav1d is an AV1 decoder, not an encoder; use "
@@ -205,11 +219,17 @@ def normalize_reference_backend(value: str) -> str:
         )
     raise SystemExit(
         "unsupported compression reference backend "
-        f"'{value}'; expected reference or rav1e"
+        f"'{value}'; expected reference, rav1e, or ffmpeg-libaom"
     )
 
 
 def resolve_reference_encoder(codec: str, reference_backend: str) -> str:
+    if reference_backend == REFERENCE_BACKEND_FFMPEG_LIBAOM:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise SystemExit("ffmpeg/libaom baseline requested, but ffmpeg is not in PATH")
+        return ffmpeg
+
     reference_codec = codec if reference_backend == REFERENCE_BACKEND_NATIVE else reference_backend
     command = [
         sys.executable,
@@ -236,15 +256,31 @@ def resolve_reference_encoder(codec: str, reference_backend: str) -> str:
     return lines[-1]
 
 
-def vector_for_path(
-    set_name: str, set_dir: Path, vector_path: Path
-) -> generate_test_vectors.TestVector:
-    vector_set = generate_test_vectors.vector_sets(set_dir)[set_name]
-    by_filename = {vector.filename: vector for vector in vector_set.vectors}
-    try:
-        return by_filename[vector_path.name]
-    except KeyError as err:
-        raise SystemExit(f"generated vector is not present in manifest: {vector_path}") from err
+def comparison_cases(args: argparse.Namespace) -> list[tuple[generate_test_vectors.TestVector, Path]]:
+    sets = generate_test_vectors.vector_sets(args.set_dir)
+    if args.set not in sets:
+        choices = ", ".join(sorted(sets)) or "<none>"
+        raise SystemExit(f"unknown test vector set '{args.set}'; choices: {choices}")
+
+    vector_set = sets[args.set]
+    args.vector_dir.mkdir(parents=True, exist_ok=True)
+    cases: list[tuple[generate_test_vectors.TestVector, Path]] = []
+    for vector in vector_set.vectors:
+        if args.direct_source_files and vector.pattern == "source_file" and vector.source_path:
+            cases.append((vector, source_file_path(vector)))
+            continue
+        path = args.vector_dir / vector.filename
+        path.write_bytes(generate_test_vectors.generate_yuv(vector, vector_set.sources))
+        cases.append((vector, path))
+    return cases
+
+
+def source_file_path(vector: generate_test_vectors.TestVector) -> Path:
+    assert vector.source_path is not None
+    path = vector.source_path
+    if path.is_absolute():
+        return path
+    return (REPO_ROOT / path).resolve(strict=False)
 
 
 def run_case(
@@ -253,7 +289,7 @@ def run_case(
     reference_encoder: str,
     args: argparse.Namespace,
 ) -> ComparisonResult:
-    frameforge_output, reference_output, log = case_paths(vector_path.stem, args)
+    frameforge_output, reference_output, log = case_paths(Path(vector.filename).stem, args)
     if frameforge_output.exists():
         frameforge_output.unlink()
 
@@ -328,18 +364,18 @@ def run_case(
     )
 
     if frameforge_result.returncode != 0:
-        raise SystemExit(f"FrameForge encode failed for {vector_path.name}; see {relpath(log)}")
+        raise SystemExit(f"FrameForge encode failed for {vector.filename}; see {relpath(log)}")
     if reference_returncode != 0:
         if not reference_cached:
             remove_reference_outputs(reference_run_output, args)
-        raise SystemExit(f"reference encode failed for {vector_path.name}; see {relpath(log)}")
-    require_non_empty(frameforge_output, "FrameForge", vector_path, log)
+        raise SystemExit(f"reference encode failed for {vector.filename}; see {relpath(log)}")
+    require_non_empty(frameforge_output, "FrameForge", vector.filename, log)
     if reference_cached:
-        require_non_empty(reference_output, "reference", vector_path, log)
-        require_reference_outputs(reference_output, args, vector_path, log)
+        require_non_empty(reference_output, "reference", vector.filename, log)
+        require_reference_outputs(reference_output, args, vector.filename, log)
     else:
-        require_non_empty(reference_run_output, "reference", vector_path, log)
-        require_reference_outputs(reference_run_output, args, vector_path, log)
+        require_non_empty(reference_run_output, "reference", vector.filename, log)
+        require_reference_outputs(reference_run_output, args, vector.filename, log)
         promote_reference_outputs(reference_run_output, reference_output, args)
         metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 
@@ -347,7 +383,7 @@ def run_case(
     reference_bytes = reference_output.stat().st_size
     ratio = frameforge_bytes / reference_bytes if reference_bytes else float("inf")
     return ComparisonResult(
-        vector_name=vector_path.name,
+        vector_name=vector.filename,
         frameforge_output=frameforge_output,
         reference_output=reference_output,
         frameforge_bytes=frameforge_bytes,
@@ -414,10 +450,10 @@ def promote_reference_outputs(temp_output: Path, final_output: Path, args: argpa
 
 
 def require_reference_outputs(
-    output: Path, args: argparse.Namespace, vector_path: Path, log: Path
+    output: Path, args: argparse.Namespace, vector_name: str, log: Path
 ) -> None:
     for path in reference_outputs(output, args):
-        require_non_empty(path, "reference", vector_path, log)
+        require_non_empty(path, "reference", vector_name, log)
 
 
 def reference_cache_valid(
@@ -520,6 +556,8 @@ def reference_cache_metadata(
     }
     if args.reference_backend != REFERENCE_BACKEND_NATIVE:
         metadata["reference_backend"] = args.reference_backend
+    if args.direct_source_files:
+        metadata["direct_source_files"] = True
     return metadata
 
 
@@ -532,6 +570,8 @@ def reference_encode_command(
 ) -> list[str]:
     if args.reference_backend == REFERENCE_BACKEND_RAV1E:
         return rav1e_reference_encode_command(vector, vector_path, output, encoder, args)
+    if args.reference_backend == REFERENCE_BACKEND_FFMPEG_LIBAOM:
+        return ffmpeg_libaom_reference_encode_command(vector, vector_path, output, encoder, args)
     if args.reference_backend != REFERENCE_BACKEND_NATIVE:
         raise SystemExit(f"unsupported compression reference backend: {args.reference_backend}")
     if args.codec == "av2":
@@ -574,6 +614,159 @@ def rav1e_reference_encode_command(
 
 def rav1e_y4m_path(output: Path) -> Path:
     return output.with_name(f"{output.stem}_input.y4m")
+
+
+def ffmpeg_libaom_reference_encode_command(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+    encoder: str,
+    args: argparse.Namespace,
+) -> list[str]:
+    bit_depth, _chroma = av1_pixel_format(vector.fmt)
+    if bit_depth not in {8, 10, 12}:
+        raise SystemExit(f"unsupported ffmpeg/libaom reference encode pixel format: {vector.fmt}")
+
+    y4m_input = ffmpeg_libaom_input_path(vector, vector_path, output)
+    command = [
+        encoder,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(y4m_input),
+        "-frames:v",
+        str(vector.frames),
+        "-c:v",
+        "libaom-av1",
+    ]
+    command.extend(ffmpeg_libaom_preset_args(vector, args))
+    if args.reference_args:
+        command.extend(shlex.split(args.reference_args))
+    command.append(str(output))
+    return command
+
+
+def ffmpeg_libaom_input_path(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+) -> Path:
+    if vector_path.suffix.lower() == ".y4m":
+        return vector_path
+    y4m_input = output.with_name(f"{output.stem}_input.y4m")
+    ensure_y4m_input(vector, vector_path, y4m_input)
+    return y4m_input
+
+
+def ffmpeg_libaom_preset_args(
+    vector: generate_test_vectors.TestVector,
+    args: argparse.Namespace,
+) -> list[str]:
+    if args.reference_preset == "lossless":
+        return [
+            "-cpu-used",
+            "8",
+            "-threads",
+            str(reference_thread_count(args.reference_threads)),
+            "-row-mt",
+            "1",
+            "-tiles",
+            ffmpeg_libaom_tiles(vector, args),
+            "-lag-in-frames",
+            "0",
+            "-auto-alt-ref",
+            "0",
+            "-b:v",
+            "0",
+            "-crf",
+            "0",
+            "-aom-params",
+            "lossless=1",
+        ]
+
+    if args.reference_preset not in {"default", "fast", "realtime-screen"}:
+        raise SystemExit(
+            "ffmpeg/libaom baseline supports presets default, fast, "
+            "realtime-screen, and lossless"
+        )
+
+    return [
+        "-usage",
+        "realtime",
+        "-cpu-used",
+        "8",
+        "-threads",
+        str(reference_thread_count(args.reference_threads)),
+        "-row-mt",
+        "1",
+        "-tiles",
+        ffmpeg_libaom_tiles(vector, args),
+        "-lag-in-frames",
+        "0",
+        "-auto-alt-ref",
+        "0",
+        "-b:v",
+        "4M",
+        "-maxrate",
+        "4M",
+        "-bufsize",
+        "4M",
+        "-g",
+        "300",
+        "-aq-mode",
+        "cyclic",
+        "-enable-cdef",
+        "1",
+        "-enable-restoration",
+        "0",
+        "-enable-global-motion",
+        "0",
+        "-enable-obmc",
+        "0",
+        "-enable-palette",
+        "1",
+        "-enable-cfl-intra",
+        "0",
+        "-enable-smooth-intra",
+        "0",
+        "-enable-angle-delta",
+        "0",
+        "-enable-filter-intra",
+        "0",
+        "-use-intra-default-tx-only",
+        "1",
+        "-enable-ref-frame-mvs",
+        "0",
+        "-enable-dual-filter",
+        "0",
+        "-enable-interintra-comp",
+        "0",
+        "-enable-masked-comp",
+        "0",
+        "-enable-paeth-intra",
+        "0",
+        "-enable-rect-partitions",
+        "0",
+        "-enable-tx64",
+        "0",
+        "-aom-params",
+        "tune-content=screen",
+    ]
+
+
+def ffmpeg_libaom_tiles(
+    vector: generate_test_vectors.TestVector,
+    args: argparse.Namespace,
+) -> str:
+    if args.avm_tile_columns is not None:
+        return f"{1 << args.avm_tile_columns}x{1 << (args.avm_tile_rows or 0)}"
+    if vector.width >= 1920:
+        return "8x1"
+    if vector.width >= 1280:
+        return "4x1"
+    return "2x1"
 
 
 def ensure_y4m_input(
@@ -860,11 +1053,11 @@ def format_fps(value: float) -> str:
     return f"{value:.2f}"
 
 
-def require_non_empty(output: Path, label: str, vector_path: Path, log: Path) -> None:
+def require_non_empty(output: Path, label: str, vector_name: str, log: Path) -> None:
     if not output.exists():
-        raise SystemExit(f"{label} encode produced no output for {vector_path.name}; see {relpath(log)}")
+        raise SystemExit(f"{label} encode produced no output for {vector_name}; see {relpath(log)}")
     if output.stat().st_size == 0:
-        raise SystemExit(f"{label} encode produced empty output for {vector_path.name}; see {relpath(log)}")
+        raise SystemExit(f"{label} encode produced empty output for {vector_name}; see {relpath(log)}")
 
 
 def sha256_file(path: Path) -> str:
@@ -880,7 +1073,7 @@ def codec_extension(codec: str) -> str:
 
 
 def reference_extension_for_args(args: argparse.Namespace) -> str:
-    if args.reference_backend == REFERENCE_BACKEND_RAV1E:
+    if args.reference_backend in {REFERENCE_BACKEND_RAV1E, REFERENCE_BACKEND_FFMPEG_LIBAOM}:
         return "ivf"
     return codec_extension(args.codec)
 
