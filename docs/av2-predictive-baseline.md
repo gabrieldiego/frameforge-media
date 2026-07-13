@@ -107,6 +107,29 @@ Raw totals for the region-aware checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 3.97 fps.
 
+### Motion Candidate And Hash Reuse
+
+The motion candidate/hash reuse checkpoint keeps one candidate buffer across
+8x8 searches and computes reference block hashes lazily. Bitstreams stayed
+byte-identical to the region-aware checkpoint.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 8.18 | 8.45 | +3.3% |
+| Scene 422 8-bit | 0 | 7.29 | 7.52 | +3.2% |
+| Scene 444 8-bit | 0 | 5.91 | 5.93 | +0.3% |
+| Mission 420 10-bit | 0 | 3.27 | 3.37 | +3.1% |
+| Mission 422 10-bit | 0 | 2.90 | 2.88 | -0.7% |
+| Mission 444 10-bit | 0 | 2.31 | 2.37 | +2.6% |
+| Total | 0 | 3.97 | 4.04 | +1.8% |
+
+Raw totals for the motion candidate/hash reuse checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 188,690,766.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.04 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference

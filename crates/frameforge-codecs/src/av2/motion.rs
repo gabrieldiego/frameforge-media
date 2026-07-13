@@ -161,21 +161,8 @@ fn build_lossless_motion_map_with_regions(
         });
     }
 
-    let mut reference_hashes = vec![0u64; blocks_wide * blocks_high];
-    for block_y in 0..blocks_high {
-        for block_x in 0..blocks_wide {
-            let x0 = block_x * AV2_LOSSLESS_ME_BLOCK_SIZE;
-            let y0 = block_y * AV2_LOSSLESS_ME_BLOCK_SIZE;
-            reference_hashes[block_y * blocks_wide + block_x] = layout.hash_region(
-                reference,
-                x0,
-                y0,
-                AV2_LOSSLESS_ME_BLOCK_SIZE,
-                AV2_LOSSLESS_ME_BLOCK_SIZE,
-            );
-        }
-    }
-
+    let mut reference_hashes = vec![None; blocks_wide * blocks_high];
+    let mut candidates = Vec::with_capacity(48);
     for block_y in 0..blocks_high {
         for block_x in 0..blocks_wide {
             let block_index = block_y * blocks_wide + block_x;
@@ -192,9 +179,16 @@ fn build_lossless_motion_map_with_regions(
                 AV2_LOSSLESS_ME_BLOCK_SIZE,
                 AV2_LOSSLESS_ME_BLOCK_SIZE,
             );
-            let candidates = motion_candidates(&blocks, blocks_wide, blocks_high, block_x, block_y);
+            motion_candidates(
+                &mut candidates,
+                &blocks,
+                blocks_wide,
+                blocks_high,
+                block_x,
+                block_y,
+            );
             let mut selected = None;
-            for candidate in candidates {
+            for &candidate in &candidates {
                 stats.candidate_checks += 1;
                 let Some((ref_block_x, ref_block_y, ref_x0, ref_y0)) = reference_block_for_mv(
                     blocks_wide,
@@ -206,8 +200,15 @@ fn build_lossless_motion_map_with_regions(
                     stats.out_of_bounds_candidates += 1;
                     continue;
                 };
-                let ref_index = ref_block_y * blocks_wide + ref_block_x;
-                if reference_hashes[ref_index] != current_hash {
+                let reference_hash = reference_hash_for_block(
+                    &mut reference_hashes,
+                    layout,
+                    reference,
+                    blocks_wide,
+                    ref_block_x,
+                    ref_block_y,
+                );
+                if reference_hash != current_hash {
                     stats.hash_rejected_candidates += 1;
                     continue;
                 }
@@ -245,6 +246,29 @@ fn build_lossless_motion_map_with_regions(
         blocks_high,
         stats,
     })
+}
+
+fn reference_hash_for_block(
+    reference_hashes: &mut [Option<u64>],
+    layout: Av2PlanarYuvLayout,
+    reference: &[u8],
+    blocks_wide: usize,
+    block_x: usize,
+    block_y: usize,
+) -> u64 {
+    let index = block_y * blocks_wide + block_x;
+    if let Some(hash) = reference_hashes[index] {
+        return hash;
+    }
+    let hash = layout.hash_region(
+        reference,
+        block_x * AV2_LOSSLESS_ME_BLOCK_SIZE,
+        block_y * AV2_LOSSLESS_ME_BLOCK_SIZE,
+        AV2_LOSSLESS_ME_BLOCK_SIZE,
+        AV2_LOSSLESS_ME_BLOCK_SIZE,
+    );
+    reference_hashes[index] = Some(hash);
+    hash
 }
 
 fn motion_search_mask(
@@ -296,15 +320,16 @@ fn motion_search_mask(
 }
 
 fn motion_candidates(
+    candidates: &mut Vec<Av2MotionCandidate>,
     blocks: &[Option<Av2LosslessInterBlock>],
     blocks_wide: usize,
     blocks_high: usize,
     block_x: usize,
     block_y: usize,
-) -> Vec<Av2MotionCandidate> {
-    let mut candidates = Vec::with_capacity(48);
+) {
+    candidates.clear();
     push_unique_candidate(
-        &mut candidates,
+        candidates,
         Av2MotionVector::zero(),
         Av2MotionCandidateSource::Zero,
     );
@@ -324,17 +349,14 @@ fn motion_candidates(
     {
         if neighbor_x < blocks_wide && neighbor_y < blocks_high {
             if let Some(block) = blocks[neighbor_y * blocks_wide + neighbor_x] {
-                push_unique_candidate(
-                    &mut candidates,
-                    block.mv,
-                    Av2MotionCandidateSource::Neighbor,
-                );
+                push_unique_candidate(candidates, block.mv, Av2MotionCandidateSource::Neighbor);
             }
         }
     }
 
-    let predictors: Vec<_> = candidates.iter().map(|candidate| candidate.mv).collect();
-    for predictor in predictors {
+    let predictor_count = candidates.len();
+    for predictor_index in 0..predictor_count {
+        let predictor = candidates[predictor_index].mv;
         for step in AV2_LOSSLESS_ME_SEARCH_STEPS {
             for (row_delta, col_delta) in [
                 (-step, 0),
@@ -347,16 +369,11 @@ fn motion_candidates(
                 (step, step),
             ] {
                 if let Some(mv) = offset_motion_vector(predictor, row_delta, col_delta) {
-                    push_unique_candidate(
-                        &mut candidates,
-                        mv,
-                        Av2MotionCandidateSource::LocalSearch,
-                    );
+                    push_unique_candidate(candidates, mv, Av2MotionCandidateSource::LocalSearch);
                 }
             }
         }
     }
-    candidates
 }
 
 fn push_unique_candidate(
