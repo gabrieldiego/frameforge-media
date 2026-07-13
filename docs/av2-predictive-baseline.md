@@ -276,6 +276,30 @@ Raw totals for the residual inter tile candidate checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 3.96 fps.
 
+### Source-Backed Candidate Scratch
+
+The source-backed candidate scratch checkpoint removes redundant reconstruction
+copies from the mixed inter/intra candidate path. The fast lossless path already
+uses source-backed reconstruction while choosing a payload, so this keeps the
+selected bitstream identical and only reduces candidate-evaluation work.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 7.52 | 8.06 | +7.2% |
+| Scene 422 8-bit | 0 | 7.06 | 7.60 | +7.6% |
+| Scene 444 8-bit | 0 | 6.02 | 6.71 | +11.5% |
+| Mission 420 10-bit | 0 | 3.37 | 3.53 | +4.7% |
+| Mission 422 10-bit | 0 | 2.93 | 2.76 | -5.8% |
+| Mission 444 10-bit | 0 | 2.28 | 2.51 | +10.1% |
+| Total | 0 | 3.96 | 4.14 | +4.5% |
+
+Raw totals for the source-backed candidate scratch checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,632,514.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.14 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference

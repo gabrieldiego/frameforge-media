@@ -1194,7 +1194,7 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                 intra_blocks,
                 residual_blocks,
             } => {
-                let mut intra_reconstruction = reconstruction.clone();
+                let mut scratch_reconstruction = Vec::new();
                 let intra_payload =
                     av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
                         region,
@@ -1204,12 +1204,12 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                         stream_format.bit_depth,
                         frame,
                         reference,
-                        &mut intra_reconstruction,
+                        &mut scratch_reconstruction,
                         palette.as_ref(),
                         intra_blocks,
                         false,
                     );
-                let mut residual_reconstruction = reconstruction.clone();
+                scratch_reconstruction.clear();
                 let residual_payload =
                     av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
                         region,
@@ -1219,7 +1219,7 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                         stream_format.bit_depth,
                         frame,
                         reference,
-                        &mut residual_reconstruction,
+                        &mut scratch_reconstruction,
                         palette.as_ref(),
                         residual_blocks,
                         false,
@@ -1227,10 +1227,8 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                 if av2_entropy_payload_rate_key(&residual_payload)
                     < av2_entropy_payload_rate_key(&intra_payload)
                 {
-                    reconstruction = residual_reconstruction;
                     residual_payload
                 } else {
-                    reconstruction = intra_reconstruction;
                     intra_payload
                 }
             }

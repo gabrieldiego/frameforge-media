@@ -2238,12 +2238,18 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn copy_source_to_recon_region(&mut self) {
+        if self.source_backed_recon {
+            return;
+        }
         for plane in [Av2LosslessPlane::Y, Av2LosslessPlane::U, Av2LosslessPlane::V] {
             self.copy_source_to_recon_plane_region(plane);
         }
     }
 
     fn copy_source_to_recon_plane_region(&mut self, plane: Av2LosslessPlane) {
+        if self.source_backed_recon {
+            return;
+        }
         let (plane_width, plane_height) = self.plane_geometry(plane);
         let (origin_x, origin_y) = self.plane_origin(plane);
         let (sub_x, sub_y) = self.plane_subsampling(plane);
