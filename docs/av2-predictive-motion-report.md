@@ -122,3 +122,50 @@ Compression comparison:
 
 No full 1080p comparison was rerun for this checkpoint because the new NEWMV
 writer is not selected by the production encoder yet.
+
+## Checkpoint 4: Corrected Predictive Compare Baseline
+
+Changes:
+
+- Added `COMPRESSION_SETTINGS` to `make compare-compression`, forwarding
+  repeated FrameForge `--set` values to the measured encoder command.
+- Updated this report's comparison command to pass `COMPRESSION_SETTINGS=predictive`.
+
+Validation:
+
+```sh
+python3 scripts/compare_reference_compression.py --help
+make compare-compression CODEC=av2 \
+  COMPRESSION_SET=high-depth-smoke \
+  COMPRESSION_LIMIT=1 \
+  COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom \
+  COMPRESSION_REFERENCE_PRESET=realtime-screen \
+  COMPRESSION_REFERENCE_ARGS="-tiles 1x1" \
+  COMPRESSION_SETTINGS=predictive
+make compare-compression CODEC=av2 \
+  COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f \
+  COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom \
+  COMPRESSION_REFERENCE_PRESET=realtime-screen \
+  COMPRESSION_DIRECT_SOURCE_FILES=1 \
+  COMPRESSION_SETTINGS=predictive
+```
+
+Result: the one-vector plumbing check passed, and the full 50-frame comparison
+used cached ffmpeg/libaom references for all six vectors.
+
+Corrected predictive comparison:
+
+| Vector | FF bytes | FF Mbps | FF fps | Prev reported bytes | Delta bytes | Prev fps | Delta fps |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 24,497,447 | 58.79 | 3.69 | 24,498,025 | -578 | 3.85 | -0.16 |
+| Scene 422 8-bit | 27,889,897 | 66.94 | 3.12 | 27,890,525 | -628 | 3.36 | -0.24 |
+| Scene 444 8-bit | 33,603,246 | 80.65 | 2.91 | 33,603,874 | -628 | 2.87 | +0.04 |
+| Mission 420 10-bit | 57,419,325 | 551.23 | 2.80 | 70,741,219 | -13,321,894 | 2.28 | +0.52 |
+| Mission 422 10-bit | 66,495,093 | 638.35 | 2.48 | 81,787,223 | -15,292,130 | 1.99 | +0.49 |
+| Mission 444 10-bit | 82,799,093 | 794.87 | 2.00 | 101,589,699 | -18,790,606 | 1.65 | +0.35 |
+| Total | 292,704,101 | n/a | 2.73 | 340,110,565 | -47,406,464 | 2.45 | +0.28 |
+
+The previous reported table is not a clean performance-regression baseline
+because the Makefile comparison target could not pass `--set predictive` to
+FrameForge. Use this checkpoint as the active predictive baseline for the next
+production inter-frame changes.
