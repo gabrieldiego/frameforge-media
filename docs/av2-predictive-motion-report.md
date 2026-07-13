@@ -56,3 +56,36 @@ Total byte delta from `docs/av2-predictive-baseline.md`:
 The fps drop is the immediate control point for the next patch. The regular
 inter-frame syntax work should be compared against this checkpoint first, not
 only against the older baseline report.
+
+## Checkpoint 2: Zero-MV Regular-Inter Syntax Scaffold
+
+Changes:
+
+- Added AVM-derived CDF initializers for `intra_inter`, `single_ref`, and
+  `inter_single_mode` symbols.
+- Added a narrow zero-MV regular inter tile entropy helper for 8x8 lossless
+  leaves. It emits `is_inter=1`, `skip_txfm=1`, and `GLOBALMV`, with neighbor
+  contexts tracked on the MI grid.
+- Added a regular tile-group header helper and OBU type coverage in tests.
+- Kept the production repeated-frame path on SEF; this checkpoint does not
+  change CLI-selected bitstreams or reconstruction.
+
+Validation:
+
+```sh
+cargo test -p frameforge-codecs --all-features
+make build
+```
+
+Result: 162/162 codec tests passed, and the release CLI build passed.
+
+Compression comparison:
+
+| Scope | FF bytes | FF fps | Delta bytes vs checkpoint 1 | Delta fps vs checkpoint 1 |
+|---|---:|---:|---:|---:|
+| CLI-selected AV2 lossless paths | unchanged | unchanged | 0 | 0 |
+
+No full 1080p comparison was rerun for this scaffold because the new regular
+inter payload is test-only until it is reference-decoder clean and can replace
+part of the predictive key-frame fallback without regressing repeated-frame SEF
+compression.

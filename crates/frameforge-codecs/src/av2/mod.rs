@@ -15,6 +15,8 @@ mod tile;
 use ibc::{Av2LocalIbc444, Av2LocalIbcStats};
 use palette::Av2LumaPalette444;
 use syntax::{Av2SyntaxPayload, Av2SyntaxWriter};
+#[cfg(test)]
+use tile::av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields;
 use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
@@ -238,6 +240,8 @@ enum Av2ObuType {
     SequenceHeader = 1,
     TemporalDelimiter = 2,
     ClosedLoopKey = 4,
+    #[cfg(test)]
+    RegularTileGroup = 7,
     RegularSef = 12,
 }
 
@@ -2180,6 +2184,82 @@ fn av2_regular_sef_payload(order_hint: u16) -> Av2SyntaxPayload {
     writer.finish()
 }
 
+#[cfg(test)]
+fn av2_lossless_zero_mv_regular_inter_payload(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
+    let tile_layout = Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry);
+    let profile = Av2Black444MvpProfile::current();
+    let mut payload = av2_mvp_zero_mv_regular_inter_header_payload(&tile_layout, order_hint);
+    let tile_payloads: Vec<_> = tile_layout
+        .regions
+        .iter()
+        .map(|&region| {
+            av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                stream_format.chroma_format,
+                false,
+            )
+        })
+        .collect();
+    let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
+    let bit_offset = payload.bytes.len() * 8;
+    payload.fields.push(syntax::Av2SyntaxField {
+        name: "tile_group.tile_entropy_payload",
+        code: syntax::Av2SyntaxCode::TileEntropyPayload,
+        bit_offset,
+        bit_count: tile_payload.len() * 8,
+    });
+    payload.bytes.extend_from_slice(&tile_payload);
+    payload
+}
+
+#[cfg(test)]
+fn av2_mvp_zero_mv_regular_inter_header_payload(
+    tile_layout: &Av2TileLayout,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
+    let profile = Av2Black444MvpProfile::current();
+    let mut writer = Av2SyntaxWriter::new();
+
+    writer.write_flag("tile_group.first_tile_group_in_frame", true);
+    writer.write_uvlc("uncompressed_header.cur_mfh_id", 0);
+    writer.write_uvlc("uncompressed_header.seq_header_id", 0);
+    writer.write_flag("uncompressed_header.is_inter_frame", true);
+    writer.write_flag("uncompressed_header.immediate_output_picture", true);
+    writer.write_flag("uncompressed_header.frame_size_override_flag", false);
+    writer.write_literal(
+        "uncompressed_header.order_hint",
+        u64::from(order_hint),
+        AV2_PREDICTIVE_ORDER_HINT_BITS,
+    );
+    writer.write_flag("uncompressed_header.signal_primary_ref_frame", false);
+    writer.write_flag("uncompressed_header.cross_frame_context_disabled", true);
+    writer.write_literal("uncompressed_header.refresh_frame_flags", 1, 2);
+    writer.write_flag("uncompressed_header.allow_intrabc", false);
+    writer.write_flag("uncompressed_header.frame_interp_filter_switchable", false);
+    writer.write_literal("uncompressed_header.frame_interp_filter", 0, 2);
+    writer.write_flag(
+        "uncompressed_header.disable_cdf_update",
+        profile.disable_cdf_update,
+    );
+    write_mvp_tile_info(&mut writer, tile_layout);
+    writer.write_literal("quantization.base_qindex", 0, 8);
+    writer.write_flag("segmentation.enabled", false);
+    writer.write_flag("quantization_matrix.using_qmatrix", false);
+    writer.write_flag("uncompressed_header.reference_mode_select", false);
+    writer.write_flag("uncompressed_header.skip_mode_flag", false);
+    if !tile_layout.is_single_tile() {
+        writer.write_flag("tile_group.tile_start_and_end_present_flag", false);
+    }
+    writer.byte_align_zero("tile_group.header_byte_alignment");
+
+    writer.finish()
+}
+
 fn av2_mvp_444_closed_loop_key_payload(
     geometry: Av2VideoGeometry,
     frame_mode: &Av2Mvp444FrameMode,
@@ -2600,6 +2680,38 @@ mod tests {
         assert_eq!(frame_sizes[1], 6);
         assert_eq!(frame_sizes[2], 6);
         assert_eq!(output.len(), frame_sizes.iter().sum());
+    }
+
+    #[test]
+    fn av2_lossless_zero_mv_regular_inter_payload_emits_inter_symbols() {
+        let geometry = Av2VideoGeometry {
+            width: 16,
+            height: 16,
+        };
+        let stream_format = Av2StreamFormat::from_pixel_format(PixelFormat::Yuv420p8)
+            .expect("yuv420p8 is an AV2 stream format");
+        let profile = Av2Black444MvpProfile::current();
+        let entropy = av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
+            Av2TileRegion::root(geometry),
+            profile,
+            stream_format.chroma_format,
+            true,
+        );
+        let names: Vec<_> = entropy.fields.iter().map(|field| field.name).collect();
+
+        assert!(names.contains(&"tile.inter.is_inter"));
+        assert!(names.contains(&"tile.inter.skip_txfm"));
+        assert!(names.contains(&"tile.inter.single_mode"));
+
+        let payload = av2_lossless_zero_mv_regular_inter_payload(geometry, stream_format, 1);
+        assert!(payload
+            .fields
+            .iter()
+            .any(|field| field.name == "tile_group.tile_entropy_payload"));
+
+        let mut obu = Vec::new();
+        append_obu(&mut obu, Av2ObuType::RegularTileGroup, &payload);
+        assert!(!obu.is_empty());
     }
 
     #[test]

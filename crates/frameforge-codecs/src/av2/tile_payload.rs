@@ -272,6 +272,29 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
     )
 }
 
+#[cfg(test)]
+pub(crate) fn av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    chroma_format: Av2ChromaFormat,
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+        region,
+        profile,
+        chroma_format,
+        Av2PartitionPolicy::Fixed8x8Leaves,
+        false,
+        false,
+        None,
+        None,
+    );
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
+    plan.write_lossless_zero_mv_inter_entropy(&mut writer, 1);
+    writer.finish()
+}
+
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
 const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 64;
 const AV2_LOSSLESS_BASE_LEAF_SIZE: usize = 16;
@@ -1546,6 +1569,70 @@ impl Av2Black444TilePlan {
             }
         }
     }
+
+    #[cfg(test)]
+    fn write_lossless_zero_mv_inter_entropy(
+        &self,
+        writer: &mut Av2EntropyWriter,
+        total_refs: usize,
+    ) {
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut skip_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut inter_context =
+            Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        for decision in &self.decisions {
+            match decision.kind {
+                Av2TileDecisionKind::Partition(partition) => {
+                    write_partition(
+                        writer,
+                        *decision,
+                        partition,
+                        &partition_context,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    if partition == Av2MvpPartition::None {
+                        write_inter_globalmv_skip(
+                            writer,
+                            *decision,
+                            &skip_context,
+                            &inter_context,
+                            total_refs,
+                        );
+                        partition_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                        skip_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                            false,
+                            true,
+                        );
+                        inter_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                            true,
+                            0,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::IntrabcFlag(_)
+                | Av2TileDecisionKind::IntrabcCopy { .. }
+                | Av2TileDecisionKind::IntraLumaMode { .. }
+                | Av2TileDecisionKind::IntraChromaMode { .. }
+                | Av2TileDecisionKind::LumaPaletteModeInfo
+                | Av2TileDecisionKind::LumaPaletteColorMap
+                | Av2TileDecisionKind::BlackDcResidualCoefficients
+                | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {}
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1753,4 +1840,214 @@ impl Av2IntrabcContext {
 struct Av2IntrabcNeighborState {
     ibc: bool,
     skip: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Av2InterModeContext {
+    coded: Vec<bool>,
+    inter: Vec<bool>,
+    ref_frame: Vec<u8>,
+    rows: usize,
+    cols: usize,
+}
+
+#[cfg(test)]
+impl Av2InterModeContext {
+    fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
+        Self {
+            coded: vec![false; visible_rows_mi * visible_cols_mi],
+            inter: vec![false; visible_rows_mi * visible_cols_mi],
+            ref_frame: vec![0; visible_rows_mi * visible_cols_mi],
+            rows: visible_rows_mi,
+            cols: visible_cols_mi,
+        }
+    }
+
+    fn intra_inter_ctx(&self, row_mi: usize, col_mi: usize) -> usize {
+        let left = self.left_state(row_mi, col_mi);
+        let above = self.above_state(row_mi, col_mi);
+        match (left, above) {
+            (Some(left), Some(above)) => match (!left.inter, !above.inter) {
+                (true, true) => 3,
+                (true, false) | (false, true) => 1,
+                (false, false) => 0,
+            },
+            (Some(neighbor), None) | (None, Some(neighbor)) => usize::from(!neighbor.inter) * 2,
+            (None, None) => 0,
+        }
+    }
+
+    fn inter_single_mode_ctx(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+        ref_frame: u8,
+    ) -> usize {
+        let row_match = self
+            .above_right_state(row_mi, col_mi, block_size)
+            .or_else(|| self.above_state(row_mi, col_mi))
+            .is_some_and(|state| state.inter && state.ref_frame == ref_frame);
+        let col_match = self
+            .bottom_left_state(row_mi, col_mi, block_size)
+            .or_else(|| self.left_state(row_mi, col_mi))
+            .is_some_and(|state| state.inter && state.ref_frame == ref_frame);
+        usize::from(row_match) + usize::from(col_match)
+    }
+
+    fn single_ref_ctx(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        ref_frame: u8,
+        total_refs: usize,
+    ) -> usize {
+        let mut this_ref_count = 0usize;
+        let mut next_refs_count = 0usize;
+        for state in [self.left_state(row_mi, col_mi), self.above_state(row_mi, col_mi)]
+            .into_iter()
+            .flatten()
+            .filter(|state| state.inter)
+        {
+            if state.ref_frame == ref_frame {
+                this_ref_count += 1;
+            } else if usize::from(state.ref_frame) > usize::from(ref_frame)
+                && usize::from(state.ref_frame) < total_refs
+            {
+                next_refs_count += 1;
+            }
+        }
+        match this_ref_count.cmp(&next_refs_count) {
+            std::cmp::Ordering::Less => 0,
+            std::cmp::Ordering::Equal => 1,
+            std::cmp::Ordering::Greater => 2,
+        }
+    }
+
+    fn update_leaf(
+        &mut self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+        inter: bool,
+        ref_frame: u8,
+    ) {
+        for row in row_mi..(row_mi + block_size.mi_height()).min(self.rows) {
+            for col in col_mi..(col_mi + block_size.mi_width()).min(self.cols) {
+                let index = row * self.cols + col;
+                self.coded[index] = true;
+                self.inter[index] = inter;
+                self.ref_frame[index] = ref_frame;
+            }
+        }
+    }
+
+    fn state_at(&self, row_mi: usize, col_mi: usize) -> Option<Av2InterNeighborState> {
+        if row_mi >= self.rows || col_mi >= self.cols {
+            return None;
+        }
+        let index = row_mi * self.cols + col_mi;
+        self.coded[index].then_some(Av2InterNeighborState {
+            inter: self.inter[index],
+            ref_frame: self.ref_frame[index],
+        })
+    }
+
+    fn bottom_left_state(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<Av2InterNeighborState> {
+        col_mi
+            .checked_sub(1)
+            .and_then(|col| self.state_at(row_mi + block_size.mi_height().saturating_sub(1), col))
+    }
+
+    fn above_right_state(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<Av2InterNeighborState> {
+        row_mi
+            .checked_sub(1)
+            .and_then(|row| self.state_at(row, col_mi + block_size.mi_width().saturating_sub(1)))
+    }
+
+    fn left_state(&self, row_mi: usize, col_mi: usize) -> Option<Av2InterNeighborState> {
+        col_mi
+            .checked_sub(1)
+            .and_then(|col| self.state_at(row_mi, col))
+    }
+
+    fn above_state(&self, row_mi: usize, col_mi: usize) -> Option<Av2InterNeighborState> {
+        row_mi
+            .checked_sub(1)
+            .and_then(|row| self.state_at(row, col_mi))
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2InterNeighborState {
+    inter: bool,
+    ref_frame: u8,
+}
+
+#[cfg(test)]
+fn write_inter_globalmv_skip(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    skip_context: &Av2IntrabcContext,
+    inter_context: &Av2InterModeContext,
+    total_refs: usize,
+) {
+    let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
+    let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.is_inter",
+        intra_inter_ctx,
+        1,
+        &mut intra_inter_cdf,
+        2,
+        false,
+    );
+
+    let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
+    let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.skip_txfm",
+        skip_ctx,
+        1,
+        &mut skip_cdf,
+        2,
+        false,
+    );
+
+    if total_refs > 1 {
+        let single_ref_ctx = inter_context.single_ref_ctx(decision.row, decision.col, 0, total_refs);
+        let mut single_ref_cdf = DEFAULT_SINGLE_REF_CDFS[single_ref_ctx][0];
+        writer.write_symbol_with_key(
+            "tile.inter.single_ref",
+            single_ref_ctx,
+            1,
+            &mut single_ref_cdf,
+            2,
+            false,
+        );
+    }
+
+    let mode_ctx =
+        inter_context.inter_single_mode_ctx(decision.row, decision.col, decision.block_size, 0);
+    let mut mode_cdf = DEFAULT_INTER_SINGLE_MODE_CDFS[mode_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.single_mode",
+        mode_ctx,
+        1,
+        &mut mode_cdf,
+        3,
+        false,
+    );
 }
