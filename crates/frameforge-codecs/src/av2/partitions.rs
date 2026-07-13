@@ -781,7 +781,7 @@ fn write_fsc_mode(
     size_group: usize,
     use_fsc: bool,
 ) {
-    let context = fsc_context.min(2);
+    let context = fsc_context.min(DEFAULT_FSC_MODE_CDFS.len() - 1);
     let mut fsc_cdf = DEFAULT_FSC_MODE_CDFS[context][size_group];
     writer.write_symbol_with_key(
         "tile.intra.fsc_mode",

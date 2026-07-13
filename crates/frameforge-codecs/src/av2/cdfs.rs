@@ -282,14 +282,12 @@ const DEFAULT_SKIP_TXFM_CDFS: [[u16; 6]; 6] = [
     avm_cdf2(12366, 0, 0, -1),
     avm_cdf2(3320, 1, 1, 0),
 ];
-#[cfg(test)]
 const DEFAULT_INTRA_INTER_CDFS: [[u16; 6]; 4] = [
     avm_cdf2(1522, 0, 0, -1),
     avm_cdf2(14381, 0, 0, 0),
     avm_cdf2(10455, -1, 0, 0),
     avm_cdf2(27796, 0, 0, 0),
 ];
-#[cfg(test)]
 const DEFAULT_SINGLE_REF_CDFS: [[[u16; 6]; 6]; 3] = [
     [
         avm_cdf2(26469, 0, 0, 0),
@@ -316,7 +314,6 @@ const DEFAULT_SINGLE_REF_CDFS: [[[u16; 6]; 6]; 3] = [
         avm_cdf2(1633, 0, -1, 0),
     ],
 ];
-#[cfg(test)]
 const DEFAULT_INTER_SINGLE_MODE_CDFS: [[u16; 7]; 5] = [
     avm_cdf3(10043, 11100, 0, -1, -1),
     avm_cdf3(21561, 21758, 0, 0, -1),
@@ -338,7 +335,7 @@ const DEFAULT_FSC_MODE_CTX0_CDFS: [[u16; 6]; 6] = [
     avm_cdf2(32582, 1, 1, 1),
     avm_cdf2(32691, 1, 1, 1),
 ];
-const DEFAULT_FSC_MODE_CDFS: [[[u16; 6]; 6]; 3] = [
+const DEFAULT_FSC_MODE_CDFS: [[[u16; 6]; 6]; 4] = [
     DEFAULT_FSC_MODE_CTX0_CDFS,
     [
         avm_cdf2(27437, 0, 0, 0),
@@ -355,6 +352,14 @@ const DEFAULT_FSC_MODE_CDFS: [[[u16; 6]; 6]; 3] = [
         avm_cdf2(19218, -1, -1, -2),
         avm_cdf2(13701, -1, -1, -1),
         avm_cdf2(4636, -1, -2, 1),
+    ],
+    [
+        avm_cdf2(16384, 0, 0, 0),
+        avm_cdf2(16384, 0, 0, 0),
+        avm_cdf2(32016, 0, 1, 0),
+        avm_cdf2(32403, 1, 1, 1),
+        avm_cdf2(32583, 0, 1, 0),
+        avm_cdf2(32683, 1, 0, -1),
     ],
 ];
 const DEFAULT_DO_SPLIT_CDFS: [[u16; 6]; 64] = [

@@ -201,6 +201,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             ibc,
             record_fields,
             true,
+            false,
         );
     }
 
@@ -223,6 +224,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             ibc,
             record_fields,
             true,
+            false,
         );
         let replace = best.as_ref().is_none_or(|(best_payload, _)| {
             (payload.bytes.len(), payload.symbol_bits)
@@ -269,10 +271,10 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
         None,
         record_fields,
         false,
+        false,
     )
 }
 
-#[cfg(test)]
 pub(crate) fn av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
@@ -293,6 +295,35 @@ pub(crate) fn av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fi
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     plan.write_lossless_zero_mv_inter_entropy(&mut writer, 1);
     writer.finish()
+}
+
+pub(crate) fn av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    recon: &mut [u8],
+    palette: Option<&Av2LumaPalette444>,
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
+        region,
+        profile,
+        geometry,
+        chroma_format,
+        bit_depth,
+        source,
+        recon,
+        palette,
+        Av2PartitionPolicy::LosslessAdaptive32,
+        Av2LosslessSubsampledModeSearch::FastScreenContent,
+        None,
+        record_fields,
+        true,
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -590,6 +621,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     ibc: Option<&Av2LocalIbc444>,
     record_fields: bool,
     copy_fast_recon: bool,
+    regular_inter_frame: bool,
 ) -> Av2EntropyPayload {
     let lossless_partition_features = (partition_policy == Av2PartitionPolicy::LosslessAdaptive32)
         .then(|| {
@@ -623,7 +655,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         source,
         recon,
     );
-    plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless, palette);
+    plan.write_lossless_subsampled_entropy(&mut writer, &mut lossless, palette, regular_inter_frame);
     if copy_fast_recon && mode_search == Av2LosslessSubsampledModeSearch::FastScreenContent {
         lossless.copy_source_to_recon_region();
     }
@@ -1363,6 +1395,7 @@ impl Av2Black444TilePlan {
         writer: &mut Av2EntropyWriter,
         lossless: &mut Av2LosslessSubsampledTileState<'_>,
         palette: Option<&Av2LumaPalette444>,
+        regular_inter_frame: bool,
     ) {
         let mut partition_context =
             Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
@@ -1378,6 +1411,8 @@ impl Av2Black444TilePlan {
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut fsc_mode_context =
             Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut inter_context = regular_inter_frame
+            .then(|| Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi));
         let mut mode_cache: Option<(Av2TileDecision, Av2LosslessSubsampledModeDecision)> = None;
         for decision in &self.decisions {
             match decision.kind {
@@ -1391,6 +1426,17 @@ impl Av2Black444TilePlan {
                         self.visible_cols_mi,
                     );
                     if partition == Av2MvpPartition::None {
+                        if let Some(inter_context) = inter_context.as_mut() {
+                            write_inter_intra_flag(writer, *decision, inter_context, false);
+                            inter_context.update_leaf(
+                                decision.row,
+                                decision.col,
+                                decision.block_size,
+                                false,
+                                0,
+                                false,
+                            );
+                        }
                         partition_context.update_leaf(
                             decision.row,
                             decision.col,
@@ -1473,8 +1519,11 @@ impl Av2Black444TilePlan {
                         decision.col,
                         decision.block_size,
                     );
-                    let fsc_context =
-                        fsc_mode_context.context(decision.row, decision.col, decision.block_size);
+                    let fsc_context = if regular_inter_frame {
+                        3
+                    } else {
+                        fsc_mode_context.context(decision.row, decision.col, decision.block_size)
+                    };
                     let mode_index = mode_syntax.index_for(coded_luma_mode);
                     write_intra_luma_mode(
                         writer,
@@ -1595,7 +1644,6 @@ impl Av2Black444TilePlan {
         }
     }
 
-    #[cfg(test)]
     fn write_lossless_zero_mv_inter_entropy(
         &self,
         writer: &mut Av2EntropyWriter,
@@ -1941,7 +1989,6 @@ struct Av2IntrabcNeighborState {
     skip: bool,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2InterModeContext {
     coded: Vec<bool>,
@@ -1952,7 +1999,6 @@ struct Av2InterModeContext {
     cols: usize,
 }
 
-#[cfg(test)]
 impl Av2InterModeContext {
     fn new(visible_rows_mi: usize, visible_cols_mi: usize) -> Self {
         Self {
@@ -1974,7 +2020,13 @@ impl Av2InterModeContext {
                 (true, false) | (false, true) => 1,
                 (false, false) => 0,
             },
-            (Some(neighbor), None) | (None, Some(neighbor)) => usize::from(!neighbor.inter) * 2,
+            (Some(neighbor), None) | (None, Some(neighbor)) => {
+                if neighbor.inter {
+                    0
+                } else {
+                    3
+                }
+            }
             (None, None) => 0,
         }
     }
@@ -2098,7 +2150,6 @@ impl Av2InterModeContext {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Av2InterNeighborState {
     inter: bool,
@@ -2106,7 +2157,6 @@ struct Av2InterNeighborState {
     newmv: bool,
 }
 
-#[cfg(test)]
 fn write_inter_globalmv_skip(
     writer: &mut Av2EntropyWriter,
     decision: Av2TileDecision,
@@ -2114,16 +2164,7 @@ fn write_inter_globalmv_skip(
     inter_context: &Av2InterModeContext,
     total_refs: usize,
 ) {
-    let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
-    let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
-    writer.write_symbol_with_key(
-        "tile.inter.is_inter",
-        intra_inter_ctx,
-        1,
-        &mut intra_inter_cdf,
-        2,
-        false,
-    );
+    write_inter_intra_flag(writer, decision, inter_context, true);
 
     let skip_ctx = skip_context.skip_txfm_ctx(decision.row, decision.col, decision.block_size);
     let mut skip_cdf = DEFAULT_SKIP_TXFM_CDFS[skip_ctx];
@@ -2158,6 +2199,24 @@ fn write_inter_globalmv_skip(
         1,
         &mut mode_cdf,
         3,
+        false,
+    );
+}
+
+fn write_inter_intra_flag(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    inter_context: &Av2InterModeContext,
+    is_inter: bool,
+) {
+    let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
+    let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.is_inter",
+        intra_inter_ctx,
+        usize::from(is_inter),
+        &mut intra_inter_cdf,
+        2,
         false,
     );
 }

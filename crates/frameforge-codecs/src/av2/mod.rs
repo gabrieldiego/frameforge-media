@@ -15,20 +15,19 @@ mod tile;
 use ibc::{Av2LocalIbc444, Av2LocalIbcStats};
 use palette::Av2LumaPalette444;
 use syntax::{Av2SyntaxPayload, Av2SyntaxWriter};
+#[cfg(test)]
+use tile::av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields;
 use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
     av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields,
+    av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields,
+    av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossy_420_tile_entropy_payload_for_region,
     av2_lossy_420_tile_entropy_payload_for_region_with_fields,
     av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2TileRegion,
-};
-#[cfg(test)]
-use tile::{
-    av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields,
-    av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields,
 };
 
 pub const AV2_CODEC_NAME: &str = "av2";
@@ -243,7 +242,6 @@ enum Av2ObuType {
     SequenceHeader = 1,
     TemporalDelimiter = 2,
     ClosedLoopKey = 4,
-    #[cfg(test)]
     RegularTileGroup = 7,
     RegularSef = 12,
 }
@@ -693,6 +691,20 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                     av2_lossless_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
                         &frame, order_hint,
                     )
+                } else if let Some((bitstream, reconstruction)) = predictive_reference
+                    .as_deref()
+                    .and_then(|reference| {
+                        av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_frame(
+                            geometry,
+                            stream_format,
+                            &frame,
+                            reference,
+                            order_hint,
+                        )
+                    })
+                {
+                    predictive_reference = Some(frame.clone());
+                    (bitstream, reconstruction)
                 } else {
                     let result =
                         av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
@@ -1025,6 +1037,108 @@ fn av2_lossless_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
         &av2_regular_sef_payload(order_hint),
     );
     (out, frame.to_vec())
+}
+
+fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_frame(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    reference: &[u8],
+    order_hint: u16,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let expected_len = Picture::expected_len(
+        geometry.width,
+        geometry.height,
+        stream_format.pixel_format(),
+    );
+    if frame.len() != expected_len || reference.len() != expected_len {
+        return None;
+    }
+    let layout = planar::Av2PlanarYuvLayout::new(
+        geometry,
+        stream_format.chroma_format,
+        stream_format.bit_depth,
+    )
+    .ok()?;
+    let tile_layout = Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry);
+    if tile_layout.is_single_tile() {
+        return None;
+    }
+
+    let zero_mv_tiles: Vec<_> = tile_layout
+        .regions
+        .iter()
+        .map(|region| {
+            layout.regions_equal_between(
+                frame,
+                region.origin_x,
+                region.origin_y,
+                reference,
+                region.origin_x,
+                region.origin_y,
+                region.width,
+                region.height,
+            )
+        })
+        .collect();
+    let zero_mv_tile_count = zero_mv_tiles.iter().filter(|&&matches| matches).count();
+    if zero_mv_tile_count == 0 || zero_mv_tile_count == tile_layout.tile_count() {
+        return None;
+    }
+
+    let profile = Av2Black444MvpProfile::current();
+    let palette = palette::build_luma_palette_lossless(
+        frame,
+        geometry,
+        stream_format.chroma_format,
+        stream_format.bit_depth,
+    )
+    .ok();
+    let mut reconstruction = frame.to_vec();
+    let mut tile_payloads = Vec::with_capacity(tile_layout.tile_count());
+    for (&region, &zero_mv_tile) in tile_layout.regions.iter().zip(zero_mv_tiles.iter()) {
+        let payload = if zero_mv_tile {
+            av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                stream_format.chroma_format,
+                false,
+            )
+        } else {
+            av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                geometry,
+                stream_format.chroma_format,
+                stream_format.bit_depth,
+                frame,
+                &mut reconstruction,
+                palette.as_ref(),
+                false,
+            )
+        };
+        tile_payloads.push(payload);
+    }
+
+    let mut payload = av2_mvp_regular_inter_header_payload(&tile_layout, order_hint);
+    let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
+    let bit_offset = payload.bytes.len() * 8;
+    payload.fields.push(syntax::Av2SyntaxField {
+        name: "tile_group.tile_entropy_payload",
+        code: syntax::Av2SyntaxCode::TileEntropyPayload,
+        bit_offset,
+        bit_count: tile_payload.len() * 8,
+    });
+    payload.bytes.extend_from_slice(&tile_payload);
+
+    let mut out = Vec::new();
+    append_obu(
+        &mut out,
+        Av2ObuType::TemporalDelimiter,
+        &Av2SyntaxPayload::default(),
+    );
+    append_obu(&mut out, Av2ObuType::RegularTileGroup, &payload);
+    Some((out, reconstruction))
 }
 
 fn av2_order_hint_for_frame(frame_index: usize) -> u16 {
@@ -2195,7 +2309,7 @@ fn av2_lossless_zero_mv_regular_inter_payload(
 ) -> Av2SyntaxPayload {
     let tile_layout = Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
-    let mut payload = av2_mvp_zero_mv_regular_inter_header_payload(&tile_layout, order_hint);
+    let mut payload = av2_mvp_regular_inter_header_payload(&tile_layout, order_hint);
     let tile_payloads: Vec<_> = tile_layout
         .regions
         .iter()
@@ -2220,8 +2334,7 @@ fn av2_lossless_zero_mv_regular_inter_payload(
     payload
 }
 
-#[cfg(test)]
-fn av2_mvp_zero_mv_regular_inter_header_payload(
+fn av2_mvp_regular_inter_header_payload(
     tile_layout: &Av2TileLayout,
     order_hint: u16,
 ) -> Av2SyntaxPayload {
@@ -2242,6 +2355,8 @@ fn av2_mvp_zero_mv_regular_inter_header_payload(
     writer.write_flag("uncompressed_header.signal_primary_ref_frame", false);
     writer.write_flag("uncompressed_header.cross_frame_context_disabled", true);
     writer.write_literal("uncompressed_header.refresh_frame_flags", 1, 2);
+    writer.write_flag("uncompressed_header.allow_screen_content_tools", true);
+    writer.write_flag("uncompressed_header.cur_frame_force_integer_mv", true);
     writer.write_flag("uncompressed_header.allow_intrabc", false);
     writer.write_flag("uncompressed_header.frame_interp_filter_switchable", false);
     writer.write_literal("uncompressed_header.frame_interp_filter", 0, 2);
@@ -2255,6 +2370,7 @@ fn av2_mvp_zero_mv_regular_inter_header_payload(
     writer.write_flag("quantization_matrix.using_qmatrix", false);
     writer.write_flag("uncompressed_header.reference_mode_select", false);
     writer.write_flag("uncompressed_header.skip_mode_flag", false);
+    writer.write_literal("uncompressed_header.reduced_tx_set_used", 0, 2);
     if !tile_layout.is_single_tile() {
         writer.write_flag("tile_group.tile_start_and_end_present_flag", false);
     }
@@ -2683,6 +2799,58 @@ mod tests {
         assert_eq!(frame_sizes[1], 6);
         assert_eq!(frame_sizes[2], 6);
         assert_eq!(output.len(), frame_sizes.iter().sum());
+    }
+
+    #[test]
+    fn av2_lossless_predictive_uses_zero_mv_inter_for_unchanged_tiles() {
+        let geometry = Av2VideoGeometry {
+            width: 1024,
+            height: 64,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
+        let first = vec![0u8; frame_len];
+        let mut second = first.clone();
+        for y in 0..geometry.height {
+            let row = y * geometry.width;
+            for x in 512..geometry.width {
+                second[row + x] = 90;
+            }
+        }
+        let mut input = first.clone();
+        input.extend_from_slice(&second);
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+        let mut frame_sizes = Vec::new();
+        let mut metrics = |metrics: Av2EncodeFrameMetrics<'_>| {
+            assert_eq!(metrics.source, metrics.reconstruction);
+            frame_sizes.push(metrics.bitstream_bytes);
+        };
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            Av2EncodeRequest {
+                params: Av2EncodeParams { frames: 2 },
+                geometry,
+                format,
+            },
+            Av2EncodeOptions {
+                lossless: true,
+                predictive: true,
+            },
+            Some(&mut metrics),
+        )
+        .expect("AV2 tile-level zero-MV predictive encode should succeed");
+
+        assert_eq!(recon, input);
+        assert_eq!(frame_sizes.len(), 2);
+        assert!(frame_sizes[1] > 6);
+        assert!(
+            frame_sizes[1] < frame_sizes[0],
+            "unchanged tile should make the regular inter frame smaller than the first key frame"
+        );
     }
 
     #[test]
