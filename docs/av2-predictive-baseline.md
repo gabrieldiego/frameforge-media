@@ -374,6 +374,33 @@ Raw totals for the residual shortcut threshold tradeoff checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.45 fps.
 
+### Predictor-First Motion Search
+
+The predictor-first motion-search checkpoint splits zero/neighbor predictor
+checks from local-search expansion. Once the reference hash index exists,
+candidate selection tries exact hash-index matches before expanding the local
+search ring; if the hash index is not built yet, local search still runs first
+and then builds the index only on a miss. This keeps the bitstream effectively
+unchanged while avoiding many local candidate probes after the first indexed
+miss in a frame.
+
+| Vector | Previous Bytes | New Bytes | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 4,282,069 | 4,282,079 | +10 | 8.55 | 9.80 | +14.6% |
+| Scene 422 8-bit | 4,819,315 | 4,819,333 | +18 | 8.19 | 8.92 | +8.9% |
+| Scene 444 8-bit | 5,766,361 | 5,766,372 | +11 | 6.94 | 7.51 | +8.2% |
+| Mission 420 10-bit | 19,494,499 | 19,494,498 | -1 | 3.66 | 3.88 | +6.0% |
+| Mission 422 10-bit | 22,685,653 | 22,685,657 | +4 | 3.20 | 3.28 | +2.5% |
+| Mission 444 10-bit | 28,592,973 | 28,592,971 | -2 | 2.65 | 2.73 | +3.0% |
+| Total | 85,640,870 | 85,640,910 | +40 | 4.45 | 4.70 | +5.6% |
+
+Raw totals for the predictor-first motion-search checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,640,910.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.70 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference

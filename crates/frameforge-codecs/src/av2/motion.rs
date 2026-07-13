@@ -237,7 +237,7 @@ fn build_lossless_motion_map_with_regions(
                 AV2_LOSSLESS_ME_BLOCK_SIZE,
                 AV2_LOSSLESS_ME_BLOCK_SIZE,
             );
-            motion_candidates(
+            motion_predictor_candidates(
                 &mut candidates,
                 &blocks,
                 blocks_wide,
@@ -245,61 +245,65 @@ fn build_lossless_motion_map_with_regions(
                 block_x,
                 block_y,
             );
-            let mut selected = None;
-            for &candidate in &candidates {
-                stats.candidate_checks += 1;
-                let Some((ref_block_x, ref_block_y, ref_x0, ref_y0)) = reference_block_for_mv(
+            let mut selected = select_first_exact_candidate(
+                &candidates,
+                &mut stats,
+                &mut reference_hashes,
+                layout,
+                current,
+                reference,
+                blocks_wide,
+                blocks_high,
+                block_x,
+                block_y,
+                x0,
+                y0,
+                current_hash,
+            );
+            if selected.is_none() {
+                if let Some(hash_index) = reference_hash_index.as_ref() {
+                    if let Some(candidate) = hash_index_candidate(
+                        hash_index,
+                        &candidates,
+                        layout,
+                        current,
+                        reference,
+                        blocks_wide,
+                        block_x,
+                        block_y,
+                        x0,
+                        y0,
+                        current_hash,
+                    ) {
+                        stats.candidate_checks += 1;
+                        stats.exact_candidate_checks += 1;
+                        record_selected_motion(&mut stats, candidate.source);
+                        selected = Some(Av2LosslessInterBlock {
+                            mv: candidate.mv.to_pixel_mv(),
+                        });
+                    }
+                }
+            }
+            if selected.is_none() {
+                let local_candidate_start = candidates.len();
+                append_local_motion_candidates(&mut candidates, local_candidate_start);
+                selected = select_first_exact_candidate(
+                    &candidates[local_candidate_start..],
+                    &mut stats,
+                    &mut reference_hashes,
+                    layout,
+                    current,
+                    reference,
                     blocks_wide,
                     blocks_high,
                     block_x,
                     block_y,
-                    candidate.mv,
-                ) else {
-                    stats.out_of_bounds_candidates += 1;
-                    continue;
-                };
-                let reference_hash = reference_hash_for_block(
-                    &mut reference_hashes,
-                    layout,
-                    reference,
-                    blocks_wide,
-                    ref_block_x,
-                    ref_block_y,
-                );
-                if reference_hash != current_hash {
-                    stats.hash_rejected_candidates += 1;
-                    continue;
-                }
-                stats.exact_candidate_checks += 1;
-                if layout.regions_equal_between(
-                    current,
                     x0,
                     y0,
-                    reference,
-                    ref_x0,
-                    ref_y0,
-                    AV2_LOSSLESS_ME_BLOCK_SIZE,
-                    AV2_LOSSLESS_ME_BLOCK_SIZE,
-                ) {
-                    match candidate.source {
-                        Av2MotionCandidateSource::Zero => stats.selected_zero_mv_blocks += 1,
-                        Av2MotionCandidateSource::Neighbor => {
-                            stats.selected_neighbor_mv_blocks += 1
-                        }
-                        Av2MotionCandidateSource::LocalSearch => {
-                            stats.selected_local_search_blocks += 1
-                        }
-                        Av2MotionCandidateSource::HashIndex => {
-                            stats.selected_hash_index_blocks += 1
-                        }
-                    }
-                    selected = Some(Av2LosslessInterBlock {
-                        mv: candidate.mv.to_pixel_mv(),
-                    });
-                    break;
-                }
+                    current_hash,
+                );
             }
-            if selected.is_none() {
+            if selected.is_none() && reference_hash_index.is_none() {
                 let hash_index = reference_hash_index.get_or_insert_with(|| {
                     build_reference_hash_index(
                         &mut reference_hashes,
@@ -324,7 +328,7 @@ fn build_lossless_motion_map_with_regions(
                 ) {
                     stats.candidate_checks += 1;
                     stats.exact_candidate_checks += 1;
-                    stats.selected_hash_index_blocks += 1;
+                    record_selected_motion(&mut stats, candidate.source);
                     selected = Some(Av2LosslessInterBlock {
                         mv: candidate.mv.to_pixel_mv(),
                     });
@@ -449,6 +453,71 @@ fn hash_index_candidate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn select_first_exact_candidate(
+    candidates: &[Av2MotionCandidate],
+    stats: &mut Av2LosslessMotionStats,
+    reference_hashes: &mut [Option<u64>],
+    layout: Av2PlanarYuvLayout,
+    current: &[u8],
+    reference: &[u8],
+    blocks_wide: usize,
+    blocks_high: usize,
+    block_x: usize,
+    block_y: usize,
+    x0: usize,
+    y0: usize,
+    current_hash: u64,
+) -> Option<Av2LosslessInterBlock> {
+    for &candidate in candidates {
+        stats.candidate_checks += 1;
+        let Some((ref_block_x, ref_block_y, ref_x0, ref_y0)) =
+            reference_block_for_mv(blocks_wide, blocks_high, block_x, block_y, candidate.mv)
+        else {
+            stats.out_of_bounds_candidates += 1;
+            continue;
+        };
+        let reference_hash = reference_hash_for_block(
+            reference_hashes,
+            layout,
+            reference,
+            blocks_wide,
+            ref_block_x,
+            ref_block_y,
+        );
+        if reference_hash != current_hash {
+            stats.hash_rejected_candidates += 1;
+            continue;
+        }
+        stats.exact_candidate_checks += 1;
+        if layout.regions_equal_between(
+            current,
+            x0,
+            y0,
+            reference,
+            ref_x0,
+            ref_y0,
+            AV2_LOSSLESS_ME_BLOCK_SIZE,
+            AV2_LOSSLESS_ME_BLOCK_SIZE,
+        ) {
+            record_selected_motion(stats, candidate.source);
+            return Some(Av2LosslessInterBlock {
+                mv: candidate.mv.to_pixel_mv(),
+            });
+        }
+    }
+    None
+}
+
+fn record_selected_motion(stats: &mut Av2LosslessMotionStats, source: Av2MotionCandidateSource) {
+    match source {
+        Av2MotionCandidateSource::Zero => stats.selected_zero_mv_blocks += 1,
+        Av2MotionCandidateSource::Neighbor => stats.selected_neighbor_mv_blocks += 1,
+        Av2MotionCandidateSource::LocalSearch => stats.selected_local_search_blocks += 1,
+        Av2MotionCandidateSource::HashIndex => stats.selected_hash_index_blocks += 1,
+    }
+}
+
 fn motion_search_mask(
     blocks_wide: usize,
     blocks_high: usize,
@@ -497,7 +566,7 @@ fn motion_search_mask(
     Ok(mask)
 }
 
-fn motion_candidates(
+fn motion_predictor_candidates(
     candidates: &mut Vec<Av2MotionCandidate>,
     blocks: &[Option<Av2LosslessInterBlock>],
     blocks_wide: usize,
@@ -533,8 +602,12 @@ fn motion_candidates(
             }
         }
     }
+}
 
-    let predictor_count = candidates.len();
+fn append_local_motion_candidates(
+    candidates: &mut Vec<Av2MotionCandidate>,
+    predictor_count: usize,
+) {
     for predictor_index in 0..predictor_count {
         let predictor = candidates[predictor_index].mv;
         for step in AV2_LOSSLESS_ME_SEARCH_BLOCK_STEPS {
@@ -695,7 +768,10 @@ mod tests {
                 }
             );
             assert_eq!(map.stats().selected_inter_blocks(), 1);
-            assert_eq!(map.stats().selected_local_search_blocks, 1);
+            assert_eq!(
+                map.stats().selected_local_search_blocks + map.stats().selected_hash_index_blocks,
+                1
+            );
         }
     }
 
