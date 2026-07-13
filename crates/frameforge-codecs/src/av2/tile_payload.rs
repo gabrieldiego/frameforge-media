@@ -297,6 +297,29 @@ pub(crate) fn av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fi
     writer.finish()
 }
 
+pub(crate) fn av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    chroma_format: Av2ChromaFormat,
+    block_modes: &Av2LosslessInterTileBlockModes,
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+        region,
+        profile,
+        chroma_format,
+        Av2PartitionPolicy::Fixed8x8Leaves,
+        false,
+        false,
+        None,
+        None,
+    );
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
+    plan.write_lossless_mixed_inter_entropy(&mut writer, 1, block_modes);
+    writer.finish()
+}
+
 pub(crate) fn av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
@@ -348,6 +371,52 @@ pub(crate) fn av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fie
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
     plan.write_lossless_new_mv_inter_entropy(&mut writer, 1, mv_row_px, mv_col_px);
     writer.finish()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Av2LosslessInterBlockMode {
+    ZeroMv,
+    NewMv { row_px: i16, col_px: i16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av2LosslessInterTileBlockModes {
+    blocks_wide: usize,
+    blocks_high: usize,
+    blocks: Vec<Av2LosslessInterBlockMode>,
+}
+
+impl Av2LosslessInterTileBlockModes {
+    pub(crate) fn new(
+        blocks_wide: usize,
+        blocks_high: usize,
+        blocks: Vec<Av2LosslessInterBlockMode>,
+    ) -> Self {
+        assert_eq!(
+            blocks.len(),
+            blocks_wide * blocks_high,
+            "AV2 inter tile mode map must cover every 8x8 block"
+        );
+        Self {
+            blocks_wide,
+            blocks_high,
+            blocks,
+        }
+    }
+
+    fn mode_for_decision(&self, decision: Av2TileDecision) -> Av2LosslessInterBlockMode {
+        debug_assert_eq!(decision.block_size.width, 8);
+        debug_assert_eq!(decision.block_size.height, 8);
+        debug_assert_eq!(decision.row % 2, 0);
+        debug_assert_eq!(decision.col % 2, 0);
+        let row = decision.row / 2;
+        let col = decision.col / 2;
+        assert!(
+            row < self.blocks_high && col < self.blocks_wide,
+            "AV2 inter tile decision is outside the 8x8 mode map"
+        );
+        self.blocks[row * self.blocks_wide + col]
+    }
 }
 
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
@@ -1696,6 +1765,98 @@ impl Av2Black444TilePlan {
                             false,
                             0,
                             0,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::IntrabcFlag(_)
+                | Av2TileDecisionKind::IntrabcCopy { .. }
+                | Av2TileDecisionKind::IntraLumaMode { .. }
+                | Av2TileDecisionKind::IntraChromaMode { .. }
+                | Av2TileDecisionKind::LumaPaletteModeInfo
+                | Av2TileDecisionKind::LumaPaletteColorMap
+                | Av2TileDecisionKind::BlackDcResidualCoefficients
+                | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {}
+            }
+        }
+    }
+
+    fn write_lossless_mixed_inter_entropy(
+        &self,
+        writer: &mut Av2EntropyWriter,
+        total_refs: usize,
+        block_modes: &Av2LosslessInterTileBlockModes,
+    ) {
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut skip_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut inter_context =
+            Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        for decision in &self.decisions {
+            match decision.kind {
+                Av2TileDecisionKind::Partition(partition) => {
+                    write_partition(
+                        writer,
+                        *decision,
+                        partition,
+                        &partition_context,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    if partition == Av2MvpPartition::None {
+                        match block_modes.mode_for_decision(*decision) {
+                            Av2LosslessInterBlockMode::ZeroMv => {
+                                write_inter_globalmv_skip(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    false,
+                                    0,
+                                    0,
+                                );
+                            }
+                            Av2LosslessInterBlockMode::NewMv { row_px, col_px } => {
+                                write_inter_newmv_skip(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                    row_px,
+                                    col_px,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    true,
+                                    row_px,
+                                    col_px,
+                                );
+                            }
+                        }
+                        partition_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                        skip_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                            false,
+                            true,
                         );
                     }
                 }

@@ -20,6 +20,7 @@ use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
+    av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields,
@@ -27,7 +28,8 @@ use tile::{
     av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossy_420_tile_entropy_payload_for_region,
     av2_lossy_420_tile_entropy_payload_for_region_with_fields,
-    av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2TileRegion,
+    av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2LosslessInterBlockMode,
+    Av2LosslessInterTileBlockModes, Av2TileRegion,
 };
 
 pub const AV2_CODEC_NAME: &str = "av2";
@@ -1093,6 +1095,11 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                 .and_then(|map| uniform_lossless_tile_motion(map, *region))
             {
                 Av2PredictiveTileMode::NewMv(mv)
+            } else if let Some(blocks) = motion_map
+                .as_ref()
+                .and_then(|map| lossless_tile_inter_block_modes(map, *region))
+            {
+                Av2PredictiveTileMode::Mixed(blocks)
             } else {
                 Av2PredictiveTileMode::Intra
             }
@@ -1119,7 +1126,7 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
     .ok();
     let mut reconstruction = frame.to_vec();
     let mut tile_payloads = Vec::with_capacity(tile_layout.tile_count());
-    for (&region, &tile_mode) in tile_layout.regions.iter().zip(tile_modes.iter()) {
+    for (&region, tile_mode) in tile_layout.regions.iter().zip(tile_modes.iter()) {
         let payload = match tile_mode {
             Av2PredictiveTileMode::ZeroMv => {
                 av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
@@ -1136,6 +1143,15 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                     stream_format.chroma_format,
                     mv.row_px,
                     mv.col_px,
+                    false,
+                )
+            }
+            Av2PredictiveTileMode::Mixed(blocks) => {
+                av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    stream_format.chroma_format,
+                    blocks,
                     false,
                 )
             }
@@ -1175,10 +1191,11 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
     Some((out, reconstruction))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Av2PredictiveTileMode {
     ZeroMv,
     NewMv(Av2MotionVector),
+    Mixed(Av2LosslessInterTileBlockModes),
     Intra,
 }
 
@@ -1212,6 +1229,42 @@ fn uniform_lossless_tile_motion(
         }
     }
     selected
+}
+
+fn lossless_tile_inter_block_modes(
+    motion_map: &Av2LosslessMotionMap,
+    region: Av2TileRegion,
+) -> Option<Av2LosslessInterTileBlockModes> {
+    if region.origin_x % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.origin_y % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.width % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.height % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+    {
+        return None;
+    }
+
+    let blocks_wide = region.width / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let blocks_high = region.height / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let mut blocks = Vec::with_capacity(blocks_wide * blocks_high);
+    let mut has_nonzero = false;
+    for y in (region.origin_y..region.origin_y + region.height).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
+    {
+        for x in
+            (region.origin_x..region.origin_x + region.width).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
+        {
+            let block = motion_map.candidate_at(x, y)?;
+            if block.mv.row_px == 0 && block.mv.col_px == 0 {
+                blocks.push(Av2LosslessInterBlockMode::ZeroMv);
+            } else {
+                has_nonzero = true;
+                blocks.push(Av2LosslessInterBlockMode::NewMv {
+                    row_px: block.mv.row_px,
+                    col_px: block.mv.col_px,
+                });
+            }
+        }
+    }
+    has_nonzero.then(|| Av2LosslessInterTileBlockModes::new(blocks_wide, blocks_high, blocks))
 }
 
 fn av2_order_hint_for_frame(frame_index: usize) -> u16 {
@@ -3000,6 +3053,74 @@ mod tests {
     }
 
     #[test]
+    fn av2_lossless_predictive_uses_mixed_newmv_inter_for_nonuniform_shifted_tile() {
+        let geometry = Av2VideoGeometry {
+            width: 1024,
+            height: 64,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
+        let first = shifted_tile_reference_frame(geometry);
+        let second = mixed_shifted_tile_current_frame(&first, geometry);
+        let stream_format =
+            Av2StreamFormat::from_pixel_format(format).expect("yuv420p8 is an AV2 stream format");
+        let motion_map = motion::build_lossless_motion_map(
+            &second,
+            &first,
+            geometry,
+            stream_format.chroma_format,
+            stream_format.bit_depth,
+        )
+        .expect("mixed shifted tile motion map should build");
+        let right_tile = Av2TileRegion {
+            origin_x: 512,
+            origin_y: 0,
+            width: 512,
+            height: 64,
+        };
+        assert_eq!(uniform_lossless_tile_motion(&motion_map, right_tile), None);
+        assert!(
+            lossless_tile_inter_block_modes(&motion_map, right_tile).is_some(),
+            "right tile should have exact non-uniform inter block modes"
+        );
+
+        let mut input = Vec::with_capacity(frame_len * 2);
+        input.extend_from_slice(&first);
+        input.extend_from_slice(&second);
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+        let mut frame_sizes = Vec::new();
+        let mut metrics = |metrics: Av2EncodeFrameMetrics<'_>| {
+            assert_eq!(metrics.source, metrics.reconstruction);
+            frame_sizes.push(metrics.bitstream_bytes);
+        };
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            Av2EncodeRequest {
+                params: Av2EncodeParams { frames: 2 },
+                geometry,
+                format,
+            },
+            Av2EncodeOptions {
+                lossless: true,
+                predictive: true,
+            },
+            Some(&mut metrics),
+        )
+        .expect("AV2 mixed tile-level NEWMV predictive encode should succeed");
+
+        assert_eq!(recon, input);
+        assert_eq!(frame_sizes.len(), 2);
+        assert!(
+            frame_sizes[1] < frame_sizes[0],
+            "mixed shifted tile should make the regular inter frame smaller than the first key frame"
+        );
+    }
+
+    #[test]
     fn av2_lossless_zero_mv_regular_inter_payload_emits_inter_symbols() {
         let geometry = Av2VideoGeometry {
             width: 16,
@@ -3119,6 +3240,42 @@ mod tests {
             for x in 256..chroma_width {
                 frame[u_offset + row + x] = reference[u_offset + row + x - 4];
                 frame[v_offset + row + x] = reference[v_offset + row + x - 4];
+            }
+        }
+
+        frame
+    }
+
+    fn mixed_shifted_tile_current_frame(reference: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {
+        let mut frame = vec![0; reference.len()];
+        let y_len = geometry.width * geometry.height;
+        let chroma_width = geometry.width / 2;
+        let chroma_height = geometry.height / 2;
+        let chroma_len = chroma_width * chroma_height;
+        let u_offset = y_len;
+        let v_offset = y_len + chroma_len;
+
+        for y in 0..geometry.height {
+            let row = y * geometry.width;
+            let shift = if y < geometry.height / 2 { 8 } else { 16 };
+            for x in 0..512 {
+                frame[row + x] = 233;
+            }
+            for x in 512..geometry.width {
+                frame[row + x] = reference[row + x - shift];
+            }
+        }
+
+        for y in 0..chroma_height {
+            let row = y * chroma_width;
+            let shift = if y < chroma_height / 2 { 4 } else { 8 };
+            for x in 0..256 {
+                frame[u_offset + row + x] = 129;
+                frame[v_offset + row + x] = 55;
+            }
+            for x in 256..chroma_width {
+                frame[u_offset + row + x] = reference[u_offset + row + x - shift];
+                frame[v_offset + row + x] = reference[v_offset + row + x - shift];
             }
         }
 
