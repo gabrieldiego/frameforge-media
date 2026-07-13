@@ -321,6 +321,29 @@ const DEFAULT_INTER_SINGLE_MODE_CDFS: [[u16; 7]; 5] = [
     avm_cdf3(14117, 14341, 0, 0, 0),
     avm_cdf3(18288, 18577, 0, 0, 0),
 ];
+const DEFAULT_DRL_CDFS: [[[u16; 6]; 5]; 3] = [
+    [
+        avm_cdf2(15721, 1, 1, 0),
+        avm_cdf2(21115, 0, 0, 0),
+        avm_cdf2(19567, 0, 0, -1),
+        avm_cdf2(17602, 1, 1, 1),
+        avm_cdf2(13319, 1, 1, 1),
+    ],
+    [
+        avm_cdf2(18692, 1, 1, 1),
+        avm_cdf2(19343, 1, 1, 0),
+        avm_cdf2(18207, 1, 1, 0),
+        avm_cdf2(17908, 1, 1, 1),
+        avm_cdf2(18304, 1, 1, 1),
+    ],
+    [
+        avm_cdf2(22157, 1, 1, 0),
+        avm_cdf2(23233, 1, 1, 0),
+        avm_cdf2(22782, 1, 1, 0),
+        avm_cdf2(22353, 1, 1, 1),
+        avm_cdf2(22457, 1, 1, 1),
+    ],
+];
 const DEFAULT_LOSSLESS_TX_SIZE_CDFS: [[u16; 6]; 4] = [
     avm_cdf2(16384, 0, 0, -1),
     avm_cdf2(16384, 1, 0, 0),

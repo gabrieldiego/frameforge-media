@@ -326,7 +326,6 @@ pub(crate) fn av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_f
     )
 }
 
-#[cfg(test)]
 pub(crate) fn av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
@@ -1435,6 +1434,8 @@ impl Av2Black444TilePlan {
                                 false,
                                 0,
                                 false,
+                                0,
+                                0,
                             );
                         }
                         partition_context.update_leaf(
@@ -1693,6 +1694,8 @@ impl Av2Black444TilePlan {
                             true,
                             0,
                             false,
+                            0,
+                            0,
                         );
                     }
                 }
@@ -1708,7 +1711,6 @@ impl Av2Black444TilePlan {
         }
     }
 
-    #[cfg(test)]
     fn write_lossless_new_mv_inter_entropy(
         &self,
         writer: &mut Av2EntropyWriter,
@@ -1766,6 +1768,8 @@ impl Av2Black444TilePlan {
                             true,
                             0,
                             true,
+                            mv_row_px,
+                            mv_col_px,
                         );
                     }
                 }
@@ -1995,6 +1999,8 @@ struct Av2InterModeContext {
     inter: Vec<bool>,
     ref_frame: Vec<u8>,
     newmv: Vec<bool>,
+    mv_row_px: Vec<i16>,
+    mv_col_px: Vec<i16>,
     rows: usize,
     cols: usize,
 }
@@ -2006,6 +2012,8 @@ impl Av2InterModeContext {
             inter: vec![false; visible_rows_mi * visible_cols_mi],
             ref_frame: vec![0; visible_rows_mi * visible_cols_mi],
             newmv: vec![false; visible_rows_mi * visible_cols_mi],
+            mv_row_px: vec![0; visible_rows_mi * visible_cols_mi],
+            mv_col_px: vec![0; visible_rows_mi * visible_cols_mi],
             rows: visible_rows_mi,
             cols: visible_cols_mi,
         }
@@ -2091,6 +2099,8 @@ impl Av2InterModeContext {
         inter: bool,
         ref_frame: u8,
         newmv: bool,
+        mv_row_px: i16,
+        mv_col_px: i16,
     ) {
         for row in row_mi..(row_mi + block_size.mi_height()).min(self.rows) {
             for col in col_mi..(col_mi + block_size.mi_width()).min(self.cols) {
@@ -2099,8 +2109,30 @@ impl Av2InterModeContext {
                 self.inter[index] = inter;
                 self.ref_frame[index] = ref_frame;
                 self.newmv[index] = newmv;
+                self.mv_row_px[index] = mv_row_px;
+                self.mv_col_px[index] = mv_col_px;
             }
         }
+    }
+
+    fn nearest_ref_mv(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+        ref_frame: u8,
+    ) -> (i16, i16) {
+        [
+            self.left_state(row_mi, col_mi),
+            self.above_state(row_mi, col_mi),
+            self.above_right_state(row_mi, col_mi, block_size),
+            self.bottom_left_state(row_mi, col_mi, block_size),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|state| state.inter && state.ref_frame == ref_frame)
+        .map(|state| (state.mv_row_px, state.mv_col_px))
+        .unwrap_or((0, 0))
     }
 
     fn state_at(&self, row_mi: usize, col_mi: usize) -> Option<Av2InterNeighborState> {
@@ -2112,6 +2144,8 @@ impl Av2InterModeContext {
             inter: self.inter[index],
             ref_frame: self.ref_frame[index],
             newmv: self.newmv[index],
+            mv_row_px: self.mv_row_px[index],
+            mv_col_px: self.mv_col_px[index],
         })
     }
 
@@ -2155,6 +2189,8 @@ struct Av2InterNeighborState {
     inter: bool,
     ref_frame: u8,
     newmv: bool,
+    mv_row_px: i16,
+    mv_col_px: i16,
 }
 
 fn write_inter_globalmv_skip(
@@ -2221,7 +2257,6 @@ fn write_inter_intra_flag(
     );
 }
 
-#[cfg(test)]
 const AV2_INTER_MV_FIELD_NAMES: Av2OnePelMvFieldNames = Av2OnePelMvFieldNames {
     shell_set: "tile.inter.mv.shell_set",
     shell_class0: "tile.inter.mv.shell_class0",
@@ -2234,7 +2269,6 @@ const AV2_INTER_MV_FIELD_NAMES: Av2OnePelMvFieldNames = Av2OnePelMvFieldNames {
     col_index: "tile.inter.mv.col_index",
 };
 
-#[cfg(test)]
 fn write_inter_newmv_skip(
     writer: &mut Av2EntropyWriter,
     decision: Av2TileDecision,
@@ -2291,16 +2325,30 @@ fn write_inter_newmv_skip(
         false,
     );
 
+    let mut drl_cdf = DEFAULT_DRL_CDFS[0][mode_ctx];
+    writer.write_symbol_with_key(
+        "tile.inter.drl_idx",
+        mode_ctx,
+        0,
+        &mut drl_cdf,
+        2,
+        false,
+    );
+
+    let (ref_mv_row_px, ref_mv_col_px) =
+        inter_context.nearest_ref_mv(decision.row, decision.col, decision.block_size, 0);
+    let delta_row_px = i32::from(mv_row_px) - i32::from(ref_mv_row_px);
+    let delta_col_px = i32::from(mv_col_px) - i32::from(ref_mv_col_px);
     write_av2_one_pel_mv_magnitude(
         writer,
         AV2_INTER_MV_FIELD_NAMES,
-        usize::from(mv_row_px.unsigned_abs()),
-        usize::from(mv_col_px.unsigned_abs()),
+        delta_row_px.unsigned_abs() as usize,
+        delta_col_px.unsigned_abs() as usize,
     );
-    if mv_row_px != 0 {
-        writer.write_literal_bit("tile.inter.mv.sign", mv_row_px < 0);
+    if delta_row_px != 0 {
+        writer.write_literal_bit("tile.inter.mv.sign", delta_row_px < 0);
     }
-    if mv_col_px != 0 {
-        writer.write_literal_bit("tile.inter.mv.sign", mv_col_px < 0);
+    if delta_col_px != 0 {
+        writer.write_literal_bit("tile.inter.mv.sign", delta_col_px < 0);
     }
 }
