@@ -464,6 +464,7 @@ struct Av2Black444TilePlan {
     allow_intrabc: bool,
     max_ref_bv_count: usize,
     lossless_partition_features: Option<Av2LosslessPartitionFeatures>,
+    inter_partition_modes: Option<Av2LosslessInterTileBlockModes>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,6 +474,7 @@ enum Av2PartitionPolicy {
     LargestLosslessLeaves,
     LosslessLeafLimit { max_size: usize },
     LosslessAdaptive32,
+    LosslessInterModes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -304,15 +304,11 @@ pub(crate) fn av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fiel
     block_modes: &Av2LosslessInterTileBlockModes,
     record_fields: bool,
 ) -> Av2EntropyPayload {
-    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+    let plan = Av2Black444TilePlan::for_region_with_inter_partition_modes(
         region,
         profile,
         chroma_format,
-        Av2PartitionPolicy::Fixed8x8Leaves,
-        false,
-        false,
-        None,
-        None,
+        block_modes,
     );
     let mut writer =
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
@@ -333,15 +329,11 @@ pub(crate) fn av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_wit
     block_modes: &Av2LosslessInterTileBlockModes,
     record_fields: bool,
 ) -> Av2EntropyPayload {
-    let plan = Av2Black444TilePlan::for_region_with_partition_policy(
+    let plan = Av2Black444TilePlan::for_region_with_inter_partition_modes(
         region,
         profile,
         chroma_format,
-        Av2PartitionPolicy::Fixed8x8Leaves,
-        false,
-        false,
-        None,
-        None,
+        block_modes,
     );
     let mut writer =
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
@@ -453,17 +445,37 @@ impl Av2LosslessInterTileBlockModes {
     }
 
     fn mode_for_decision(&self, decision: Av2TileDecision) -> Av2LosslessInterBlockMode {
-        debug_assert_eq!(decision.block_size.width, 8);
-        debug_assert_eq!(decision.block_size.height, 8);
-        debug_assert_eq!(decision.row % 2, 0);
-        debug_assert_eq!(decision.col % 2, 0);
-        let row = decision.row / 2;
-        let col = decision.col / 2;
-        assert!(
-            row < self.blocks_high && col < self.blocks_wide,
-            "AV2 inter tile decision is outside the 8x8 mode map"
-        );
-        self.blocks[row * self.blocks_wide + col]
+        self.homogeneous_mode_for_leaf(decision.row, decision.col, decision.block_size)
+            .expect("AV2 inter partition leaf must cover one homogeneous 8x8 mode region")
+    }
+
+    fn homogeneous_mode_for_leaf(
+        &self,
+        row_mi: usize,
+        col_mi: usize,
+        block_size: Av2MvpBlockSize,
+    ) -> Option<Av2LosslessInterBlockMode> {
+        debug_assert_eq!(row_mi % 2, 0);
+        debug_assert_eq!(col_mi % 2, 0);
+        debug_assert_eq!(block_size.width % MVP_LEAF_BLOCK_SIZE, 0);
+        debug_assert_eq!(block_size.height % MVP_LEAF_BLOCK_SIZE, 0);
+        let row0 = row_mi / 2;
+        let col0 = col_mi / 2;
+        let rows = block_size.height / MVP_LEAF_BLOCK_SIZE;
+        let cols = block_size.width / MVP_LEAF_BLOCK_SIZE;
+        if row0 + rows > self.blocks_high || col0 + cols > self.blocks_wide {
+            return None;
+        }
+
+        let first = self.blocks[row0 * self.blocks_wide + col0];
+        for row in row0..row0 + rows {
+            for col in col0..col0 + cols {
+                if self.blocks[row * self.blocks_wide + col] != first {
+                    return None;
+                }
+            }
+        }
+        Some(first)
     }
 }
 
@@ -698,6 +710,92 @@ fn choose_lossless_adaptive_32_partition(
     }
 }
 
+fn choose_lossless_inter_partition(
+    row_mi: usize,
+    col_mi: usize,
+    block_size: Av2MvpBlockSize,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    block_modes: &Av2LosslessInterTileBlockModes,
+) -> Av2MvpPartition {
+    if !block_size.is_partition_point() {
+        return Av2MvpPartition::None;
+    }
+
+    let allowed = allowed_partitions(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi);
+    if let Some(forced) =
+        forced_boundary_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi)
+    {
+        if allowed.contains(forced) {
+            return forced;
+        }
+    }
+    if let Some(only_allowed) = allowed.only() {
+        return only_allowed;
+    }
+    if allowed.none
+        && block_modes
+            .homogeneous_mode_for_leaf(row_mi, col_mi, block_size)
+            .is_some()
+    {
+        return Av2MvpPartition::None;
+    }
+
+    let mut best = None;
+    for partition in [Av2MvpPartition::Horz, Av2MvpPartition::Vert] {
+        if !allowed.contains(partition) {
+            continue;
+        }
+        let score =
+            lossless_inter_partition_homogeneous_area(row_mi, col_mi, block_size, partition, block_modes);
+        let tie_break = match partition {
+            Av2MvpPartition::Horz => usize::from(block_size.height >= block_size.width),
+            Av2MvpPartition::Vert => usize::from(block_size.width >= block_size.height),
+            Av2MvpPartition::None => 0,
+        };
+        let candidate_key = (score, tie_break);
+        if best.is_none_or(|(best_key, _)| candidate_key > best_key) {
+            best = Some((candidate_key, partition));
+        }
+    }
+
+    best.map(|(_, partition)| partition)
+        .unwrap_or_else(|| choose_8x8_leaf_partition(row_mi, col_mi, block_size, visible_rows_mi, visible_cols_mi))
+}
+
+fn lossless_inter_partition_homogeneous_area(
+    row_mi: usize,
+    col_mi: usize,
+    block_size: Av2MvpBlockSize,
+    partition: Av2MvpPartition,
+    block_modes: &Av2LosslessInterTileBlockModes,
+) -> usize {
+    let Some(subsize) = block_size.subsize(partition) else {
+        return 0;
+    };
+    let mut score = 0usize;
+    let children = match partition {
+        Av2MvpPartition::Horz => [
+            (row_mi, col_mi),
+            (row_mi + block_size.mi_height() / 2, col_mi),
+        ],
+        Av2MvpPartition::Vert => [
+            (row_mi, col_mi),
+            (row_mi, col_mi + block_size.mi_width() / 2),
+        ],
+        Av2MvpPartition::None => return 0,
+    };
+    for (child_row_mi, child_col_mi) in children {
+        if block_modes
+            .homogeneous_mode_for_leaf(child_row_mi, child_col_mi, subsize)
+            .is_some()
+        {
+            score += subsize.width * subsize.height;
+        }
+    }
+    score
+}
+
 fn cached_lossless_subsampled_mode(
     cache: &mut Option<(Av2TileDecision, Av2LosslessSubsampledModeDecision)>,
     lossless: &Av2LosslessSubsampledTileState<'_>,
@@ -759,6 +857,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         ibc,
         None,
         lossless_partition_features,
+        None,
     );
     let mut writer =
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
@@ -798,6 +897,7 @@ impl Av2Black444TilePlan {
             ibc,
             palette,
             None,
+            None,
         )
     }
 
@@ -821,6 +921,27 @@ impl Av2Black444TilePlan {
             ibc,
             palette,
             None,
+            None,
+        )
+    }
+
+    fn for_region_with_inter_partition_modes(
+        region: Av2TileRegion,
+        profile: Av2Black444MvpProfile,
+        chroma_format: Av2ChromaFormat,
+        block_modes: &Av2LosslessInterTileBlockModes,
+    ) -> Self {
+        Self::for_region_with_partition_policy_and_features(
+            region,
+            profile,
+            chroma_format,
+            Av2PartitionPolicy::LosslessInterModes,
+            false,
+            false,
+            None,
+            None,
+            None,
+            Some(block_modes.clone()),
         )
     }
 
@@ -834,6 +955,7 @@ impl Av2Black444TilePlan {
         ibc: Option<&Av2LocalIbc444>,
         palette: Option<&Av2LumaPalette444>,
         lossless_partition_features: Option<Av2LosslessPartitionFeatures>,
+        inter_partition_modes: Option<Av2LosslessInterTileBlockModes>,
     ) -> Self {
         assert!(
             !profile.enable_sdp,
@@ -864,6 +986,7 @@ impl Av2Black444TilePlan {
             allow_intrabc,
             max_ref_bv_count,
             lossless_partition_features,
+            inter_partition_modes,
         };
         let mut partition_context = Av2PartitionContext::new(visible_rows_mi, visible_cols_mi);
         for row_mi in (0..visible_rows_mi).step_by(PARTITION_CONTEXT_DIM) {
@@ -939,6 +1062,16 @@ impl Av2Black444TilePlan {
                     self.lossless_partition_features
                         .as_ref()
                         .expect("adaptive lossless partitioning needs source features"),
+                ),
+                Av2PartitionPolicy::LosslessInterModes => choose_lossless_inter_partition(
+                    row_mi,
+                    col_mi,
+                    block_size,
+                    visible_rows_mi,
+                    visible_cols_mi,
+                    self.inter_partition_modes
+                        .as_ref()
+                        .expect("inter partitioning needs block mode features"),
                 ),
             }
         };

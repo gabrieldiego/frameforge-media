@@ -426,6 +426,32 @@ Raw totals for the fast planar palette decode checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.89 fps.
 
+### Homogeneous Inter Partitions
+
+The homogeneous inter partitions checkpoint lets mixed predictive tiles keep
+larger leaves when all covered 8x8 motion blocks share the same inter mode. The
+partition chooser still splits regions that mix zero-MV, NEWMV, residual, and
+intra leaves, so the feature is available to 4:2:0, 4:2:2, and 4:4:4 through
+one shared block-mode map. This trades a small byte increase for substantially
+less partition and leaf entropy work on the 50-frame baseline.
+
+| Vector | Previous Bytes | New Bytes | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| Scene 420 8-bit | 4,282,079 | 4,306,732 | +0.58% | 10.60 | 13.02 | +22.8% |
+| Scene 422 8-bit | 4,819,333 | 4,847,524 | +0.58% | 9.69 | 11.69 | +20.6% |
+| Scene 444 8-bit | 5,766,372 | 5,788,443 | +0.38% | 8.13 | 9.69 | +19.2% |
+| Mission 420 10-bit | 19,494,498 | 19,739,272 | +1.26% | 3.98 | 5.05 | +26.9% |
+| Mission 422 10-bit | 22,685,657 | 22,954,706 | +1.19% | 3.40 | 4.09 | +20.3% |
+| Mission 444 10-bit | 28,592,971 | 28,905,400 | +1.09% | 2.77 | 3.20 | +15.5% |
+| Total | 85,640,910 | 86,542,077 | +1.05% | 4.89 | 5.88 | +20.2% |
+
+Raw totals for the homogeneous inter partitions checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 86,542,077.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 5.88 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference
