@@ -29,8 +29,8 @@ use tile::{
     av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields,
     av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields,
-    av2_lossy_420_tile_entropy_payload_for_region,
-    av2_lossy_420_tile_entropy_payload_for_region_with_fields,
+    av2_lossy_subsampled_tile_entropy_payload_for_region,
+    av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields,
     av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2LosslessInterBlockMode,
     Av2LosslessInterTileBlockModes, Av2TileRegion,
 };
@@ -71,6 +71,7 @@ const AV2_TILE_WIDTH_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_TILE_AREA_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC: bool = true;
 const AV2_ENABLE_LUMA_PALETTE_INTRABC_444: bool = false;
+const AV2_LOSSY_DEFAULT_QP: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2ChromaFormat {
@@ -533,6 +534,7 @@ pub struct Av2EncodeRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Av2EncodeOptions {
     pub lossless: bool,
+    pub qp: Option<u8>,
     pub predictive: bool,
 }
 
@@ -749,21 +751,23 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
             }
             continue;
         }
-        if stream_format.chroma_format == Av2ChromaFormat::Yuv422 {
+        if stream_format.chroma_format == Av2ChromaFormat::Yuv422 && options.qp.is_none() {
             return Err(format!(
-                "AV2 non-lossless encode is not implemented for {}",
+                "AV2 non-lossless encode is not implemented for {}; pass --qp to use the experimental lossy residual path",
                 request.format
             ));
         }
-        if stream_format.chroma_format == Av2ChromaFormat::Yuv420 {
-            // 4:2:0 is a lossy residual path. Even visually black inputs must
-            // use the closed-loop model because the signaled chroma predictor
-            // can reconstruct edge samples differently from the source.
-            let (bitstream, reconstruction) = av2_lossy_420_bitstream_and_reconstruction_for_frame(
-                geometry,
-                stream_format.bit_depth,
-                &frame,
-            );
+        let use_lossy_residual_path =
+            options.qp.is_some() || stream_format.chroma_format == Av2ChromaFormat::Yuv420;
+        if use_lossy_residual_path {
+            let qp = options.qp.unwrap_or(AV2_LOSSY_DEFAULT_QP);
+            let (bitstream, reconstruction) =
+                av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
+                    geometry,
+                    stream_format,
+                    &frame,
+                    qp,
+                );
             output
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
@@ -840,15 +844,13 @@ fn av2_black_bitstream_for_geometry(
     out
 }
 
-fn av2_lossy_420_bitstream_and_reconstruction_for_frame(
+fn av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
     geometry: Av2VideoGeometry,
-    bit_depth: SampleBitDepth,
+    stream_format: Av2StreamFormat,
     frame: &[u8],
+    qp: u8,
 ) -> (Vec<u8>, Vec<u8>) {
-    let stream_format = Av2StreamFormat {
-        chroma_format: Av2ChromaFormat::Yuv420,
-        bit_depth,
-    };
+    assert!(qp > 0, "AV2 lossy QP must be non-zero");
     let expected_len = Picture::expected_len(
         geometry.width,
         geometry.height,
@@ -857,7 +859,7 @@ fn av2_lossy_420_bitstream_and_reconstruction_for_frame(
     assert_eq!(
         frame.len(),
         expected_len,
-        "AV2 4:2:0 lossy input length must match geometry"
+        "AV2 planar lossy input length must match geometry"
     );
     let mut reconstruction = vec![0; expected_len];
     let mut out = Vec::new();
@@ -874,7 +876,13 @@ fn av2_lossy_420_bitstream_and_reconstruction_for_frame(
     append_obu(
         &mut out,
         Av2ObuType::ClosedLoopKey,
-        &av2_lossy_420_closed_loop_key_payload(geometry, bit_depth, frame, &mut reconstruction),
+        &av2_lossy_subsampled_closed_loop_key_payload(
+            geometry,
+            stream_format,
+            frame,
+            &mut reconstruction,
+            qp,
+        ),
     );
     (out, reconstruction)
 }
@@ -1540,7 +1548,12 @@ pub fn av2_mvp_444_trace_jsonl_for_frame(
     if stream_format.chroma_format == Av2ChromaFormat::Yuv420 {
         let black = av2_black_reconstruction_for_geometry(geometry, stream_format);
         if frame != black {
-            return av2_lossy_420_trace_jsonl_for_frame(geometry, stream_format.bit_depth, frame);
+            return av2_lossy_subsampled_trace_jsonl_for_frame(
+                geometry,
+                stream_format,
+                frame,
+                AV2_LOSSY_DEFAULT_QP,
+            );
         }
         return av2_black_trace_jsonl_for_format(geometry, stream_format);
     }
@@ -1760,15 +1773,12 @@ fn av2_black_trace_jsonl_for_format(
     Ok(lines)
 }
 
-fn av2_lossy_420_trace_jsonl_for_frame(
+fn av2_lossy_subsampled_trace_jsonl_for_frame(
     geometry: Av2VideoGeometry,
-    bit_depth: SampleBitDepth,
+    stream_format: Av2StreamFormat,
     frame: &[u8],
+    qp: u8,
 ) -> Result<String, String> {
-    let stream_format = Av2StreamFormat {
-        chroma_format: Av2ChromaFormat::Yuv420,
-        bit_depth,
-    };
     let expected_len = Picture::expected_len(
         geometry.width,
         geometry.height,
@@ -1790,13 +1800,15 @@ fn av2_lossy_420_trace_jsonl_for_frame(
         .regions
         .iter()
         .map(|&region| {
-            av2_lossy_420_tile_entropy_payload_for_region(
+            av2_lossy_subsampled_tile_entropy_payload_for_region(
                 region,
                 profile,
                 geometry,
-                bit_depth,
+                stream_format.chroma_format,
+                stream_format.bit_depth,
                 frame,
                 &mut reconstruction,
+                qp,
             )
         })
         .collect();
@@ -1917,7 +1929,7 @@ fn validate_mvp_444_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometr
 fn validate_mvp_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometry, String> {
     if Av2StreamFormat::from_pixel_format(request.format).is_none() {
         return Err(
-            "AV2 MVP encoder only supports yuv420p8/10 and yuv444p8/10 streams at 8-pixel geometry"
+            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, and yuv444p8/10 streams at 8-pixel geometry"
                 .to_string(),
         );
     }
@@ -2443,11 +2455,12 @@ fn av2_black_closed_loop_key_payload(
     payload
 }
 
-fn av2_lossy_420_closed_loop_key_payload(
+fn av2_lossy_subsampled_closed_loop_key_payload(
     geometry: Av2VideoGeometry,
-    bit_depth: SampleBitDepth,
+    stream_format: Av2StreamFormat,
     frame: &[u8],
     reconstruction: &mut [u8],
+    qp: u8,
 ) -> Av2SyntaxPayload {
     let tile_layout = Av2TileLayout::for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
@@ -2456,13 +2469,15 @@ fn av2_lossy_420_closed_loop_key_payload(
         .regions
         .iter()
         .map(|&region| {
-            av2_lossy_420_tile_entropy_payload_for_region_with_fields(
+            av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields(
                 region,
                 profile,
                 geometry,
-                bit_depth,
+                stream_format.chroma_format,
+                stream_format.bit_depth,
                 frame,
                 reconstruction,
+                qp,
                 false,
             )
         })
@@ -3146,6 +3161,7 @@ mod tests {
             request,
             Av2EncodeOptions {
                 lossless: true,
+                qp: None,
                 predictive: true,
             },
             Some(&mut metrics),
@@ -3197,6 +3213,7 @@ mod tests {
             },
             Av2EncodeOptions {
                 lossless: true,
+                qp: None,
                 predictive: true,
             },
             Some(&mut metrics),
@@ -3271,6 +3288,7 @@ mod tests {
             },
             Av2EncodeOptions {
                 lossless: true,
+                qp: None,
                 predictive: true,
             },
             Some(&mut metrics),
@@ -3339,6 +3357,7 @@ mod tests {
             },
             Av2EncodeOptions {
                 lossless: true,
+                qp: None,
                 predictive: true,
             },
             Some(&mut metrics),
@@ -3590,7 +3609,7 @@ mod tests {
     }
 
     #[test]
-    fn av2_fixed_black_420_uses_lossy_residual_reconstruction() {
+    fn av2_fixed_black_420_can_use_exact_residual_reconstruction() {
         let geometry = Av2VideoGeometry {
             width: 16,
             height: 16,
@@ -3614,7 +3633,7 @@ mod tests {
             output,
             av2_black_bitstream_for_geometry(geometry, Av2StreamFormat::yuv420_8())
         );
-        assert_ne!(recon, input);
+        assert_eq!(recon, input);
         assert_eq!(recon.len(), input.len());
         let sequence = av2_mvp_sequence_header_payload(
             geometry,
@@ -3665,6 +3684,84 @@ mod tests {
             trace.contains("tile.coeff.y.txb_nonzero_tx4x4_ctx"),
             "non-black 4:2:0 inputs should emit residual coefficient syntax"
         );
+    }
+
+    #[test]
+    fn av2_qp_path_can_keep_yuv420_blocks_lossless() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format,
+        };
+        let mut input = vec![128; Picture::expected_len(geometry.width, geometry.height, format)];
+        let y_len = geometry.width * geometry.height;
+        for sample in &mut input[y_len..] {
+            *sample = 129;
+        }
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: false,
+                qp: Some(8),
+                predictive: false,
+            },
+            None,
+        )
+        .expect("AV2 QP residual path should encode predictor-matched blocks");
+
+        assert!(!output.is_empty());
+        assert_eq!(recon, input);
+    }
+
+    #[test]
+    fn av2_qp_path_accepts_yuv422() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let format = PixelFormat::yuv422(8).expect("valid 8-bit 4:2:2 format");
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format,
+        };
+        let mut input = vec![128; Picture::expected_len(geometry.width, geometry.height, format)];
+        let y_len = geometry.width * geometry.height;
+        for sample in &mut input[y_len..] {
+            *sample = 129;
+        }
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: false,
+                qp: Some(8),
+                predictive: false,
+            },
+            None,
+        )
+        .expect("AV2 QP residual path should encode yuv422");
+
+        assert!(!output.is_empty());
+        assert_eq!(recon, input);
     }
 
     #[test]

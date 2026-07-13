@@ -70,6 +70,11 @@ make validate-set CODEC=av2 \
   VALIDATION_REFERENCE_MODE=required
 ```
 
+Explicit lossy AV2 smoke checks can invoke `./ff encode ... --qp N` directly.
+`--qp` is mutually exclusive with `--set lossless`; lossy checks should compare
+bitstream size, reconstruction PSNR, and reference-decoder agreement with the
+encoder reconstruction rather than source-byte equality.
+
 `scripts/generate_predictive_sweep.py` creates that local ignored manifest and
 384 local Y4M crops: six AOM CTC B2 screen-content variants, 64 geometries from
 8x8 through 64x64, and three frames per crop. Each crop currently repeats one

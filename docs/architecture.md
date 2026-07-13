@@ -84,7 +84,15 @@ validate 8-bit and 10-bit streams.
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.
 Bare keys imply `true`, for example `--set lossless`. Shared settings such as
-`lossless` are global and apply to any codec. Codec-specific setting catalogs
-carry codec-local controls such as AV2's experimental `--set predictive`
-lossless mode. Unknown options should still fail early instead of silently
-becoming unused metadata.
+`lossless` are global and apply to any codec. `--qp <1..255>` is the top-level
+lossy alternative to `--set lossless`; it currently drives AV2's experimental
+planar residual quantizer and is rejected for codecs that do not consume it.
+Codec-specific setting catalogs carry codec-local controls such as AV2's
+experimental `--set predictive` lossless mode. Unknown options should still
+fail early instead of silently becoming unused metadata.
+
+AV2's QP path keeps frame-level quantization syntax at the lossless qindex and
+uses a software residual quantizer inside the encoder. Each transform block is
+modeled independently with a rate/distortion estimate, so a lossy encode may
+still emit exact residual coefficients for blocks where exact reconstruction is
+cheaper than quantized DC residual coding.

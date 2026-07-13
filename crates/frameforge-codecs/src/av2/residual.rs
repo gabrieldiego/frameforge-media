@@ -1,5 +1,3 @@
-const AV2_LOSSY_420_DC_QUANT_STEP: i32 = 8;
-
 fn round_div_i32(value: i32, divisor: i32) -> i32 {
     debug_assert!(divisor > 0);
     if value >= 0 {
@@ -14,13 +12,13 @@ fn quantize_i32_to_step(value: i32, step: i32) -> i32 {
     round_div_i32(value, step) * step
 }
 
-fn write_lossy_420_residual_coefficients(
+fn write_lossy_subsampled_residual_coefficients(
     writer: &mut Av2EntropyWriter,
     decision: Av2TileDecision,
     visible_rows_mi: usize,
     visible_cols_mi: usize,
     contexts: &mut Av2TxbEntropyContexts,
-    lossy: &mut Av2Lossy420TileState<'_>,
+    lossy: &mut Av2LossySubsampledTileState<'_>,
 ) {
     let txb_width = decision
         .block_size
@@ -37,10 +35,8 @@ fn write_lossy_420_residual_coefficients(
             let skip_ctx =
                 luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
-            let (x0, y0) = lossy.txb_origin(Av2Lossy420Plane::Y, abs_col, abs_row);
-            let delta = lossy.quantized_dc_delta(Av2Lossy420Plane::Y, x0, y0);
-            let context = write_y_dc_delta_txb(writer, skip_ctx, dc_sign_ctx, delta);
-            lossy.fill_recon_txb(Av2Lossy420Plane::Y, x0, y0, delta);
+            let (x0, y0) = lossy.txb_origin(Av2LossyPlane::Y, abs_col, abs_row);
+            let context = write_lossy_luma_txb(writer, skip_ctx, dc_sign_ctx, lossy, x0, y0);
             contexts.y_above[abs_col] = context;
             contexts.y_left[abs_row] = context;
         }
@@ -50,7 +46,7 @@ fn write_lossy_420_residual_coefficients(
         decision,
         visible_rows_mi,
         visible_cols_mi,
-        Av2ChromaFormat::Yuv420,
+        lossy.chroma_format,
     );
     let mut last_u_txb_nonzero = false;
     for row in 0..chroma_span.height {
@@ -60,11 +56,15 @@ fn write_lossy_420_residual_coefficients(
             let skip_ctx =
                 chroma_txb_skip_base_context(contexts.u_above[abs_col], contexts.u_left[abs_row])
                     + 6;
-            let (x0, y0) = lossy.txb_origin(Av2Lossy420Plane::U, abs_col, abs_row);
-            let delta = lossy.quantized_dc_delta(Av2Lossy420Plane::U, x0, y0);
-            let (context, nonzero) =
-                write_chroma_dc_delta_txb(writer, Av2ChromaPlane::U, skip_ctx, delta);
-            lossy.fill_recon_txb(Av2Lossy420Plane::U, x0, y0, delta);
+            let (x0, y0) = lossy.txb_origin(Av2LossyPlane::U, abs_col, abs_row);
+            let (context, nonzero) = write_lossy_chroma_txb(
+                writer,
+                Av2ChromaPlane::U,
+                skip_ctx,
+                lossy,
+                x0,
+                y0,
+            );
             contexts.u_above[abs_col] = context;
             contexts.u_left[abs_row] = context;
             last_u_txb_nonzero = nonzero;
@@ -79,18 +79,113 @@ fn write_lossy_420_residual_coefficients(
                 contexts.v_above[abs_col],
                 contexts.v_left[abs_row],
                 last_u_txb_nonzero,
-                Av2ChromaFormat::Yuv420,
+                lossy.chroma_format,
                 decision.block_size,
             );
-            let (x0, y0) = lossy.txb_origin(Av2Lossy420Plane::V, abs_col, abs_row);
-            let delta = lossy.quantized_dc_delta(Av2Lossy420Plane::V, x0, y0);
-            let (context, _) =
-                write_chroma_dc_delta_txb(writer, Av2ChromaPlane::V, skip_ctx, delta);
-            lossy.fill_recon_txb(Av2Lossy420Plane::V, x0, y0, delta);
+            let (x0, y0) = lossy.txb_origin(Av2LossyPlane::V, abs_col, abs_row);
+            let (context, _) = write_lossy_chroma_txb(
+                writer,
+                Av2ChromaPlane::V,
+                skip_ctx,
+                lossy,
+                x0,
+                y0,
+            );
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
         }
     }
+}
+
+fn write_lossy_luma_txb(
+    writer: &mut Av2EntropyWriter,
+    skip_ctx: u8,
+    dc_sign_ctx: u8,
+    lossy: &mut Av2LossySubsampledTileState<'_>,
+    x0: usize,
+    y0: usize,
+) -> u8 {
+    let plane = Av2LossyPlane::Y;
+    let delta = lossy.quantized_dc_delta(plane, x0, y0);
+    let residual = lossy.exact_residual4x4(plane, x0, y0);
+    let coefficients = tx4x4_coefficients_from_residual(&residual, false);
+    let distortion = lossy.quantized_recon_sse(plane, x0, y0, delta);
+    if use_exact_lossy_txb(
+        delta,
+        &coefficients,
+        distortion,
+        Av2CoefficientProxyKind::LumaTransform,
+        lossy.quant_step(),
+    ) {
+        let (context, _) = if tx4x4_residual_is_zero(&residual) {
+            write_y_txb_all_zero(writer, skip_ctx);
+            (0, false)
+        } else {
+            write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+        };
+        lossy.copy_source_to_recon_txb(plane, x0, y0);
+        context
+    } else {
+        let context = write_y_dc_delta_txb(writer, skip_ctx, dc_sign_ctx, delta);
+        lossy.fill_quantized_recon_txb(plane, x0, y0, delta);
+        context
+    }
+}
+
+fn write_lossy_chroma_txb(
+    writer: &mut Av2EntropyWriter,
+    chroma_plane: Av2ChromaPlane,
+    skip_ctx: u8,
+    lossy: &mut Av2LossySubsampledTileState<'_>,
+    x0: usize,
+    y0: usize,
+) -> (u8, bool) {
+    let plane = match chroma_plane {
+        Av2ChromaPlane::U => Av2LossyPlane::U,
+        Av2ChromaPlane::V => Av2LossyPlane::V,
+    };
+    let delta = lossy.quantized_dc_delta(plane, x0, y0);
+    let residual = lossy.exact_residual4x4(plane, x0, y0);
+    let coefficients = tx4x4_coefficients_from_residual(&residual, false);
+    let distortion = lossy.quantized_recon_sse(plane, x0, y0, delta);
+    if use_exact_lossy_txb(
+        delta,
+        &coefficients,
+        distortion,
+        Av2CoefficientProxyKind::ChromaTransform,
+        lossy.quant_step(),
+    ) {
+        let result = if tx4x4_residual_is_zero(&residual) {
+            match chroma_plane {
+                Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, false),
+                Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
+            }
+            (0, false)
+        } else {
+            write_chroma_bdpcm_txb(writer, chroma_plane, skip_ctx, &coefficients, false)
+        };
+        lossy.copy_source_to_recon_txb(plane, x0, y0);
+        result
+    } else {
+        let result = write_chroma_dc_delta_txb(writer, chroma_plane, skip_ctx, delta);
+        lossy.fill_quantized_recon_txb(plane, x0, y0, delta);
+        result
+    }
+}
+
+fn use_exact_lossy_txb(
+    quantized_delta: i16,
+    exact_coefficients: &[i32; TX4X4_SAMPLES],
+    quantized_sse: usize,
+    kind: Av2CoefficientProxyKind,
+    quant_step: i32,
+) -> bool {
+    let mut quantized_coefficients = [0i32; TX4X4_SAMPLES];
+    quantized_coefficients[0] = i32::from(quantized_delta) * 32;
+    let quantized_score = coefficient_proxy_score(&quantized_coefficients, kind);
+    let exact_score = coefficient_proxy_score(exact_coefficients, kind);
+    let distortion_score = quantized_sse / (quant_step.max(1) as usize);
+    exact_score <= quantized_score + distortion_score
 }
 
 fn write_lossless_subsampled_residual_coefficients(

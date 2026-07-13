@@ -26,6 +26,7 @@ pub struct EncodeArgs {
     pub filters: Vec<String>,
     pub settings: Vec<String>,
     pub preset: Option<String>,
+    pub qp: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,10 @@ pub const OUTPUT_OPTIONS: &[HelpRow] = &[
     HelpRow {
         syntax: "--set <key[=value]>",
         summary: "Encode setting; bare keys such as lossless imply true",
+    },
+    HelpRow {
+        syntax: "--qp <1..255>",
+        summary: "Request lossy quantization; mutually exclusive with --set lossless",
     },
     HelpRow {
         syntax: "--preset <name>",
@@ -227,6 +232,7 @@ fn parse_encode(mut cursor: Cursor) -> Result<Command, String> {
             "--set" => args
                 .settings
                 .push(parse_setting(&cursor.value(arg.as_str())?)),
+            "--qp" => args.qp = Some(parse_qp(arg.as_str(), &cursor.value(arg.as_str())?)?),
             "--preset" => args.preset = Some(cursor.value(arg.as_str())?),
             other if other.starts_with('-') => {
                 return Err(format!("unknown encode option '{other}'"))
@@ -258,6 +264,19 @@ fn parse_u32(option: &str, value: &str) -> Result<u32, String> {
         Err(format!("{option} expects a positive integer, got 0"))
     } else {
         Ok(parsed)
+    }
+}
+
+fn parse_qp(option: &str, value: &str) -> Result<u8, String> {
+    let parsed = value
+        .parse::<u16>()
+        .map_err(|_| format!("{option} expects an integer from 1 through 255, got '{value}'"))?;
+    if parsed == 0 || parsed > u16::from(u8::MAX) {
+        Err(format!(
+            "{option} expects an integer from 1 through 255, got '{value}'"
+        ))
+    } else {
+        Ok(parsed as u8)
     }
 }
 
@@ -656,6 +675,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_encode_qp_option() {
+        let command = parse_words(&[
+            "ff",
+            "encode",
+            "in.yuv",
+            "--video",
+            "64x64:yuv420p",
+            "--encode",
+            "av2:out.obu",
+            "--qp",
+            "24",
+        ])
+        .unwrap();
+
+        let Command::Encode(args) = command else {
+            panic!("expected encode command");
+        };
+        assert_eq!(args.qp, Some(24));
+    }
+
+    #[test]
+    fn rejects_invalid_encode_qp_option() {
+        for value in ["0", "256", "abc"] {
+            let err = parse_words(&[
+                "ff",
+                "encode",
+                "in.yuv",
+                "--video",
+                "64x64:yuv420p",
+                "--encode",
+                "av2:out.obu",
+                "--qp",
+                value,
+            ])
+            .unwrap_err();
+            assert!(
+                err.contains("--qp expects an integer from 1 through 255"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
     fn infers_dimensions_fps_and_format_from_input_filename() {
         let command = parse_words(&[
             "ff",
@@ -969,6 +1031,7 @@ mod tests {
             "-f, --filter <spec>",
             "pattern=black",
             "--set <key[=value]>",
+            "--qp <1..255>",
             "--preset <name>",
         ] {
             assert!(text.contains(expected), "missing help entry: {expected}");

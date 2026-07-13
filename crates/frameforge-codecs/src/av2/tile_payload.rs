@@ -201,32 +201,44 @@ fn av2_luma_palette_444_tile_entropy_payload_for_region_with_policy(
     writer.finish()
 }
 
-pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region(
+pub(crate) fn av2_lossy_subsampled_tile_entropy_payload_for_region(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     source: &[u8],
     recon: &mut [u8],
+    qp: u8,
 ) -> Av2EntropyPayload {
-    av2_lossy_420_tile_entropy_payload_for_region_with_fields(
-        region, profile, geometry, bit_depth, source, recon, true,
+    av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields(
+        region,
+        profile,
+        geometry,
+        chroma_format,
+        bit_depth,
+        source,
+        recon,
+        qp,
+        true,
     )
 }
 
-pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region_with_fields(
+pub(crate) fn av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     source: &[u8],
     recon: &mut [u8],
+    qp: u8,
     record_fields: bool,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region(
         region,
         profile,
-        Av2ChromaFormat::Yuv420,
+        chroma_format,
         false,
         false,
         None,
@@ -234,8 +246,16 @@ pub(crate) fn av2_lossy_420_tile_entropy_payload_for_region_with_fields(
     );
     let mut writer =
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
-    let mut lossy = Av2Lossy420TileState::new(geometry, region, bit_depth, source, recon);
-    plan.write_lossy_420_entropy(&mut writer, &mut lossy);
+    let mut lossy = Av2LossySubsampledTileState::new(
+        geometry,
+        region,
+        chroma_format,
+        bit_depth,
+        source,
+        recon,
+        qp,
+    );
+    plan.write_lossy_subsampled_entropy(&mut writer, &mut lossy);
     writer.finish()
 }
 
@@ -1637,10 +1657,10 @@ impl Av2Black444TilePlan {
         self.max_ref_bv_count
     }
 
-    fn write_lossy_420_entropy(
+    fn write_lossy_subsampled_entropy(
         &self,
         writer: &mut Av2EntropyWriter,
-        lossy: &mut Av2Lossy420TileState<'_>,
+        lossy: &mut Av2LossySubsampledTileState<'_>,
     ) {
         let mut partition_context =
             Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
@@ -1699,7 +1719,7 @@ impl Av2Black444TilePlan {
                     );
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
-                    write_lossy_420_residual_coefficients(
+                    write_lossy_subsampled_residual_coefficients(
                         writer,
                         *decision,
                         self.visible_rows_mi,
@@ -1720,7 +1740,7 @@ impl Av2Black444TilePlan {
                 | Av2TileDecisionKind::LumaPaletteModeInfo
                 | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {
-                    unreachable!("AV2 4:2:0 residual path disables palette and IntraBC")
+                    unreachable!("AV2 lossy residual path disables palette and IntraBC")
                 }
             }
         }

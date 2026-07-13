@@ -841,14 +841,19 @@ struct EncodeJob {
     source_format: PixelFormat,
     format: PixelFormat,
     lossless: bool,
+    qp: Option<u8>,
     av2_predictive: bool,
 }
 
 fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
-    let settings = if args.settings.is_empty() {
+    let mut settings = args.settings.clone();
+    if let Some(qp) = job.qp {
+        settings.push(format!("qp={qp}"));
+    }
+    let settings = if settings.is_empty() {
         "none".to_string()
     } else {
-        args.settings.join(",")
+        settings.join(",")
     };
     eprintln!(
         "input: {} video={}x{}:{} frames={} fps={}",
@@ -904,6 +909,12 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     let frames = resolve_frame_count(args, &input, source_format, width, height)?;
     let codec = args.codec.as_deref().expect("parser requires codec");
     let lossless = boolean_setting_enabled(&args.settings, "lossless")?;
+    if lossless && args.qp.is_some() {
+        return Err("--qp is mutually exclusive with --set lossless".to_string());
+    }
+    if args.qp.is_some() && codec != "av2" {
+        return Err("--qp is currently implemented for AV2 encode only".to_string());
+    }
     let av2_predictive = boolean_setting_enabled(&args.settings, "predictive")?;
     let format = if lossless {
         source_format
@@ -927,6 +938,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         source_format,
         format,
         lossless,
+        qp: args.qp,
         av2_predictive,
     })
 }
@@ -1012,7 +1024,7 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
         "av2" => {
             matches!(
                 format.chroma_sampling(),
-                Some(ChromaSampling::Cs420 | ChromaSampling::Cs444)
+                Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
             ) && matches!(format.bit_depth().bits(), 8 | 10)
         }
         "vvc" => match format.chroma_sampling() {
@@ -1208,6 +1220,7 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
     };
     let options = frameforge_codecs::av2::Av2EncodeOptions {
         lossless: job.lossless,
+        qp: job.qp,
         predictive: job.av2_predictive,
     };
     let mut input = open_job_reader(&job)?;
@@ -1755,6 +1768,37 @@ mod tests {
     }
 
     #[test]
+    fn encode_job_rejects_qp_with_lossless() {
+        let path = temp_yuv_path("one_frame_8x8_qp_lossless_conflict");
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&vec![0; 8 * 8 * 3 / 2])
+            .expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            qp: Some(16),
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("QP and lossless should conflict");
+        assert!(
+            err.contains("--qp is mutually exclusive with --set lossless"),
+            "{err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn encode_job_preserves_high_bit_depth_yuv444_for_vvc_path() {
         for bits in [10, 12] {
             let format_name = format!("yuv444p{bits}le");
@@ -1939,6 +1983,7 @@ mod tests {
             source_format: PixelFormat::Yuv420p8,
             format: PixelFormat::Yuv420p8,
             lossless: false,
+            qp: None,
             av2_predictive: false,
         };
         let mut reader = open_job_reader(&job).expect("open reader");

@@ -133,6 +133,7 @@ ff filters
 ff encode input.yuv --video 640x360:yuv444p \
   --encode av2:output.obu --set lossless
 ff encode input.y4m --encode av2:output.obu --set lossless
+ff encode input.y4m --encode av2:output.obu --qp 24
 ff encode --filter pattern=checker --video 64x64:yuv444p \
   --encode av2:pattern.obu
 ff encode input_640x360_30_1f_yuv444p8.yuv \
@@ -157,13 +158,15 @@ raw input file or Y4M stream reaches EOF. If `--frames` is larger than the
 number of complete frames in the file, `ff encode` stops at EOF instead of
 failing. Source filters require explicit `--frames` because they do not have a
 file EOF. Filter options come next. Output/encoder options, such as
-`--recon output.yuv`, `--set lossless`, `--preset`, and repeated
-`--set key[=value]`, belong after `--encode codec:output`. Bare `--set` keys
-imply `true`. Global accepted settings are listed by `ff codecs`;
-codec-specific settings are listed with the codec that owns them. The current
-AV2-specific `--set predictive` mode is experimental and lossless-only. It
-starts a multi-picture AV2 stream and uses show-existing-frame for exact
-repeated frames; non-identical frames still fall back to the existing lossless
+`--recon output.yuv`, `--set lossless`, `--qp <1..255>`, `--preset`, and
+repeated `--set key[=value]`, belong after `--encode codec:output`. Bare
+`--set` keys imply `true`. `--qp` requests lossy AV2 quantization and is
+mutually exclusive with `--set lossless`; lower values preserve more detail.
+Global accepted settings are listed by `ff codecs`; codec-specific settings
+are listed with the codec that owns them. The current AV2-specific
+`--set predictive` mode is experimental and lossless-only. It starts a
+multi-picture AV2 stream and uses show-existing-frame for exact repeated
+frames; non-identical frames still fall back to the existing lossless
 key-frame path.
 
 The positional input is optional when the first filter is a source. The initial

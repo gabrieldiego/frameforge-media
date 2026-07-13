@@ -113,12 +113,13 @@ shared bit-depth converter before calling the codec.
 
 Current behavior:
 
-- AV2 accepts `yuv420p8`/`yuv420p10le` and `yuv444p8`/`yuv444p10le`
-  natively for the current non-lossless paths. Higher 4:2:0 and 4:4:4 depths
-  are scaled to the matching 8-bit format before encoding until a
+- AV2 accepts `yuv420p8`/`yuv420p10le`, `yuv422p8`/`yuv422p10le`, and
+  `yuv444p8`/`yuv444p10le` natively. `--set lossless` uses the stream-exact
+  paths. `--qp <1..255>` uses the experimental lossy planar residual path for
+  4:2:0, 4:2:2, and 4:4:4, with per-transform-block decisions that can still
+  emit exact residuals when that is cheaper. Higher AV2 depths are scaled to
+  the matching 8-bit format before non-lossless encoding until a
   reference-valid 12-bit profile path is added.
-- AV2 accepts `yuv422p8`/`yuv422p10le` natively for stream-exact lossless
-  4:2:2 encoding. Non-lossless AV2 4:2:2 is still unsupported.
 - VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
   residual path. Higher 4:2:0 depths are scaled to `yuv420p8` before encoding.
 - VVC accepts `yuv444p8` through `yuv444p12le` natively for the current 4:4:4
