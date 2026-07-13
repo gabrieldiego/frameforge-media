@@ -1159,102 +1159,52 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
         stream_format.bit_depth,
     )
     .ok();
-    let mut reconstruction = frame.to_vec();
-    let mut tile_payloads = Vec::with_capacity(tile_layout.tile_count());
-    for (&region, tile_mode) in tile_layout.regions.iter().zip(tile_modes.iter()) {
-        let payload = match tile_mode {
-            Av2PredictiveTileMode::ZeroMv => {
-                av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
-                    region,
-                    profile,
-                    stream_format.chroma_format,
-                    false,
-                )
-            }
-            Av2PredictiveTileMode::NewMv(mv) => {
-                av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields(
-                    region,
-                    profile,
-                    stream_format.chroma_format,
-                    mv.row_px,
-                    mv.col_px,
-                    false,
-                )
-            }
-            Av2PredictiveTileMode::Mixed(blocks) => {
-                av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields(
-                    region,
-                    profile,
-                    stream_format.chroma_format,
-                    blocks,
-                    false,
-                )
-            }
-            Av2PredictiveTileMode::MixedInterIntraOrResidual {
-                intra_blocks,
-                residual_blocks,
-            } => {
-                let mut scratch_reconstruction = Vec::new();
-                let residual_payload =
-                    av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
-                        region,
-                        profile,
-                        geometry,
-                        stream_format.chroma_format,
-                        stream_format.bit_depth,
-                        frame,
-                        reference,
-                        &mut scratch_reconstruction,
-                        palette.as_ref(),
-                        residual_blocks,
-                        false,
-                    );
-                if av2_lossless_residual_payload_is_decisive(
-                    &residual_payload,
-                    region,
-                    stream_format.chroma_format,
-                    stream_format.bit_depth,
-                ) {
-                    residual_payload
-                } else {
-                    scratch_reconstruction.clear();
-                    let intra_payload =
-                        av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+    let palette_ref = palette.as_ref();
+    let tile_payloads: Vec<_> = if tile_layout.tile_count() > 1 {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = tile_layout
+                .regions
+                .iter()
+                .zip(tile_modes.iter())
+                .map(|(&region, tile_mode)| {
+                    scope.spawn(move || {
+                        av2_lossless_predictive_tile_payload_for_mode(
                             region,
+                            tile_mode,
                             profile,
                             geometry,
-                            stream_format.chroma_format,
-                            stream_format.bit_depth,
+                            stream_format,
                             frame,
                             reference,
-                            &mut scratch_reconstruction,
-                            palette.as_ref(),
-                            intra_blocks,
-                            false,
-                        );
-                    if av2_entropy_payload_rate_key(&residual_payload)
-                        < av2_entropy_payload_rate_key(&intra_payload)
-                    {
-                        residual_payload
-                    } else {
-                        intra_payload
-                    }
-                }
-            }
-            Av2PredictiveTileMode::Intra => av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
+                            palette_ref,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("AV2 predictive tile worker panicked"))
+                .collect()
+        })
+    } else {
+        tile_layout
+            .regions
+            .iter()
+            .zip(tile_modes.iter())
+            .map(|(&region, tile_mode)| {
+                av2_lossless_predictive_tile_payload_for_mode(
                     region,
+                    tile_mode,
                     profile,
                     geometry,
-                    stream_format.chroma_format,
-                    stream_format.bit_depth,
+                    stream_format,
                     frame,
-                    &mut reconstruction,
-                    palette.as_ref(),
-                    false,
-                ),
-        };
-        tile_payloads.push(payload);
-    }
+                    reference,
+                    palette_ref,
+                )
+            })
+            .collect()
+    };
 
     let mut payload = av2_mvp_regular_inter_header_payload(&tile_layout, order_hint);
     let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
@@ -1274,7 +1224,7 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
         &Av2SyntaxPayload::default(),
     );
     append_obu(&mut out, Av2ObuType::RegularTileGroup, &payload);
-    Some((out, reconstruction))
+    Some((out, frame.to_vec()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1287,6 +1237,112 @@ enum Av2PredictiveTileMode {
         residual_blocks: Av2LosslessInterTileBlockModes,
     },
     Intra,
+}
+
+fn av2_lossless_predictive_tile_payload_for_mode(
+    region: Av2TileRegion,
+    tile_mode: &Av2PredictiveTileMode,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    reference: &[u8],
+    palette: Option<&Av2LumaPalette444>,
+) -> entropy::Av2EntropyPayload {
+    match tile_mode {
+        Av2PredictiveTileMode::ZeroMv => {
+            av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                stream_format.chroma_format,
+                false,
+            )
+        }
+        Av2PredictiveTileMode::NewMv(mv) => {
+            av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                stream_format.chroma_format,
+                mv.row_px,
+                mv.col_px,
+                false,
+            )
+        }
+        Av2PredictiveTileMode::Mixed(blocks) => {
+            av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                stream_format.chroma_format,
+                blocks,
+                false,
+            )
+        }
+        Av2PredictiveTileMode::MixedInterIntraOrResidual {
+            intra_blocks,
+            residual_blocks,
+        } => {
+            let mut scratch_reconstruction = Vec::new();
+            let residual_payload =
+                av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    geometry,
+                    stream_format.chroma_format,
+                    stream_format.bit_depth,
+                    frame,
+                    reference,
+                    &mut scratch_reconstruction,
+                    palette,
+                    residual_blocks,
+                    false,
+                );
+            if av2_lossless_residual_payload_is_decisive(
+                &residual_payload,
+                region,
+                stream_format.chroma_format,
+                stream_format.bit_depth,
+            ) {
+                return residual_payload;
+            }
+
+            scratch_reconstruction.clear();
+            let intra_payload =
+                av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                    region,
+                    profile,
+                    geometry,
+                    stream_format.chroma_format,
+                    stream_format.bit_depth,
+                    frame,
+                    reference,
+                    &mut scratch_reconstruction,
+                    palette,
+                    intra_blocks,
+                    false,
+                );
+            if av2_entropy_payload_rate_key(&residual_payload)
+                < av2_entropy_payload_rate_key(&intra_payload)
+            {
+                residual_payload
+            } else {
+                intra_payload
+            }
+        }
+        Av2PredictiveTileMode::Intra => {
+            let mut scratch_reconstruction = Vec::new();
+            av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
+                region,
+                profile,
+                geometry,
+                stream_format.chroma_format,
+                stream_format.bit_depth,
+                frame,
+                &mut scratch_reconstruction,
+                palette,
+                false,
+            )
+        }
+    }
 }
 
 fn av2_entropy_payload_rate_key(payload: &entropy::Av2EntropyPayload) -> (usize, usize) {

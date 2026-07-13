@@ -499,6 +499,32 @@ Raw totals for the dense reference hash cache checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 5.97 fps.
 
+### Parallel Predictive Tile Payloads
+
+The parallel predictive tile payload checkpoint factors regular-inter tile mode
+encoding into a helper and runs independent tile entropy payloads under scoped
+worker threads when the lossless fast layout already has multiple tiles. Payload
+collection remains in tile-layout order, and each worker uses local
+source-backed reconstruction scratch. Bitstreams stayed byte-identical on the
+50-frame baseline.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 14.20 | 16.51 | +16.3% |
+| Scene 422 8-bit | 0 | 12.17 | 14.60 | +20.0% |
+| Scene 444 8-bit | 0 | 9.67 | 11.37 | +17.6% |
+| Mission 420 10-bit | 0 | 5.03 | 8.63 | +71.6% |
+| Mission 422 10-bit | 0 | 4.12 | 7.50 | +82.0% |
+| Mission 444 10-bit | 0 | 3.25 | 6.12 | +88.3% |
+| Total | 0 | 5.97 | 9.53 | +59.6% |
+
+Raw totals for the parallel predictive tile payload checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 86,542,077.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 9.53 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference
