@@ -3,7 +3,6 @@
 use super::planar::Av2PlanarYuvLayout;
 use super::{Av2ChromaFormat, Av2VideoGeometry};
 use crate::picture::SampleBitDepth;
-use std::collections::HashMap;
 
 pub(crate) const AV2_LOSSLESS_ME_BLOCK_SIZE: usize = 8;
 const AV2_LOSSLESS_ME_HASH_BUCKET_LIMIT: usize = 8;
@@ -128,6 +127,25 @@ enum Av2MotionCandidateSource {
 struct Av2MotionCandidate {
     mv: Av2BlockMotionVector,
     source: Av2MotionCandidateSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2ReferenceHashEntry {
+    hash: u64,
+    block_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Av2ReferenceHashIndex {
+    entries: Vec<Av2ReferenceHashEntry>,
+}
+
+impl Av2ReferenceHashIndex {
+    fn bucket(&self, hash: u64) -> Option<&[Av2ReferenceHashEntry]> {
+        let start = self.entries.partition_point(|entry| entry.hash < hash);
+        let end = start + self.entries[start..].partition_point(|entry| entry.hash == hash);
+        (start < end).then_some(&self.entries[start..end])
+    }
 }
 
 pub(crate) fn build_lossless_motion_map(
@@ -353,8 +371,8 @@ fn build_reference_hash_index(
     reference: &[u8],
     blocks_wide: usize,
     blocks_high: usize,
-) -> HashMap<u64, Vec<usize>> {
-    let mut index: HashMap<u64, Vec<usize>> = HashMap::with_capacity(blocks_wide * blocks_high);
+) -> Av2ReferenceHashIndex {
+    let mut entries = Vec::with_capacity(blocks_wide * blocks_high);
     for block_y in 0..blocks_high {
         for block_x in 0..blocks_wide {
             let block_index = block_y * blocks_wide + block_x;
@@ -366,15 +384,16 @@ fn build_reference_hash_index(
                 block_x,
                 block_y,
             );
-            index.entry(hash).or_default().push(block_index);
+            entries.push(Av2ReferenceHashEntry { hash, block_index });
         }
     }
-    index
+    entries.sort_unstable_by_key(|entry| (entry.hash, entry.block_index));
+    Av2ReferenceHashIndex { entries }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn hash_index_candidate(
-    hash_index: &HashMap<u64, Vec<usize>>,
+    hash_index: &Av2ReferenceHashIndex,
     already_tested: &[Av2MotionCandidate],
     layout: Av2PlanarYuvLayout,
     current: &[u8],
@@ -386,15 +405,15 @@ fn hash_index_candidate(
     y0: usize,
     current_hash: u64,
 ) -> Option<Av2MotionCandidate> {
-    let bucket = hash_index.get(&current_hash)?;
+    let bucket = hash_index.bucket(current_hash)?;
     if bucket.len() > AV2_LOSSLESS_ME_HASH_BUCKET_LIMIT {
         return None;
     }
 
     let mut best = None;
-    for &ref_block_index in bucket {
-        let ref_block_x = ref_block_index % blocks_wide;
-        let ref_block_y = ref_block_index / blocks_wide;
+    for entry in bucket {
+        let ref_block_x = entry.block_index % blocks_wide;
+        let ref_block_y = entry.block_index / blocks_wide;
         let Some(mv) = block_motion_between(block_x, block_y, ref_block_x, ref_block_y) else {
             continue;
         };

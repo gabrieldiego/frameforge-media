@@ -227,6 +227,30 @@ Raw totals for the bounded hash-index checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 5.97 fps.
 
+### Sorted Reference Hash Index
+
+The sorted reference hash index checkpoint replaces the fallback motion-search
+`HashMap<u64, Vec<_>>` with one sorted vector of reference block hashes. Lookup
+uses binary partitioning over the sorted table, keeping fallback bucket limits
+and final motion-vector selection unchanged.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 10.52 | 10.53 | +0.1% |
+| Scene 422 8-bit | 0 | 9.64 | 9.94 | +3.1% |
+| Scene 444 8-bit | 0 | 8.60 | 8.12 | -5.6% |
+| Mission 420 10-bit | 0 | 4.96 | 5.17 | +4.2% |
+| Mission 422 10-bit | 0 | 4.50 | 4.59 | +2.0% |
+| Mission 444 10-bit | 0 | 3.76 | 3.83 | +1.9% |
+| Total | 0 | 5.97 | 6.06 | +1.5% |
+
+Raw totals for the sorted reference hash index checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 97,914,909.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 6.06 fps.
+
 ## Validation
 
 The predictive syntax checkpoint also passed the local required-reference
