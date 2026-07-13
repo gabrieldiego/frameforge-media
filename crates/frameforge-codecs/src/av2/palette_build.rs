@@ -211,16 +211,34 @@ fn decode_planar_samples(
     sample_count: usize,
     bit_depth: SampleBitDepth,
 ) -> Result<Vec<Av2Sample>, String> {
+    let bytes_per_sample = bit_depth.bytes_per_sample();
+    let byte_start = sample_start
+        .checked_mul(bytes_per_sample)
+        .ok_or("AV2 planar sample start overflow")?;
+    let byte_len = sample_count
+        .checked_mul(bytes_per_sample)
+        .ok_or("AV2 planar sample length overflow")?;
+    let byte_end = byte_start
+        .checked_add(byte_len)
+        .ok_or("AV2 planar sample end overflow")?;
+    let plane = frame.get(byte_start..byte_end).ok_or_else(|| {
+        format!(
+            "AV2 planar {}-bit frame ended while reading samples {}..{}",
+            bit_depth.bits(),
+            sample_start,
+            sample_start.saturating_add(sample_count)
+        )
+    })?;
+
+    if bit_depth.bits() <= 8 {
+        return Ok(plane.iter().copied().map(Av2Sample::from).collect());
+    }
+
+    let max_sample = bit_depth.max_sample();
     let mut samples = Vec::with_capacity(sample_count);
-    for sample_index in sample_start..sample_start + sample_count {
-        let sample = read_planar_sample(frame, sample_index, bit_depth).ok_or_else(|| {
-            format!(
-                "AV2 yuv444p{} frame ended while reading sample {}",
-                bit_depth.bits(),
-                sample_index
-            )
-        })?;
-        samples.push(sample.min(bit_depth.max_sample()));
+    for bytes in plane.chunks_exact(2) {
+        let sample = Av2Sample::from_le_bytes([bytes[0], bytes[1]]).min(max_sample);
+        samples.push(sample);
     }
     Ok(samples)
 }

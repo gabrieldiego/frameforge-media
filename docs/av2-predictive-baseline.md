@@ -401,6 +401,31 @@ Raw totals for the predictor-first motion-search checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.70 fps.
 
+### Fast Planar Palette Decode
+
+The fast planar palette decode checkpoint keeps palette decisions and decoded
+sample values unchanged, but validates the contiguous source-plane range once
+and then decodes 8-bit samples directly from the byte slice and high-depth
+samples from little-endian chunks. Bitstreams stayed byte-identical to the
+predictor-first checkpoint.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 9.80 | 10.60 | +8.2% |
+| Scene 422 8-bit | 0 | 8.92 | 9.69 | +8.6% |
+| Scene 444 8-bit | 0 | 7.51 | 8.13 | +8.3% |
+| Mission 420 10-bit | 0 | 3.88 | 3.98 | +2.6% |
+| Mission 422 10-bit | 0 | 3.28 | 3.40 | +3.7% |
+| Mission 444 10-bit | 0 | 2.73 | 2.77 | +1.5% |
+| Total | 0 | 4.70 | 4.89 | +4.0% |
+
+Raw totals for the fast planar palette decode checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,640,910.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.89 fps.
+
 ## Validation
 
 The latest predictive checkpoint also passed the local required-reference
