@@ -1195,21 +1195,6 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                 residual_blocks,
             } => {
                 let mut scratch_reconstruction = Vec::new();
-                let intra_payload =
-                    av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
-                        region,
-                        profile,
-                        geometry,
-                        stream_format.chroma_format,
-                        stream_format.bit_depth,
-                        frame,
-                        reference,
-                        &mut scratch_reconstruction,
-                        palette.as_ref(),
-                        intra_blocks,
-                        false,
-                    );
-                scratch_reconstruction.clear();
                 let residual_payload =
                     av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
                         region,
@@ -1224,12 +1209,36 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
                         residual_blocks,
                         false,
                     );
-                if av2_entropy_payload_rate_key(&residual_payload)
-                    < av2_entropy_payload_rate_key(&intra_payload)
-                {
+                if av2_lossless_residual_payload_is_decisive(
+                    &residual_payload,
+                    region,
+                    stream_format.chroma_format,
+                    stream_format.bit_depth,
+                ) {
                     residual_payload
                 } else {
-                    intra_payload
+                    scratch_reconstruction.clear();
+                    let intra_payload =
+                        av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                            region,
+                            profile,
+                            geometry,
+                            stream_format.chroma_format,
+                            stream_format.bit_depth,
+                            frame,
+                            reference,
+                            &mut scratch_reconstruction,
+                            palette.as_ref(),
+                            intra_blocks,
+                            false,
+                        );
+                    if av2_entropy_payload_rate_key(&residual_payload)
+                        < av2_entropy_payload_rate_key(&intra_payload)
+                    {
+                        residual_payload
+                    } else {
+                        intra_payload
+                    }
                 }
             }
             Av2PredictiveTileMode::Intra => av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields(
@@ -1282,6 +1291,22 @@ enum Av2PredictiveTileMode {
 
 fn av2_entropy_payload_rate_key(payload: &entropy::Av2EntropyPayload) -> (usize, usize) {
     (payload.bytes.len(), payload.symbol_bits)
+}
+
+fn av2_lossless_residual_payload_is_decisive(
+    payload: &entropy::Av2EntropyPayload,
+    region: Av2TileRegion,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+) -> bool {
+    let chroma_samples = match chroma_format {
+        Av2ChromaFormat::Yuv420 => region.width * region.height / 2,
+        Av2ChromaFormat::Yuv422 => region.width * region.height,
+        Av2ChromaFormat::Yuv444 => region.width * region.height * 2,
+    };
+    let source_bytes =
+        (region.width * region.height + chroma_samples) * bit_depth.bytes_per_sample();
+    payload.bytes.len() * 96 <= source_bytes
 }
 
 fn uniform_lossless_tile_motion(

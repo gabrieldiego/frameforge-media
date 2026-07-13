@@ -300,9 +300,35 @@ Raw totals for the source-backed candidate scratch checkpoint:
 - ffmpeg/libaom bytes: 3,394,010.
 - FrameForge aggregate speed: 4.14 fps.
 
+### Residual Payload Shortcut
+
+The residual payload shortcut emits the zero-MV residual candidate first for
+mixed predictive tiles. If that payload is already below a conservative
+tile-source-size budget, the encoder keeps it without running the competing
+intra fallback search. Larger residual candidates still use the exact
+residual-vs-intra payload comparison, so the measured bitstream sizes stay
+unchanged on the 50-frame baseline.
+
+| Vector | Bytes Delta | Previous FPS | New FPS | FPS Delta |
+|---|---:|---:|---:|---:|
+| Scene 420 8-bit | 0 | 8.06 | 8.16 | +1.2% |
+| Scene 422 8-bit | 0 | 7.60 | 7.54 | -0.8% |
+| Scene 444 8-bit | 0 | 6.71 | 6.85 | +2.1% |
+| Mission 420 10-bit | 0 | 3.53 | 3.54 | +0.3% |
+| Mission 422 10-bit | 0 | 2.76 | 3.05 | +10.5% |
+| Mission 444 10-bit | 0 | 2.51 | 2.50 | -0.4% |
+| Total | 0 | 4.14 | 4.25 | +2.7% |
+
+Raw totals for the residual payload shortcut checkpoint:
+
+- Frames: 300.
+- FrameForge bytes: 85,632,514.
+- ffmpeg/libaom bytes: 3,394,010.
+- FrameForge aggregate speed: 4.25 fps.
+
 ## Validation
 
-The predictive syntax checkpoint also passed the local required-reference
+The latest predictive checkpoint also passed the local required-reference
 geometry sweep:
 
 ```sh
