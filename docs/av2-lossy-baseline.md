@@ -462,3 +462,35 @@ Lossy `qp=24` versus the adaptive smooth checkpoint:
 | MissionControlClip1_422 | yuv422p10le | 6.30 MiB | 63.38 | 3.03 | 26.17 | 0 | +1.3% | +0.00 |
 | MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.54 | 2.33 | 27.68 | 0 | +3.1% | +0.00 |
 | Total | mixed | 27.35 MiB | n/a | 3.42 | n/a | 0 | +0.9% | n/a |
+
+### Direct DC-Delta Proxy Score
+
+This checkpoint keeps AV2 QP mode decisions, bitstreams, bitrate, and PSNR
+unchanged. The lossy TXB chooser now scores the DC-delta candidate directly
+from the quantized DC coefficient level instead of constructing a 16-entry
+coefficient array and passing it through the generic coefficient proxy scorer.
+The direct path uses the same position-0 low-frequency high-range rule, so the
+score is equivalent for luma and chroma transform TXBs.
+
+Total measured six-vector QP24 encode speed moves from 3.42 fps to 3.51 fps.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+```
+
+Lossy `qp=24` versus the lossy scoring SSE cleanup checkpoint:
+
+| Vector | Format | FF size | FF Mbps | FF fps | FF PSNR | Bytes delta | FPS delta | PSNR delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2.50 MiB | 6.30 | 5.57 | 24.27 | 0 | +3.5% | +0.00 |
+| SceneComposition_1_422 | yuv422p8 | 2.75 MiB | 6.92 | 4.53 | 25.37 | 0 | +2.5% | +0.00 |
+| SceneComposition_1_444 | yuv444p8 | 3.14 MiB | 7.91 | 3.31 | 26.86 | 0 | +3.8% | +0.00 |
+| MissionControlClip1_420 | yuv420p10le | 6.05 MiB | 60.95 | 3.81 | 25.14 | 0 | +2.1% | +0.00 |
+| MissionControlClip1_422 | yuv422p10le | 6.30 MiB | 63.38 | 3.11 | 26.17 | 0 | +2.6% | +0.00 |
+| MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.54 | 2.37 | 27.68 | 0 | +1.7% | +0.00 |
+| Total | mixed | 27.35 MiB | n/a | 3.51 | n/a | 0 | +2.6% | n/a |

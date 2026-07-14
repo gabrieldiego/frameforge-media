@@ -281,9 +281,7 @@ fn choose_lossy_txb(
     let mut best_choice = Av2LossyTxbChoice::Exact;
     let mut best_score = exact_score;
 
-    let mut dc_coefficients = [0i32; TX4X4_SAMPLES];
-    dc_coefficients[0] = i32::from(quantized_delta) * 32;
-    let dc_score = coefficient_proxy_score(&dc_coefficients, kind);
+    let dc_score = dc_delta_coefficient_proxy_score(quantized_delta, kind);
     let dc_candidate_score = lossy_txb_score(dc_score, dc_sse, quant_step);
     if dc_candidate_score < best_score {
         best_score = dc_candidate_score;
@@ -1096,6 +1094,18 @@ fn coefficient_proxy_score(
     score
 }
 
+fn dc_delta_coefficient_proxy_score(delta: i16, kind: Av2CoefficientProxyKind) -> usize {
+    let level = u32::from(delta.unsigned_abs()) * 4;
+    if level == 0 {
+        return 16;
+    }
+
+    let mut score = 96 + 10 + 80 + level.min(12) as usize * 14;
+    let mut high_range_avg = 0u32;
+    score += coefficient_high_range_level_proxy_score(level, kind, 0, &mut high_range_avg);
+    score
+}
+
 fn coefficient_high_range_proxy_score(
     levels: &[u32; TX4X4_SAMPLES],
     kind: Av2CoefficientProxyKind,
@@ -1103,6 +1113,15 @@ fn coefficient_high_range_proxy_score(
     high_range_avg: &mut u32,
 ) -> usize {
     let level = levels[pos];
+    coefficient_high_range_level_proxy_score(level, kind, pos, high_range_avg)
+}
+
+fn coefficient_high_range_level_proxy_score(
+    level: u32,
+    kind: Av2CoefficientProxyKind,
+    pos: usize,
+    high_range_avg: &mut u32,
+) -> usize {
     if level == 0 {
         return 0;
     }
