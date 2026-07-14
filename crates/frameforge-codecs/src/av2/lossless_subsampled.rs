@@ -2238,7 +2238,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn copy_source_to_recon_region(&mut self) {
-        if self.source_backed_recon {
+        if self.source_backed_recon && self.recon.is_empty() {
             return;
         }
         for plane in [Av2LosslessPlane::Y, Av2LosslessPlane::U, Av2LosslessPlane::V] {
@@ -2247,7 +2247,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn copy_source_to_recon_plane_region(&mut self, plane: Av2LosslessPlane) {
-        if self.source_backed_recon {
+        if self.source_backed_recon && self.recon.is_empty() {
             return;
         }
         let (plane_width, plane_height) = self.plane_geometry(plane);

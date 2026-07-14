@@ -3873,6 +3873,43 @@ mod tests {
     }
 
     #[test]
+    fn av2_yuv420_lossless_fast_path_writes_reconstruction() {
+        let geometry = Av2VideoGeometry {
+            width: 128,
+            height: 128,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format,
+        };
+        let mut input = vec![0; Picture::expected_len(geometry.width, geometry.height, format)];
+        for (index, sample) in input.iter_mut().enumerate() {
+            *sample = ((index * 37 + index / 11 + 23) & 0xff) as u8;
+        }
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("AV2 4:2:0 fast lossless path should encode stream-exact");
+
+        assert!(!output.is_empty());
+        assert_eq!(recon, input);
+    }
+
+    #[test]
     fn av2_yuv422_lossless_preserves_high_bit_depth_samples() {
         let geometry = Av2VideoGeometry {
             width: 8,

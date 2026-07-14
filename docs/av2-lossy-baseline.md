@@ -563,3 +563,44 @@ Lossy `qp=24` versus the syntax-aware chroma mode gate checkpoint:
 | MissionControlClip1_422 | yuv422p10le | 6.29 MiB | 63.35 | 3.10 | 26.17 | +1,051 | -1.3% | +0.00 |
 | MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.51 | 2.34 | 27.68 | +1,034 | +0.4% | +0.00 |
 | Total | mixed | 27.31 MiB | n/a | 3.52 | n/a | -12,943 | -0.3% | n/a |
+
+### Fast Lossless Reconstruction Copy
+
+This checkpoint fixes an internal reconstruction bookkeeping bug in the fast
+subsampled lossless path. Fast mode scoring treats reconstructed neighbors as
+source-backed so it can avoid per-TXB reconstruction writes while choosing
+modes. When a caller still provides a reconstruction buffer, the final region
+copy must write the source bytes into that buffer. Without that copy, large
+single-region 4:2:0 lossless key frames could leave zero-filled internal recon
+data even though the bitstream payload itself was unchanged.
+
+The fix does not gate off predictive coding. The 50-frame predictive lossless
+validation still emits regular inter/show-existing-frame-sized 6-byte frames
+on repeated MissionControl pictures, and all six rows reconstruct exactly.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make test
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_DIRECT_SOURCE_FILES=1
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1 COMPRESSION_LIMIT=1
+```
+
+Lossless predictive guardrail versus the baseline lossless control:
+
+| Vector | Format | FF bytes | FF size | FF fps | Bytes delta | FPS delta | Recon |
+|---|---:|---:|---:|---:|---:|---:|---|
+| SceneComposition_1_420 | yuv420p8 | 4,279,979 | 4.08 MiB | 14.91 | 0 | +3.1% | exact |
+| SceneComposition_1_422 | yuv422p8 | 4,817,495 | 4.59 MiB | 12.93 | 0 | +0.6% | exact |
+| SceneComposition_1_444 | yuv444p8 | 5,764,622 | 5.50 MiB | 10.67 | 0 | +0.1% | exact |
+| MissionControlClip1_420 | yuv420p10le | 19,498,834 | 18.60 MiB | 7.89 | 0 | -0.9% | exact |
+| MissionControlClip1_422 | yuv422p10le | 22,689,992 | 21.64 MiB | 6.87 | 0 | -0.9% | exact |
+| MissionControlClip1_444 | yuv444p10le | 28,597,197 | 27.27 MiB | 5.64 | 0 | -1.2% | exact |
+| Total | mixed | 85,648,119 | 81.68 MiB | 8.72 | 0 | -0.3% | exact |
+
+The one-vector QP24 lossy smoke check on `SceneComposition_1_420` produced
+2,618,257 bytes, 6.28 Mbps, and 5.63 fps against the ffmpeg/libaom
+realtime-screen reference. This matches the current rounded QP24 checkpoint
+for that row and does not show a lossy-path regression.
