@@ -931,6 +931,23 @@ fn cached_lossless_subsampled_mode(
     mode
 }
 
+fn cached_lossy_subsampled_mode(
+    cache: &mut Option<(usize, usize, Av2MvpBlockSize, Av2LossySubsampledModeDecision)>,
+    lossy: &Av2LossySubsampledTileState<'_>,
+    decision: Av2TileDecision,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+) -> Av2LossySubsampledModeDecision {
+    if let Some((row, col, block_size, mode)) = cache {
+        if *row == decision.row && *col == decision.col && *block_size == decision.block_size {
+            return *mode;
+        }
+    }
+    let mode = lossy.mode_decision_for_leaf(decision, visible_rows_mi, visible_cols_mi);
+    *cache = Some((decision.row, decision.col, decision.block_size, mode));
+    mode
+}
+
 fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
@@ -1671,6 +1688,14 @@ impl Av2Black444TilePlan {
             Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut intrabc_context =
             Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut luma_mode_context =
+            Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut mode_cache: Option<(
+            usize,
+            usize,
+            Av2MvpBlockSize,
+            Av2LossySubsampledModeDecision,
+        )> = None;
         for decision in &self.decisions {
             match decision.kind {
                 Av2TileDecisionKind::Partition(partition) => {
@@ -1691,37 +1716,70 @@ impl Av2Black444TilePlan {
                     }
                 }
                 Av2TileDecisionKind::IntraLumaMode {
-                    mode,
+                    mode: _,
                     use_dpcm_y: _,
                     dpcm_horz: _,
                     use_fsc: _,
                 } => {
+                    let mode = cached_lossy_subsampled_mode(
+                        &mut mode_cache,
+                        lossy,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    let mode_syntax = luma_mode_context.syntax_for_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
+                    let mode_index = mode_syntax.index_for(mode.luma_intra_mode);
                     write_intra_luma_mode(
                         writer,
                         *decision,
-                        mode,
-                        0,
-                        mode.mode_index() as u8,
+                        mode.luma_intra_mode,
+                        mode_syntax.context,
+                        mode_index,
                         false,
                         false,
                         false,
                         0,
+                    );
+                    luma_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        mode.luma_intra_mode,
                     );
                 }
                 Av2TileDecisionKind::IntraChromaMode {
                     use_bdpcm_uv: _,
-                    luma_mode,
+                    luma_mode: _,
                     chroma_intra_mode: _,
                 } => {
+                    let mode = cached_lossy_subsampled_mode(
+                        &mut mode_cache,
+                        lossy,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
                     write_intra_chroma_mode(
                         writer,
                         *decision,
                         false,
-                        luma_mode,
-                        Av2ChromaIntraMode::Horizontal,
+                        mode.luma_intra_mode,
+                        mode.chroma_intra_mode,
                     );
                 }
                 Av2TileDecisionKind::BlackDcResidualCoefficients => {
+                    let mode = cached_lossy_subsampled_mode(
+                        &mut mode_cache,
+                        lossy,
+                        *decision,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
                     write_lossy_subsampled_residual_coefficients(
                         writer,
                         *decision,
@@ -1729,6 +1787,7 @@ impl Av2Black444TilePlan {
                         self.visible_cols_mi,
                         &mut txb_contexts,
                         lossy,
+                        mode,
                     );
                     intrabc_context.update_leaf(
                         decision.row,

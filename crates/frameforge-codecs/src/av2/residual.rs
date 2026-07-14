@@ -19,6 +19,7 @@ fn write_lossy_subsampled_residual_coefficients(
     visible_cols_mi: usize,
     contexts: &mut Av2TxbEntropyContexts,
     lossy: &mut Av2LossySubsampledTileState<'_>,
+    mode: Av2LossySubsampledModeDecision,
 ) {
     let txb_width = decision
         .block_size
@@ -36,7 +37,7 @@ fn write_lossy_subsampled_residual_coefficients(
                 luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let (x0, y0) = lossy.txb_origin(Av2LossyPlane::Y, abs_col, abs_row);
-            let context = write_lossy_luma_txb(writer, skip_ctx, dc_sign_ctx, lossy, x0, y0);
+            let context = write_lossy_luma_txb(writer, skip_ctx, dc_sign_ctx, lossy, x0, y0, mode);
             contexts.y_above[abs_col] = context;
             contexts.y_left[abs_row] = context;
         }
@@ -64,6 +65,7 @@ fn write_lossy_subsampled_residual_coefficients(
                 lossy,
                 x0,
                 y0,
+                mode,
             );
             contexts.u_above[abs_col] = context;
             contexts.u_left[abs_row] = context;
@@ -90,6 +92,7 @@ fn write_lossy_subsampled_residual_coefficients(
                 lossy,
                 x0,
                 y0,
+                mode,
             );
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
@@ -104,9 +107,10 @@ fn write_lossy_luma_txb(
     lossy: &mut Av2LossySubsampledTileState<'_>,
     x0: usize,
     y0: usize,
+    mode: Av2LossySubsampledModeDecision,
 ) -> u8 {
     let plane = Av2LossyPlane::Y;
-    let analysis = lossy.analyze_txb(plane, x0, y0);
+    let analysis = lossy.analyze_txb(plane, x0, y0, mode);
     let coefficients = tx4x4_coefficients_from_residual(&analysis.residual, false);
     let quantized_candidate =
         if lossy_should_try_ac_quantized(analysis.dc_sse, lossy.quant_step()) {
@@ -166,12 +170,13 @@ fn write_lossy_chroma_txb(
     lossy: &mut Av2LossySubsampledTileState<'_>,
     x0: usize,
     y0: usize,
+    mode: Av2LossySubsampledModeDecision,
 ) -> (u8, bool) {
     let plane = match chroma_plane {
         Av2ChromaPlane::U => Av2LossyPlane::U,
         Av2ChromaPlane::V => Av2LossyPlane::V,
     };
-    let analysis = lossy.analyze_txb(plane, x0, y0);
+    let analysis = lossy.analyze_txb(plane, x0, y0, mode);
     let coefficients = tx4x4_coefficients_from_residual(&analysis.residual, false);
     let quantized_candidate =
         if lossy_should_try_ac_quantized(analysis.dc_sse, lossy.quant_step()) {
