@@ -622,11 +622,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             chroma_sampled_txbs,
         );
         let mut best_chroma = (mode.chroma_intra_mode, usize::MAX);
-        for (chroma_intra_mode, syntax_penalty) in [
-            (Av2ChromaIntraMode::Horizontal, 0usize),
-            (Av2ChromaIntraMode::Vertical, 0usize),
-            (Av2ChromaIntraMode::Dc, 0usize),
+        for chroma_intra_mode in [
+            Av2ChromaIntraMode::Horizontal,
+            Av2ChromaIntraMode::Vertical,
+            Av2ChromaIntraMode::Dc,
         ] {
+            let syntax_penalty =
+                lossy_chroma_mode_syntax_penalty(mode.luma_intra_mode, chroma_intra_mode);
             let score = match chroma_intra_mode {
                 Av2ChromaIntraMode::Dc => chroma_scores.dc,
                 Av2ChromaIntraMode::Horizontal => chroma_scores.horizontal,
@@ -1217,7 +1219,7 @@ fn lossy_luma_smooth_search_allowed(scores: Av2LossyIntraTxbScores, total_txbs: 
         .min(scores.paeth);
     let best_basic = scores.dc.min(best_directional);
     let per_txb_residual = best_basic / txb_count;
-    if per_txb_residual < 128 {
+    if per_txb_residual < 1024 {
         return false;
     }
 
@@ -1228,6 +1230,14 @@ fn lossy_luma_smooth_search_allowed(scores: Av2LossyIntraTxbScores, total_txbs: 
     let directional_advantage = scores.dc.saturating_sub(best_directional);
     let max_directional_advantage = (scores.dc / 4).max(txb_count * 64);
     directional_advantage <= max_directional_advantage
+}
+
+fn lossy_chroma_mode_syntax_penalty(
+    luma_mode: Av2LumaIntraMode,
+    chroma_mode: Av2ChromaIntraMode,
+) -> usize {
+    let index = chroma_uv_mode_index(luma_mode, chroma_mode);
+    index.min(7) * 32 + usize::from(index >= 7) * 64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

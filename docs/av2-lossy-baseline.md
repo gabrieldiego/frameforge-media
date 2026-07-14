@@ -494,3 +494,37 @@ Lossy `qp=24` versus the lossy scoring SSE cleanup checkpoint:
 | MissionControlClip1_422 | yuv422p10le | 6.30 MiB | 63.38 | 3.11 | 26.17 | 0 | +2.6% | +0.00 |
 | MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.54 | 2.37 | 27.68 | 0 | +1.7% | +0.00 |
 | Total | mixed | 27.35 MiB | n/a | 3.51 | n/a | 0 | +2.6% | n/a |
+
+### Syntax-Aware Chroma Mode Gate
+
+This checkpoint tightens the second-stage luma smooth probe so very low
+residual leaves skip the smooth-family scorer, and adds a small syntax-cost
+estimate to the lossy chroma DC/H/V mode decision. The chroma estimate uses
+the actual AV2 UV mode index for the selected luma mode, so H/V only pay the
+extra proxy cost when the current luma context would make that chroma mode
+less compact to signal.
+
+The six-vector QP24 set improves from 28,683,216 bytes to 28,654,482 bytes.
+Total measured encode speed moves from 3.51 fps to 3.53 fps. Rounded PSNR is
+unchanged at report precision.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+```
+
+Lossy `qp=24` versus the direct DC-delta proxy score checkpoint:
+
+| Vector | Format | FF size | FF Mbps | FF fps | FF PSNR | Bytes delta | FPS delta | PSNR delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2.50 MiB | 6.30 | 5.69 | 24.27 | +341 | +2.2% | +0.00 |
+| SceneComposition_1_422 | yuv422p8 | 2.74 MiB | 6.91 | 4.59 | 25.37 | -4,360 | +1.3% | +0.00 |
+| SceneComposition_1_444 | yuv444p8 | 3.13 MiB | 7.87 | 3.39 | 26.86 | -16,970 | +2.4% | +0.00 |
+| MissionControlClip1_420 | yuv420p10le | 6.05 MiB | 60.94 | 3.78 | 25.14 | -77 | -0.8% | +0.00 |
+| MissionControlClip1_422 | yuv422p10le | 6.29 MiB | 63.34 | 3.14 | 26.17 | -4,159 | +1.0% | +0.00 |
+| MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.51 | 2.33 | 27.68 | -3,509 | -1.7% | +0.00 |
+| Total | mixed | 27.33 MiB | n/a | 3.53 | n/a | -28,734 | +0.6% | n/a |
