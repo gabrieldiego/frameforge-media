@@ -465,6 +465,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         visible_rows_mi: usize,
         visible_cols_mi: usize,
         coded_mi_context: &Av2CodedMiContext,
+        luma_mode_syntax: Av2LumaModeSyntax,
     ) -> Av2LossySubsampledModeDecision {
         let txb_width = decision
             .block_size
@@ -534,12 +535,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 smooth_scores.scaled_to_txb_count(txb_width * txb_height, sampled_txbs)
             });
         let mut best_luma = (mode.luma_intra_mode, usize::MAX);
-        for (luma_intra_mode, syntax_penalty) in [
-            (Av2LumaIntraMode::Dc, 0usize),
-            (Av2LumaIntraMode::Horizontal, 32usize),
-            (Av2LumaIntraMode::Vertical, 32usize),
-            (Av2LumaIntraMode::Paeth, 128usize),
+        for luma_intra_mode in [
+            Av2LumaIntraMode::Dc,
+            Av2LumaIntraMode::Horizontal,
+            Av2LumaIntraMode::Vertical,
+            Av2LumaIntraMode::Paeth,
         ] {
+            let syntax_penalty = lossy_luma_mode_syntax_penalty(luma_intra_mode, luma_mode_syntax);
             let score = match luma_intra_mode {
                 Av2LumaIntraMode::Dc => luma_scores.dc,
                 Av2LumaIntraMode::Horizontal => luma_scores.horizontal,
@@ -1230,6 +1232,21 @@ fn lossy_luma_smooth_search_allowed(scores: Av2LossyIntraTxbScores, total_txbs: 
     let directional_advantage = scores.dc.saturating_sub(best_directional);
     let max_directional_advantage = (scores.dc / 4).max(txb_count * 64);
     directional_advantage <= max_directional_advantage
+}
+
+fn lossy_luma_mode_syntax_penalty(
+    mode: Av2LumaIntraMode,
+    syntax: Av2LumaModeSyntax,
+) -> usize {
+    match mode {
+        Av2LumaIntraMode::Dc => 0,
+        Av2LumaIntraMode::Horizontal | Av2LumaIntraMode::Vertical => {
+            let index = usize::from(syntax.index_for(mode));
+            32 + index.saturating_sub(6) * 128
+        }
+        Av2LumaIntraMode::Paeth => 128,
+        _ => unreachable!("AV2 lossy luma syntax penalty handles scored modes"),
+    }
 }
 
 fn lossy_chroma_mode_syntax_penalty(

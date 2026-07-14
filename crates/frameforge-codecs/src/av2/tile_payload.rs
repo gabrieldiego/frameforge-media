@@ -931,13 +931,14 @@ fn cached_lossless_subsampled_mode(
     mode
 }
 
-fn cached_lossy_subsampled_mode(
+fn cached_lossy_subsampled_mode_with_syntax(
     cache: &mut Option<(usize, usize, Av2MvpBlockSize, Av2LossySubsampledModeDecision)>,
     lossy: &Av2LossySubsampledTileState<'_>,
     decision: Av2TileDecision,
     visible_rows_mi: usize,
     visible_cols_mi: usize,
     coded_mi_context: &Av2CodedMiContext,
+    luma_mode_syntax: Av2LumaModeSyntax,
 ) -> Av2LossySubsampledModeDecision {
     if let Some((row, col, block_size, mode)) = cache {
         if *row == decision.row && *col == decision.col && *block_size == decision.block_size {
@@ -945,9 +946,42 @@ fn cached_lossy_subsampled_mode(
         }
     }
     let mode =
-        lossy.mode_decision_for_leaf(decision, visible_rows_mi, visible_cols_mi, coded_mi_context);
+        lossy.mode_decision_for_leaf(
+            decision,
+            visible_rows_mi,
+            visible_cols_mi,
+            coded_mi_context,
+            luma_mode_syntax,
+        );
     *cache = Some((decision.row, decision.col, decision.block_size, mode));
     mode
+}
+
+fn cached_lossy_subsampled_mode(
+    cache: &mut Option<(usize, usize, Av2MvpBlockSize, Av2LossySubsampledModeDecision)>,
+    lossy: &Av2LossySubsampledTileState<'_>,
+    decision: Av2TileDecision,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    coded_mi_context: &Av2CodedMiContext,
+    luma_mode_context: &Av2LumaModeContext,
+) -> Av2LossySubsampledModeDecision {
+    if let Some((row, col, block_size, mode)) = cache {
+        if *row == decision.row && *col == decision.col && *block_size == decision.block_size {
+            return *mode;
+        }
+    }
+    let luma_mode_syntax =
+        luma_mode_context.syntax_for_leaf(decision.row, decision.col, decision.block_size);
+    cached_lossy_subsampled_mode_with_syntax(
+        cache,
+        lossy,
+        decision,
+        visible_rows_mi,
+        visible_cols_mi,
+        coded_mi_context,
+        luma_mode_syntax,
+    )
 }
 
 fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
@@ -1725,18 +1759,19 @@ impl Av2Black444TilePlan {
                     dpcm_horz: _,
                     use_fsc: _,
                 } => {
-                    let mode = cached_lossy_subsampled_mode(
+                    let mode_syntax = luma_mode_context.syntax_for_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                    );
+                    let mode = cached_lossy_subsampled_mode_with_syntax(
                         &mut mode_cache,
                         lossy,
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &coded_mi_context,
-                    );
-                    let mode_syntax = luma_mode_context.syntax_for_leaf(
-                        decision.row,
-                        decision.col,
-                        decision.block_size,
+                        mode_syntax,
                     );
                     let mode_index = mode_syntax.index_for(mode.luma_intra_mode);
                     write_intra_luma_mode(
@@ -1769,6 +1804,7 @@ impl Av2Black444TilePlan {
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &coded_mi_context,
+                        &luma_mode_context,
                     );
                     write_intra_chroma_mode(
                         writer,
@@ -1786,6 +1822,7 @@ impl Av2Black444TilePlan {
                         self.visible_rows_mi,
                         self.visible_cols_mi,
                         &coded_mi_context,
+                        &luma_mode_context,
                     );
                     write_lossy_subsampled_residual_coefficients(
                         writer,
