@@ -67,8 +67,12 @@ Short aliases remain accepted:
 - Hardware-style aliases such as `i010`, `i212`, and `i416` map to the matching
   planar YUV layout and numeric bit depth.
 
-`rgb24` remains as an existing parsed format, but the current codec encode paths
-do not convert RGB to YUV.
+`rgb24` is accepted as packed 8-bit RGB for AV2 streams. The encoder re-packs
+RGB into codec-internal planar GBR identity planes and signals sRGB identity
+color metadata in the AV2 bitstream; it does not convert RGB to YUV. The
+internal reconstruction written with `--recon` is packed back to `rgb24` so
+validation compares the same byte layout as the source. VVC does not yet accept
+RGB input.
 
 ## Rust API
 
@@ -120,6 +124,11 @@ Current behavior:
   emit exact residuals when that is cheaper. Higher AV2 depths are scaled to
   the matching 8-bit format before non-lossless encoding until a
   reference-valid 12-bit profile path is added.
+- AV2 accepts `rgb24` by coding the three RGB components as 8-bit 4:4:4
+  identity planes, signaling sRGB identity color metadata, and writing packed
+  `rgb24` reconstruction bytes. `--set lossless` keeps the RGB byte stream
+  exact; `--qp <1..255>` uses the same identity-plane interpretation with the
+  experimental lossy residual path.
 - VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
   residual path. Higher 4:2:0 depths are scaled to `yuv420p8` before encoding.
 - VVC accepts `yuv444p8` through `yuv444p12le` natively for the current 4:4:4
@@ -141,8 +150,8 @@ emitted stream reconstructs exactly through the reference decoder. Lossless
 mode never uses the 8-bit fallback converter; unsupported exact source formats
 fail before encoding. The current lossless stream paths are AV2 `yuv420p8` and
 `yuv420p10le`, AV2 `yuv422p8` and `yuv422p10le`, AV2 `yuv444p8` and
-`yuv444p10le`, VVC `yuv420p8` through `yuv420p12le`, VVC `yuv422p8` through
-`yuv422p12le`, and VVC `yuv444p8` through `yuv444p12le`.
+`yuv444p10le`, AV2 `rgb24`, VVC `yuv420p8` through `yuv420p12le`, VVC
+`yuv422p8` through `yuv422p12le`, and VVC `yuv444p8` through `yuv444p12le`.
 
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without

@@ -169,6 +169,7 @@ def run_file_case(
         log,
         command,
         args,
+        vector,
         lossless_source=vector_path if vector.lossless else None,
     )
 
@@ -199,6 +200,7 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
         log,
         command,
         args,
+        vector,
         lossless_source=vector if vector.lossless else None,
     )
 
@@ -226,6 +228,7 @@ def run_command(
     log: Path,
     command: list[str],
     args: argparse.Namespace,
+    vector: generate_test_vectors.TestVector,
     lossless_source: Path | generate_test_vectors.TestVector | None = None,
 ) -> ValidationResult:
     if output.exists():
@@ -323,7 +326,7 @@ def run_command(
             recon_sha256=recon_sha,
             reference_sha256="n/a",
         )
-    reference_status = validate_reference_decode(args, output, recon, reference_recon, log)
+    reference_status = validate_reference_decode(args, output, recon, reference_recon, log, vector)
     if reference_status is not None and reference_status[0] == "FAIL":
         return ValidationResult(
             vector_name=vector_name,
@@ -388,7 +391,12 @@ def codec_extension(codec: str) -> str:
 
 
 def validate_reference_decode(
-    args: argparse.Namespace, bitstream: Path, internal_recon: Path, reference_recon: Path, log: Path
+    args: argparse.Namespace,
+    bitstream: Path,
+    internal_recon: Path,
+    reference_recon: Path,
+    log: Path,
+    vector: generate_test_vectors.TestVector,
 ) -> tuple[str, str] | None:
     if args.reference_mode == "off":
         return None
@@ -427,6 +435,10 @@ def validate_reference_decode(
     if reference_recon.stat().st_size == 0:
         return ("FAIL", "reference decoder returned success but reconstruction is empty")
 
+    normalized_status = normalize_reference_reconstruction(vector, reference_recon, log)
+    if normalized_status is not None and normalized_status[0] == "FAIL":
+        return normalized_status
+
     internal_sha = sha256_file(internal_recon)
     reference_sha = sha256_file(reference_recon)
     if internal_sha != reference_sha:
@@ -434,7 +446,49 @@ def validate_reference_decode(
             "FAIL",
             "reference reconstruction checksum differs from internal reconstruction",
         )
+    if normalized_status is not None:
+        return (
+            "PASS",
+            "reference reconstruction matches internal reconstruction after planar GBR to packed rgb24 normalization",
+        )
     return ("PASS", "reference reconstruction matches internal reconstruction")
+
+
+def normalize_reference_reconstruction(
+    vector: generate_test_vectors.TestVector, reference_recon: Path, log: Path
+) -> tuple[str, str] | None:
+    if vector.fmt != "rgb24":
+        return None
+
+    pixels = vector.width * vector.height
+    frame_len = pixels * 3
+    expected_size = frame_len * vector.frames
+    actual_size = reference_recon.stat().st_size
+    if actual_size != expected_size:
+        return (
+            "FAIL",
+            f"reference rgb24 reconstruction length differs from expected packed RGB size ({actual_size} != {expected_size})",
+        )
+
+    tmp = reference_recon.with_name(f"{reference_recon.name}.tmp")
+    with reference_recon.open("rb") as source, tmp.open("wb") as output:
+        for _ in range(vector.frames):
+            frame = source.read(frame_len)
+            if len(frame) != frame_len:
+                tmp.unlink(missing_ok=True)
+                return ("FAIL", "reference rgb24 reconstruction ended mid-frame")
+            g_plane = frame[:pixels]
+            b_plane = frame[pixels : pixels * 2]
+            r_plane = frame[pixels * 2 :]
+            packed = bytearray(frame_len)
+            packed[0::3] = r_plane
+            packed[1::3] = g_plane
+            packed[2::3] = b_plane
+            output.write(packed)
+    tmp.replace(reference_recon)
+    with log.open("a") as file:
+        file.write("\nNormalized reference reconstruction from planar GBR to packed rgb24.\n")
+    return ("PASS", "reference reconstruction normalized from planar GBR to packed rgb24")
 
 
 def sha256_file(path: Path) -> str:

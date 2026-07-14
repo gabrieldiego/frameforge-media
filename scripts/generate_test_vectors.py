@@ -49,7 +49,8 @@ class TestVector:
     @property
     def filename(self) -> str:
         fps_part = f"_{filename_fps_label(self.fps)}" if self.fps is not None else ""
-        return f"{self.name}_{self.width}x{self.height}{fps_part}_{self.frames}f_{self.fmt}.yuv"
+        extension = "rgb" if self.fmt == "rgb24" else "yuv"
+        return f"{self.name}_{self.width}x{self.height}{fps_part}_{self.frames}f_{self.fmt}.{extension}"
 
 
 @dataclass(frozen=True)
@@ -731,6 +732,8 @@ def pad_planar8_planes_to_le(
 
 def raw_frame_len(vector: TestVector) -> int:
     luma = vector.width * vector.height
+    if vector.fmt == "rgb24":
+        return luma * 3
     bit_depth = yuv420_bit_depth(vector.fmt)
     if bit_depth is not None:
         return luma * 3 // 2 * bytes_per_sample(bit_depth)

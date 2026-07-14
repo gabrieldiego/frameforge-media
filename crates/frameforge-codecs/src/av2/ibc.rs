@@ -17,6 +17,45 @@ struct Av2LocalIbcVector {
     col_px: i16,
 }
 
+struct Av2LocalBvpStack {
+    vectors: Vec<Av2LocalIbcVector>,
+    spatial_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Av2LocalIbcTileBounds {
+    pub(crate) origin_x: usize,
+    pub(crate) origin_y: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+impl Av2LocalIbcTileBounds {
+    pub(crate) fn full_frame(geometry: Av2VideoGeometry) -> Self {
+        Self {
+            origin_x: 0,
+            origin_y: 0,
+            width: geometry.width,
+            height: geometry.height,
+        }
+    }
+
+    fn end_x(self) -> usize {
+        self.origin_x + self.width
+    }
+
+    fn end_y(self) -> usize {
+        self.origin_y + self.height
+    }
+
+    fn contains_region(self, x: usize, y: usize, width: usize, height: usize) -> bool {
+        x >= self.origin_x
+            && y >= self.origin_y
+            && x + width <= self.end_x()
+            && y + height <= self.end_y()
+    }
+}
+
 const AV2_IBC_BV_SUPERBLOCK_ABOVE: Av2LocalIbcVector = Av2LocalIbcVector {
     row_px: -64,
     col_px: 0,
@@ -193,6 +232,7 @@ pub(crate) fn build_local_ibc_subsampled(
     geometry: Av2VideoGeometry,
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
+    tile_bounds: &[Av2LocalIbcTileBounds],
 ) -> Result<Av2LocalIbc444, String> {
     assert!(
         matches!(
@@ -201,7 +241,7 @@ pub(crate) fn build_local_ibc_subsampled(
         ),
         "AV2 planar IBC expects 4:2:0, 4:2:2, or 4:4:4 input"
     );
-    build_local_ibc(frame, geometry, chroma_format, bit_depth, None)
+    build_local_ibc(frame, geometry, chroma_format, bit_depth, None, tile_bounds)
 }
 
 fn build_local_ibc_with_palette(
@@ -213,7 +253,14 @@ fn build_local_ibc_with_palette(
     let bit_depth = palette
         .map(Av2LumaPalette444::bit_depth)
         .unwrap_or_else(|| SampleBitDepth::new(8).expect("8-bit depth is supported"));
-    build_local_ibc(frame, geometry, chroma_format, bit_depth, palette)
+    build_local_ibc(
+        frame,
+        geometry,
+        chroma_format,
+        bit_depth,
+        palette,
+        &[Av2LocalIbcTileBounds::full_frame(geometry)],
+    )
 }
 
 fn build_local_ibc(
@@ -222,6 +269,7 @@ fn build_local_ibc(
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     palette: Option<&Av2LumaPalette444>,
+    tile_bounds: &[Av2LocalIbcTileBounds],
 ) -> Result<Av2LocalIbc444, String> {
     if palette.is_some() {
         assert_eq!(
@@ -246,6 +294,9 @@ fn build_local_ibc(
             "AV2 IBC hash path expects dimensions in {}-pixel units, got {}x{}",
             AV2_IBC_HASH_BLOCK_SIZE, geometry.width, geometry.height
         ));
+    }
+    if tile_bounds.is_empty() {
+        return Err("AV2 IBC requires at least one tile bound".to_string());
     }
 
     let blocks_wide = geometry.width / AV2_IBC_HASH_BLOCK_SIZE;
@@ -317,6 +368,7 @@ fn build_local_ibc(
                         bit_depth,
                         blocks_wide,
                         blocks_high,
+                        tile_bounds,
                         block_x,
                         block_y,
                         &mut any_copy,
@@ -328,6 +380,7 @@ fn build_local_ibc(
                         &mut blocks,
                         &mut coded_blocks,
                         blocks_wide,
+                        tile_bounds,
                         block_x,
                         block_y,
                         leaf.width / AV2_IBC_HASH_BLOCK_SIZE,
@@ -358,6 +411,7 @@ fn visit_local_ibc_block(
     bit_depth: SampleBitDepth,
     blocks_wide: usize,
     blocks_high: usize,
+    tile_bounds: &[Av2LocalIbcTileBounds],
     block_x: usize,
     block_y: usize,
     any_copy: &mut bool,
@@ -382,6 +436,7 @@ fn visit_local_ibc_block(
         block_y,
         blocks_wide,
         blocks_high,
+        tile_bounds,
         AV2_IBC_BV_LEFT_8X8,
     );
     let above_in_same_tile = local_ibc_vector_is_valid_8x8(
@@ -389,6 +444,7 @@ fn visit_local_ibc_block(
         block_y,
         blocks_wide,
         blocks_high,
+        tile_bounds,
         AV2_IBC_BV_ABOVE_8X8,
     );
     if left_in_same_tile {
@@ -408,14 +464,17 @@ fn visit_local_ibc_block(
         coded_blocks,
         blocks_wide,
         blocks_high,
+        tile_bounds,
         block_x,
         block_y,
     );
     let above_drl_idx = bvp_stack
+        .vectors
         .iter()
         .position(|candidate| *candidate == AV2_IBC_BV_ABOVE_8X8)
         .map(|index| index as u8);
     let left_drl_idx = bvp_stack
+        .vectors
         .iter()
         .position(|candidate| *candidate == AV2_IBC_BV_LEFT_8X8)
         .map(|index| index as u8);
@@ -490,44 +549,54 @@ fn visit_local_ibc_block(
     // vector. Explicit-DV copies can reference any already-coded 8x8 block in
     // the same local tile as long as the source is outside the uncoded
     // bottom-right overlap region.
+    let default_only_bvp_stack = bvp_stack.spatial_count == 0;
     let above_match = default_above_bvp_supported && above_in_same_tile && direct_above_match;
     let left_match = default_left_bvp_supported && left_in_same_tile && direct_left_match;
-    let direct_candidate = match (above_match, left_match) {
-        (true, true) => {
-            let above_idx = above_drl_idx.expect("above match has a DRL index");
-            let left_idx = left_drl_idx.expect("left match has a DRL index");
-            if above_idx <= left_idx {
-                Some((above_idx, AV2_IBC_BV_ABOVE_8X8))
-            } else {
-                Some((left_idx, AV2_IBC_BV_LEFT_8X8))
+    let direct_candidate = if default_only_bvp_stack {
+        match (above_match, left_match) {
+            (true, true) => {
+                let above_idx = above_drl_idx.expect("above match has a DRL index");
+                let left_idx = left_drl_idx.expect("left match has a DRL index");
+                if above_idx <= left_idx {
+                    Some((above_idx, AV2_IBC_BV_ABOVE_8X8))
+                } else {
+                    Some((left_idx, AV2_IBC_BV_LEFT_8X8))
+                }
             }
+            (true, false) => Some((
+                above_drl_idx.expect("above match has a DRL index"),
+                AV2_IBC_BV_ABOVE_8X8,
+            )),
+            (false, true) => Some((
+                left_drl_idx.expect("left match has a DRL index"),
+                AV2_IBC_BV_LEFT_8X8,
+            )),
+            (false, false) => None,
         }
-        (true, false) => Some((
-            above_drl_idx.expect("above match has a DRL index"),
-            AV2_IBC_BV_ABOVE_8X8,
-        )),
-        (false, true) => Some((
-            left_drl_idx.expect("left match has a DRL index"),
-            AV2_IBC_BV_LEFT_8X8,
-        )),
-        (false, false) => None,
+    } else {
+        None
     };
     let candidate = direct_candidate
         .map(|(drl_idx, vector)| (Av2LocalIbcCopy::DirectDrl { drl_idx }, vector))
         .or_else(|| {
-            find_local_explicit_candidate(
-                blocks,
-                hash_index.candidates(hash),
-                frame,
-                geometry,
-                chroma_format,
-                bit_depth,
-                blocks_wide,
-                blocks_high,
-                block_x,
-                block_y,
-                &bvp_stack,
-            )
+            if default_only_bvp_stack {
+                find_local_explicit_candidate(
+                    blocks,
+                    hash_index.candidates(hash),
+                    frame,
+                    geometry,
+                    chroma_format,
+                    bit_depth,
+                    blocks_wide,
+                    blocks_high,
+                    tile_bounds,
+                    block_x,
+                    block_y,
+                    &bvp_stack.vectors,
+                )
+            } else {
+                None
+            }
         });
     let (candidate_copy, copy_vector) = if let Some((copy, vector)) = candidate {
         if vector == AV2_IBC_BV_ABOVE_8X8 {
@@ -555,6 +624,7 @@ fn find_local_explicit_candidate(
     bit_depth: SampleBitDepth,
     blocks_wide: usize,
     blocks_high: usize,
+    tile_bounds: &[Av2LocalIbcTileBounds],
     block_x: usize,
     block_y: usize,
     bvp_stack: &[Av2LocalIbcVector],
@@ -590,7 +660,14 @@ fn find_local_explicit_candidate(
             col_px: ((ref_block_x as isize - block_x as isize) * AV2_IBC_HASH_BLOCK_SIZE as isize)
                 as i16,
         };
-        if !local_ibc_vector_is_valid_8x8(block_x, block_y, blocks_wide, blocks_high, vector) {
+        if !local_ibc_vector_is_valid_8x8(
+            block_x,
+            block_y,
+            blocks_wide,
+            blocks_high,
+            tile_bounds,
+            vector,
+        ) {
             continue;
         }
         update_best_explicit_candidate(&mut best, bvp_stack, vector);
@@ -604,6 +681,7 @@ fn local_ibc_vector_is_valid_8x8(
     block_y: usize,
     blocks_wide: usize,
     blocks_high: usize,
+    tile_bounds: &[Av2LocalIbcTileBounds],
     vector: Av2LocalIbcVector,
 ) -> bool {
     const LOCAL_LEFT_SB_COUNT: isize = 4;
@@ -619,6 +697,18 @@ fn local_ibc_vector_is_valid_8x8(
     let src_bottom_y = src_top_y + height - 1;
 
     if src_left_x < 0 || src_top_y < 0 || src_right_x >= frame_width || src_bottom_y >= frame_height
+    {
+        return false;
+    }
+    let Some(tile) = tile_bounds.iter().copied().find(|tile| {
+        tile.contains_region(x0 as usize, y0 as usize, width as usize, height as usize)
+    }) else {
+        return false;
+    };
+    if src_left_x < tile.origin_x as isize
+        || src_top_y < tile.origin_y as isize
+        || src_right_x >= tile.end_x() as isize
+        || src_bottom_y >= tile.end_y() as isize
     {
         return false;
     }
@@ -691,6 +781,7 @@ fn mark_local_ibc_intra_leaf(
     blocks: &mut [Av2LocalIbcBlock444],
     coded_blocks: &mut [bool],
     blocks_wide: usize,
+    tile_bounds: &[Av2LocalIbcTileBounds],
     block_x0: usize,
     block_y0: usize,
     leaf_blocks_wide: usize,
@@ -703,13 +794,26 @@ fn mark_local_ibc_intra_leaf(
             let block_x = block_x0 + local_x;
             let block_y = block_y0 + local_y;
             let block_index = block_y * blocks_wide + block_x;
-            let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
-            let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
             stats.total_blocks += 1;
-            if x0 % AV2_IBC_TILE_SIZE != 0 {
+            let blocks_high = coded_blocks.len() / blocks_wide;
+            if local_ibc_vector_is_valid_8x8(
+                block_x,
+                block_y,
+                blocks_wide,
+                blocks_high,
+                tile_bounds,
+                AV2_IBC_BV_LEFT_8X8,
+            ) {
                 stats.blocks_with_left_in_tile += 1;
             }
-            if y0 % AV2_IBC_TILE_SIZE != 0 {
+            if local_ibc_vector_is_valid_8x8(
+                block_x,
+                block_y,
+                blocks_wide,
+                blocks_high,
+                tile_bounds,
+                AV2_IBC_BV_ABOVE_8X8,
+            ) {
                 stats.blocks_with_above_in_tile += 1;
             }
             blocks[block_index].candidate_copy = None;
@@ -855,16 +959,26 @@ fn build_bvp_stack_8x8(
     coded_blocks: &[bool],
     blocks_wide: usize,
     blocks_high: usize,
+    tile_bounds: &[Av2LocalIbcTileBounds],
     block_x: usize,
     block_y: usize,
-) -> Vec<Av2LocalIbcVector> {
+) -> Av2LocalBvpStack {
     let mut stack = Vec::with_capacity(AV2_IBC_MAX_BVP_SIZE);
     // AV2 v1.0.0 setup_ref_mv_list() spatial search, specialized to
-    // FrameForge's fixed 8x8 leaves (2x2 MI units) and local 64x64 tiles.
-    // Several AVM 4x4-MI probes collapse to the same 8x8 neighbor in this
-    // subset; keep the first effective 8x8 probe for each neighbor because
-    // push_unique_spatial_bv() would discard the duplicates anyway.
-    for (row_mi_offset, col_mi_offset) in [(1, -1), (-1, 1), (2, -1), (-1, 2), (-1, -1), (1, -3)] {
+    // FrameForge's fixed 8x8 leaves (2x2 MI units). The offsets are 4x4-MI
+    // coordinates in AVM's scan order before the default BVP entries are
+    // appended.
+    for (row_mi_offset, col_mi_offset) in [
+        (1, -1),
+        (-1, 1),
+        (0, -1),
+        (-1, 0),
+        (2, -1),
+        (-1, 2),
+        (-1, -1),
+        (1, -3),
+        (0, -3),
+    ] {
         if let Some(index) = neighbor_index_for_mi_offset(
             blocks_wide,
             blocks_high,
@@ -873,11 +987,16 @@ fn build_bvp_stack_8x8(
             row_mi_offset,
             col_mi_offset,
         ) {
-            if coded_blocks[index] {
+            let candidate_x = index % blocks_wide;
+            let candidate_y = index / blocks_wide;
+            if coded_blocks[index]
+                && blocks_share_tile(block_x, block_y, candidate_x, candidate_y, tile_bounds)
+            {
                 push_unique_spatial_bv(&mut stack, blocks[index].copy_vector);
             }
         }
     }
+    let spatial_count = stack.len();
     for vector in [
         AV2_IBC_BV_SUPERBLOCK_ABOVE,
         AV2_IBC_BV_SUPERBLOCK_DELAYED_LEFT,
@@ -892,7 +1011,32 @@ fn build_bvp_stack_8x8(
         // the encoder always selects the first matching vector.
         stack.push(vector);
     }
-    stack
+    Av2LocalBvpStack {
+        vectors: stack,
+        spatial_count,
+    }
+}
+
+fn blocks_share_tile(
+    block_x: usize,
+    block_y: usize,
+    candidate_x: usize,
+    candidate_y: usize,
+    tile_bounds: &[Av2LocalIbcTileBounds],
+) -> bool {
+    let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
+    let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
+    let candidate_x0 = candidate_x * AV2_IBC_HASH_BLOCK_SIZE;
+    let candidate_y0 = candidate_y * AV2_IBC_HASH_BLOCK_SIZE;
+    tile_bounds.iter().copied().any(|tile| {
+        tile.contains_region(x0, y0, AV2_IBC_HASH_BLOCK_SIZE, AV2_IBC_HASH_BLOCK_SIZE)
+            && tile.contains_region(
+                candidate_x0,
+                candidate_y0,
+                AV2_IBC_HASH_BLOCK_SIZE,
+                AV2_IBC_HASH_BLOCK_SIZE,
+            )
+    })
 }
 
 fn push_unique_spatial_bv(stack: &mut Vec<Av2LocalIbcVector>, vector: Option<Av2LocalIbcVector>) {
@@ -915,17 +1059,15 @@ fn neighbor_index_for_mi_offset(
     row_mi_offset: isize,
     col_mi_offset: isize,
 ) -> Option<usize> {
-    let tile_block_x = block_x % (AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE);
-    let tile_block_y = block_y % (AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE);
-    let tile_origin_x = block_x - tile_block_x;
-    let tile_origin_y = block_y - tile_block_y;
-    let candidate_mi_col = (tile_block_x * 2) as isize + col_mi_offset;
-    let candidate_mi_row = (tile_block_y * 2) as isize + row_mi_offset;
-    if !(0..16).contains(&candidate_mi_col) || !(0..16).contains(&candidate_mi_row) {
+    let candidate_mi_col = (block_x * 2) as isize + col_mi_offset;
+    let candidate_mi_row = (block_y * 2) as isize + row_mi_offset;
+    let mi_cols = (blocks_wide * 2) as isize;
+    let mi_rows = (blocks_high * 2) as isize;
+    if !(0..mi_cols).contains(&candidate_mi_col) || !(0..mi_rows).contains(&candidate_mi_row) {
         return None;
     }
-    let candidate_block_x = tile_origin_x + (candidate_mi_col as usize / 2);
-    let candidate_block_y = tile_origin_y + (candidate_mi_row as usize / 2);
+    let candidate_block_x = candidate_mi_col as usize / 2;
+    let candidate_block_y = candidate_mi_row as usize / 2;
     if candidate_block_x >= blocks_wide || candidate_block_y >= blocks_high {
         return None;
     }
@@ -988,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn av2_local_ibc_hash_reuses_adjacent_vertical_spatial_bvp() {
+    fn av2_local_ibc_hash_skips_adjacent_vertical_spatial_bvp_chain() {
         let geometry = Av2VideoGeometry {
             width: 8,
             height: 24,
@@ -1009,12 +1151,12 @@ mod tests {
         let ibc = build_local_ibc_444(&frame, geometry).expect("IBC hash map should build");
         assert_eq!(ibc.candidate_drl_idx(0, 0), None);
         assert_eq!(ibc.candidate_drl_idx(0, 8), Some(2));
-        assert_eq!(ibc.candidate_drl_idx(0, 16), Some(0));
+        assert_eq!(ibc.candidate_drl_idx(0, 16), None);
         assert_eq!(ibc.stats.raw_above_hash_matches, 2);
     }
 
     #[test]
-    fn av2_local_ibc_hash_reuses_adjacent_spatial_bvp() {
+    fn av2_local_ibc_hash_skips_adjacent_spatial_bvp_chain() {
         let geometry = Av2VideoGeometry {
             width: 24,
             height: 16,
@@ -1040,11 +1182,11 @@ mod tests {
         assert_eq!(ibc.candidate_drl_idx(0, 0), None);
         assert_eq!(ibc.candidate_drl_idx(8, 0), None);
         assert_eq!(ibc.candidate_drl_idx(8, 8), Some(3));
-        assert_eq!(ibc.candidate_drl_idx(16, 8), Some(0));
+        assert_eq!(ibc.candidate_drl_idx(16, 8), None);
     }
 
     #[test]
-    fn av2_local_ibc_hash_keeps_defaults_after_non_direct_spatial_bvp() {
+    fn av2_local_ibc_hash_skips_defaults_after_non_direct_spatial_bvp() {
         let geometry = Av2VideoGeometry {
             width: 32,
             height: 24,
@@ -1076,7 +1218,7 @@ mod tests {
 
         let ibc = build_local_ibc_444(&frame, geometry).expect("IBC hash map should build");
         assert_eq!(ibc.candidate_drl_idx(8, 8), Some(3));
-        assert_eq!(ibc.candidate_drl_idx(16, 16), Some(0));
+        assert_eq!(ibc.candidate_drl_idx(16, 16), None);
         assert_eq!(ibc.stats.raw_left_hash_matches, 2);
     }
 
@@ -1163,6 +1305,6 @@ mod tests {
 
         let ibc = build_local_ibc_444(&frame, geometry).expect("IBC hash map should build");
         assert_eq!(ibc.candidate_drl_idx(0, 24), None);
-        assert!(ibc.candidate_drl_idx(8, 24).is_some());
+        assert_eq!(ibc.candidate_drl_idx(8, 24), None);
     }
 }

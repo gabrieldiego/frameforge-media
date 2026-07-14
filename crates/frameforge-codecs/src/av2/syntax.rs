@@ -5,6 +5,7 @@ pub enum Av2SyntaxCode {
     Flag,
     Literal,
     Uvlc,
+    RiceGolomb,
     Quniform,
     TrailingBits,
     ByteAlignZero,
@@ -68,6 +69,24 @@ impl Av2SyntaxWriter {
         }
         self.writer.write_bits(code_num, bit_count);
         self.bit_offset += total_bits as usize;
+    }
+
+    pub fn write_rice_golomb(&mut self, name: &'static str, value: u32, k: u8) {
+        assert!(k <= 26, "AV2 Rice-Golomb k must be at most 26");
+        let quotient = value >> k;
+        assert!(
+            quotient < 32,
+            "AV2 Rice-Golomb quotient must be lower than 32"
+        );
+        let bit_count = quotient as usize + 1 + k as usize;
+        self.push_field(name, Av2SyntaxCode::RiceGolomb, bit_count);
+        for _ in 0..quotient {
+            self.writer.write_bit(true);
+        }
+        self.writer.write_bit(false);
+        self.writer
+            .write_bits(u64::from(value & ((1u32 << k) - 1)), k);
+        self.bit_offset += bit_count;
     }
 
     pub fn write_quniform(&mut self, name: &'static str, n: u16, value: u16) {

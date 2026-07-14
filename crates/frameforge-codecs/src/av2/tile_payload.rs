@@ -236,7 +236,7 @@ pub(crate) fn av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields(
     record_fields: bool,
 ) -> Av2EntropyPayload {
     let adaptive_partition_features =
-        adaptive_partition_features_for_source(region, geometry, bit_depth, source, false);
+        adaptive_partition_features_for_source(region, geometry, bit_depth, source, false, None);
     let plan = Av2Black444TilePlan::for_region_with_partition_policy_and_features(
         region,
         profile,
@@ -611,6 +611,7 @@ fn adaptive_partition_features_for_source(
     bit_depth: SampleBitDepth,
     source: &[u8],
     palette_enabled: bool,
+    ibc: Option<&Av2LocalIbc444>,
 ) -> Av2AdaptivePartitionFeatures {
     let cols = region.width.div_ceil(AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
     let rows = region.height.div_ceil(AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
@@ -629,15 +630,20 @@ fn adaptive_partition_features_for_source(
     let forced_micro_cols = region.width / MVP_LEAF_BLOCK_SIZE;
     let forced_micro_rows = region.height / MVP_LEAF_BLOCK_SIZE;
     let mut forced_micro_blocks = Vec::new();
-    if palette_enabled {
+    if palette_enabled || ibc.is_some() {
         forced_micro_blocks.reserve(forced_micro_cols * forced_micro_rows);
         for row in 0..forced_micro_rows {
             let y0 = region.origin_y + row * MVP_LEAF_BLOCK_SIZE;
             for col in 0..forced_micro_cols {
                 let x0 = region.origin_x + col * MVP_LEAF_BLOCK_SIZE;
-                forced_micro_blocks.push(lossless_luma_8x8_is_palette_worthy(
-                    geometry, bit_depth, source, x0, y0,
-                ));
+                let palette_forced = palette_enabled
+                    && lossless_luma_8x8_is_palette_worthy(
+                        geometry, bit_depth, source, x0, y0,
+                    );
+                let ibc_forced = ibc
+                    .and_then(|ibc| ibc.candidate_copy(x0, y0))
+                    .is_some();
+                forced_micro_blocks.push(palette_forced || ibc_forced);
             }
         }
     }
@@ -1008,6 +1014,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
                 bit_depth,
                 source,
                 palette.is_some(),
+                ibc,
             )
         });
     let plan = Av2Black444TilePlan::for_region_with_partition_policy_and_features(

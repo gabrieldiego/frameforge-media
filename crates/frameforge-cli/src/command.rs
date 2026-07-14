@@ -916,6 +916,11 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         return Err("--qp is currently implemented for AV2 encode only".to_string());
     }
     let av2_predictive = boolean_setting_enabled(&args.settings, "predictive")?;
+    if source_format == PixelFormat::Rgb24 {
+        if codec != "av2" {
+            return Err("rgb24 encode is currently implemented for AV2 only".to_string());
+        }
+    }
     let format = if lossless {
         source_format
     } else {
@@ -1022,10 +1027,11 @@ fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
 fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
     match codec {
         "av2" => {
-            matches!(
-                format.chroma_sampling(),
-                Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
-            ) && matches!(format.bit_depth().bits(), 8 | 10)
+            format == PixelFormat::Rgb24
+                || (matches!(
+                    format.chroma_sampling(),
+                    Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
+                ) && matches!(format.bit_depth().bits(), 8 | 10))
         }
         "vvc" => match format.chroma_sampling() {
             Some(ChromaSampling::Cs420) => vvc_accepts_bit_depth(format),
@@ -1040,10 +1046,11 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
 fn codec_supports_lossless_stream(codec: &str, format: PixelFormat) -> bool {
     match codec {
         "av2" => {
-            matches!(
-                format.chroma_sampling(),
-                Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
-            ) && matches!(format.bit_depth().bits(), 8 | 10)
+            format == PixelFormat::Rgb24
+                || (matches!(
+                    format.chroma_sampling(),
+                    Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
+                ) && matches!(format.bit_depth().bits(), 8 | 10))
         }
         "vvc" => {
             matches!(
@@ -1898,6 +1905,107 @@ mod tests {
         assert!(job.lossless);
         assert_eq!(job.source_format, format);
         assert_eq!(job.format, format);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_accepts_lossless_rgb24_for_av2_path() {
+        let path = temp_input_path("one_frame_8x8_rgb24", "rgb");
+        let input = (0..PixelFormat::Rgb24.frame_len(8, 8).unwrap())
+            .map(|index| ((index * 19 + 11) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let mut file = File::create(&path).expect("create temp rgb");
+        file.write_all(&input).expect("write temp rgb");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("rgb24".to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("AV2 lossless rgb24 is native");
+        assert!(job.lossless);
+        assert_eq!(job.source_format, PixelFormat::Rgb24);
+        assert_eq!(job.format, PixelFormat::Rgb24);
+        let mut reader = open_job_reader(&job).expect("open rgb reader");
+        let mut forwarded = Vec::new();
+        reader
+            .read_to_end(&mut forwarded)
+            .expect("read forwarded rgb frame");
+        assert_eq!(forwarded, input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_accepts_non_lossless_rgb24_for_av2_path() {
+        let path = temp_input_path("one_frame_8x8_rgb24_lossy", "rgb");
+        let input = vec![0; PixelFormat::Rgb24.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp rgb");
+        file.write_all(&input).expect("write temp rgb");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("rgb24".to_string()),
+            }),
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("AV2 non-lossless rgb24 is native");
+        assert!(!job.lossless);
+        assert_eq!(job.source_format, PixelFormat::Rgb24);
+        assert_eq!(job.format, PixelFormat::Rgb24);
+        let mut reader = open_job_reader(&job).expect("open rgb reader");
+        let mut forwarded = Vec::new();
+        reader
+            .read_to_end(&mut forwarded)
+            .expect("read forwarded rgb frame");
+        assert_eq!(forwarded, input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_rejects_rgb24_for_vvc_path() {
+        let path = temp_input_path("one_frame_8x8_rgb24_vvc", "rgb");
+        let mut file = File::create(&path).expect("create temp rgb");
+        file.write_all(&vec![0; PixelFormat::Rgb24.frame_len(8, 8).unwrap()])
+            .expect("write temp rgb");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.vvc".to_string()),
+            codec: Some("vvc".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("rgb24".to_string()),
+            }),
+            settings: vec!["lossless=true".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("VVC rgb24 path should be rejected");
+        assert!(
+            err.contains("rgb24 encode is currently implemented for AV2 only"),
+            "{err}"
+        );
         let _ = fs::remove_file(path);
     }
 

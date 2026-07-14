@@ -12,7 +12,7 @@ mod planar;
 mod syntax;
 mod tile;
 
-use ibc::{Av2LocalIbc444, Av2LocalIbcStats};
+use ibc::{Av2LocalIbc444, Av2LocalIbcStats, Av2LocalIbcTileBounds};
 use motion::{
     Av2LosslessMotionMap, Av2MotionSearchRegion, Av2MotionVector, AV2_LOSSLESS_ME_BLOCK_SIZE,
 };
@@ -72,6 +72,7 @@ const AV2_TILE_AREA_SCALING_LEVEL_2_0_TIER_0: usize = 4;
 const AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC: bool = true;
 const AV2_ENABLE_LUMA_PALETTE_INTRABC_444: bool = false;
 const AV2_LOSSY_DEFAULT_QP: u8 = 8;
+const AV2_COLOR_DESCRIPTION_IDC_SRGB: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Av2ChromaFormat {
@@ -109,6 +110,12 @@ struct Av2StreamFormat {
 
 impl Av2StreamFormat {
     fn from_pixel_format(format: PixelFormat) -> Option<Self> {
+        if format == PixelFormat::Rgb24 {
+            return Some(Self {
+                chroma_format: Av2ChromaFormat::Yuv444,
+                bit_depth: SampleBitDepth::new(8).expect("rgb24 is 8-bit"),
+            });
+        }
         let bit_depth = format.bit_depth();
         let chroma_format = match (format.chroma_sampling()?, bit_depth.bits()) {
             // AV2 has a 12-bit test-only profile in AVM, but the normal
@@ -250,6 +257,7 @@ enum Av2ObuType {
     ClosedLoopKey = 4,
     RegularTileGroup = 7,
     RegularSef = 12,
+    ContentInterpretation = 24,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +428,22 @@ impl Av2TileLayout {
         self.regions.len()
     }
 
+    fn local_ibc_tile_bounds(&self) -> Vec<Av2LocalIbcTileBounds> {
+        self.regions
+            .iter()
+            .map(|region| Av2LocalIbcTileBounds {
+                origin_x: region.origin_x,
+                origin_y: region.origin_y,
+                width: region.width,
+                height: region.height,
+            })
+            .collect()
+    }
+
+    fn lossless_subsampled_ibc_for_geometry(geometry: Av2VideoGeometry) -> Self {
+        Self::try_single_for_geometry(geometry).unwrap_or_else(|| Self::for_geometry(geometry))
+    }
+
     fn is_single_tile(&self) -> bool {
         self.tile_count() == 1
     }
@@ -558,9 +582,9 @@ impl Av2EncodeRequest {
         if self.params.frames == 0 {
             return Err("AV2 encode expects at least one frame".to_string());
         }
-        if !self.format.is_yuv() {
+        if !self.format.is_yuv() && self.format != PixelFormat::Rgb24 {
             return Err(format!(
-                "AV2 encode expects planar YUV input; got {}",
+                "AV2 encode expects planar YUV or rgb24 input; got {}",
                 self.format
             ));
         }
@@ -673,19 +697,34 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     if options.predictive && !options.lossless {
         return Err("AV2 predictive mode is currently implemented only for lossless encode".into());
     }
+    let rgb_identity = request.format == PixelFormat::Rgb24;
 
-    let expected_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+    let source_expected_len =
+        Picture::expected_len(geometry.width, geometry.height, request.format);
+    let coded_expected_len = Picture::expected_len(
+        geometry.width,
+        geometry.height,
+        stream_format.pixel_format(),
+    );
+    debug_assert_eq!(source_expected_len, coded_expected_len);
     let mut predictive_started = false;
     let mut predictive_reference: Option<Vec<u8>> = None;
     for frame_index in 0..request.params.frames {
-        let mut frame = vec![0; expected_len];
-        input.read_exact(&mut frame).map_err(|err| {
+        let mut source_frame = vec![0; source_expected_len];
+        input.read_exact(&mut source_frame).map_err(|err| {
             format!(
                 "failed to read AV2 MVP input frame {} of {}: {err}",
                 frame_index + 1,
                 request.params.frames
             )
         })?;
+        let coded_frame: Vec<u8>;
+        let frame = if rgb_identity {
+            coded_frame = rgb24_to_planar_gbr(&source_frame, geometry);
+            coded_frame.as_slice()
+        } else {
+            source_frame.as_slice()
+        };
         // The MVP stream keeps each input picture independently decodable.
         // Concatenating one single-picture OBU sequence per frame avoids
         // hidden single-frame tooling assumptions while inter-frame AV2 syntax
@@ -698,9 +737,9 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
         {
             let (bitstream, reconstruction) = if options.predictive {
                 let order_hint = av2_order_hint_for_frame(frame_index);
-                if predictive_reference.as_deref() == Some(frame.as_slice()) {
+                if predictive_reference.as_deref() == Some(frame) {
                     av2_lossless_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
-                        &frame, order_hint,
+                        frame, order_hint,
                     )
                 } else if let Some((bitstream, reconstruction)) = predictive_reference
                     .as_deref()
@@ -708,40 +747,49 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                         av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_frame(
                             geometry,
                             stream_format,
-                            &frame,
+                            frame,
                             reference,
                             order_hint,
                         )
                     })
                 {
-                    predictive_reference = Some(frame.clone());
+                    predictive_reference = Some(frame.to_vec());
                     (bitstream, reconstruction)
                 } else {
                     let result =
                         av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
                             geometry,
                             stream_format,
-                            &frame,
+                            frame,
                             !predictive_started,
                             order_hint,
+                            rgb_identity,
                         );
                     predictive_started = true;
-                    predictive_reference = Some(frame.clone());
+                    predictive_reference = Some(frame.to_vec());
                     result
                 }
             } else {
                 av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
                     geometry,
                     stream_format,
-                    &frame,
+                    frame,
+                    rgb_identity,
                 )
             };
             output
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
+            let public_reconstruction: Vec<u8>;
+            let reconstruction = if rgb_identity {
+                public_reconstruction = planar_gbr_to_rgb24(&reconstruction, geometry);
+                public_reconstruction.as_slice()
+            } else {
+                reconstruction.as_slice()
+            };
             if let Some(recon) = recon.as_deref_mut() {
                 recon
-                    .write_all(&reconstruction)
+                    .write_all(reconstruction)
                     .map_err(|err| format!("failed to write AV2 reconstruction: {err}"))?;
             }
             if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
@@ -749,8 +797,8 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                     frame_idx: frame_index,
                     frame_count: request.params.frames,
                     bitstream_bytes: bitstream.len(),
-                    source: &frame,
-                    reconstruction: &reconstruction,
+                    source: &source_frame,
+                    reconstruction,
                 });
             }
             continue;
@@ -769,15 +817,23 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
                     geometry,
                     stream_format,
-                    &frame,
+                    frame,
                     qp,
+                    rgb_identity,
                 );
             output
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
+            let public_reconstruction: Vec<u8>;
+            let reconstruction = if rgb_identity {
+                public_reconstruction = planar_gbr_to_rgb24(&reconstruction, geometry);
+                public_reconstruction.as_slice()
+            } else {
+                reconstruction.as_slice()
+            };
             if let Some(recon) = recon.as_deref_mut() {
                 recon
-                    .write_all(&reconstruction)
+                    .write_all(reconstruction)
                     .map_err(|err| format!("failed to write AV2 reconstruction: {err}"))?;
             }
             if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
@@ -785,24 +841,35 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                     frame_idx: frame_index,
                     frame_count: request.params.frames,
                     bitstream_bytes: bitstream.len(),
-                    source: &frame,
-                    reconstruction: &reconstruction,
+                    source: &source_frame,
+                    reconstruction,
                 });
             }
             continue;
         }
 
-        let frame_mode = Av2Mvp444FrameMode::from_frame(&frame, geometry, stream_format.bit_depth)?;
+        let frame_mode = Av2Mvp444FrameMode::from_frame(frame, geometry, stream_format.bit_depth)?;
 
-        let bitstream =
-            av2_mvp_444_bitstream_for_mode(geometry, stream_format.bit_depth, &frame_mode);
+        let bitstream = av2_mvp_444_bitstream_for_mode(
+            geometry,
+            stream_format.bit_depth,
+            &frame_mode,
+            rgb_identity,
+        );
         let reconstruction = frame_mode.reconstruction(geometry, stream_format.bit_depth);
         output
             .write_all(&bitstream)
             .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
+        let public_reconstruction: Vec<u8>;
+        let reconstruction = if rgb_identity {
+            public_reconstruction = planar_gbr_to_rgb24(&reconstruction, geometry);
+            public_reconstruction.as_slice()
+        } else {
+            reconstruction.as_slice()
+        };
         if let Some(recon) = recon.as_deref_mut() {
             recon
-                .write_all(&reconstruction)
+                .write_all(reconstruction)
                 .map_err(|err| format!("failed to write AV2 reconstruction: {err}"))?;
         }
         if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
@@ -810,12 +877,42 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 frame_idx: frame_index,
                 frame_count: request.params.frames,
                 bitstream_bytes: bitstream.len(),
-                source: &frame,
-                reconstruction: &reconstruction,
+                source: &source_frame,
+                reconstruction,
             });
         }
     }
     Ok(())
+}
+
+fn rgb24_to_planar_gbr(frame: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {
+    let pixels = geometry.width * geometry.height;
+    debug_assert_eq!(frame.len(), pixels * 3);
+    let mut out = vec![0; pixels * 3];
+    let (g_plane, chroma) = out.split_at_mut(pixels);
+    let (b_plane, r_plane) = chroma.split_at_mut(pixels);
+    for pixel in 0..pixels {
+        let src = pixel * 3;
+        r_plane[pixel] = frame[src];
+        g_plane[pixel] = frame[src + 1];
+        b_plane[pixel] = frame[src + 2];
+    }
+    out
+}
+
+fn planar_gbr_to_rgb24(frame: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {
+    let pixels = geometry.width * geometry.height;
+    debug_assert_eq!(frame.len(), pixels * 3);
+    let (g_plane, chroma) = frame.split_at(pixels);
+    let (b_plane, r_plane) = chroma.split_at(pixels);
+    let mut out = vec![0; pixels * 3];
+    for pixel in 0..pixels {
+        let dst = pixel * 3;
+        out[dst] = r_plane[pixel];
+        out[dst + 1] = g_plane[pixel];
+        out[dst + 2] = b_plane[pixel];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -853,6 +950,7 @@ fn av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
     stream_format: Av2StreamFormat,
     frame: &[u8],
     qp: u8,
+    rgb_identity: bool,
 ) -> (Vec<u8>, Vec<u8>) {
     assert!(qp > 0, "AV2 lossy QP must be non-zero");
     let expected_len = Picture::expected_len(
@@ -877,6 +975,7 @@ fn av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
         Av2ObuType::SequenceHeader,
         &av2_mvp_sequence_header_payload(geometry, Av2Black444MvpProfile::current(), stream_format),
     );
+    append_rgb_content_interpretation_if_needed(&mut out, rgb_identity);
     append_obu(
         &mut out,
         Av2ObuType::ClosedLoopKey,
@@ -895,6 +994,7 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
     geometry: Av2VideoGeometry,
     stream_format: Av2StreamFormat,
     frame: &[u8],
+    rgb_identity: bool,
 ) -> (Vec<u8>, Vec<u8>) {
     debug_assert!(matches!(
         stream_format.chroma_format,
@@ -910,12 +1010,15 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
         expected_len,
         "AV2 planar lossless input length must match geometry"
     );
+    let tile_layout = Av2TileLayout::lossless_subsampled_ibc_for_geometry(geometry);
+    let ibc_tile_bounds = tile_layout.local_ibc_tile_bounds();
     let ibc = if AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC {
         ibc::build_local_ibc_subsampled(
             frame,
             geometry,
             stream_format.chroma_format,
             stream_format.bit_depth,
+            &ibc_tile_bounds,
         )
         .ok()
         .filter(|ibc| ibc.stats().selected_copy_blocks() > 0)
@@ -946,6 +1049,7 @@ fn av2_lossless_subsampled_bitstream_and_reconstruction_for_frame(
         Av2ObuType::SequenceHeader,
         &av2_mvp_sequence_header_payload(geometry, profile, stream_format),
     );
+    append_rgb_content_interpretation_if_needed(&mut out, rgb_identity);
     append_obu(
         &mut out,
         Av2ObuType::ClosedLoopKey,
@@ -968,6 +1072,7 @@ fn av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame
     frame: &[u8],
     include_sequence_header: bool,
     order_hint: u16,
+    rgb_identity: bool,
 ) -> (Vec<u8>, Vec<u8>) {
     debug_assert!(matches!(
         stream_format.chroma_format,
@@ -983,12 +1088,15 @@ fn av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame
         expected_len,
         "AV2 predictive lossless input length must match geometry"
     );
+    let tile_layout = Av2TileLayout::lossless_subsampled_ibc_for_geometry(geometry);
+    let ibc_tile_bounds = tile_layout.local_ibc_tile_bounds();
     let ibc = if AV2_ENABLE_LOSSLESS_SUBSAMPLED_IBC {
         ibc::build_local_ibc_subsampled(
             frame,
             geometry,
             stream_format.chroma_format,
             stream_format.bit_depth,
+            &ibc_tile_bounds,
         )
         .ok()
         .filter(|ibc| ibc.stats().selected_copy_blocks() > 0)
@@ -1020,6 +1128,7 @@ fn av2_lossless_subsampled_predictive_key_bitstream_and_reconstruction_for_frame
             Av2ObuType::SequenceHeader,
             &av2_mvp_predictive_sequence_header_payload(geometry, profile, stream_format),
         );
+        append_rgb_content_interpretation_if_needed(&mut out, rgb_identity);
     }
     append_obu(
         &mut out,
@@ -1521,6 +1630,7 @@ fn av2_mvp_444_bitstream_for_mode(
     geometry: Av2VideoGeometry,
     bit_depth: SampleBitDepth,
     frame_mode: &Av2Mvp444FrameMode,
+    rgb_identity: bool,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     append_obu(
@@ -1533,6 +1643,7 @@ fn av2_mvp_444_bitstream_for_mode(
         Av2ObuType::SequenceHeader,
         &av2_mvp_444_sequence_header_payload(geometry, bit_depth, frame_mode.profile()),
     );
+    append_rgb_content_interpretation_if_needed(&mut out, rgb_identity);
     append_obu(
         &mut out,
         Av2ObuType::ClosedLoopKey,
@@ -1549,6 +1660,13 @@ pub fn av2_mvp_444_trace_jsonl_for_frame(
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
+    let coded_frame: Vec<u8>;
+    let frame = if request.format == PixelFormat::Rgb24 {
+        coded_frame = rgb24_to_planar_gbr(frame, geometry);
+        coded_frame.as_slice()
+    } else {
+        frame
+    };
     if stream_format.chroma_format == Av2ChromaFormat::Yuv420 {
         let black = av2_black_reconstruction_for_geometry(geometry, stream_format);
         if frame != black {
@@ -1580,6 +1698,13 @@ pub fn av2_mvp_444_ibc_stats_json_for_frame(
         ));
     }
 
+    let coded_frame: Vec<u8>;
+    let frame = if request.format == PixelFormat::Rgb24 {
+        coded_frame = rgb24_to_planar_gbr(frame, geometry);
+        coded_frame.as_slice()
+    } else {
+        frame
+    };
     let frame_mode = Av2Mvp444FrameMode::from_frame(frame, geometry, stream_format.bit_depth)?;
     let (black_mode, stats) = match &frame_mode {
         Av2Mvp444FrameMode::Black => (true, Av2LocalIbcStats::default()),
@@ -1925,7 +2050,7 @@ fn validate_mvp_444_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometr
             ..
         })
     ) {
-        return Err("AV2 4:4:4 MVP path only supports yuv444p8 or yuv444p10le".to_string());
+        return Err("AV2 4:4:4 MVP path only supports yuv444p8, yuv444p10le, or rgb24".to_string());
     }
     Ok(geometry)
 }
@@ -1933,7 +2058,7 @@ fn validate_mvp_444_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometr
 fn validate_mvp_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometry, String> {
     if Av2StreamFormat::from_pixel_format(request.format).is_none() {
         return Err(
-            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, and yuv444p8/10 streams at 8-pixel geometry"
+            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, yuv444p8/10, and rgb24 streams at 8-pixel geometry"
                 .to_string(),
         );
     }
@@ -1987,6 +2112,45 @@ fn av2_mvp_predictive_sequence_header_payload(
     stream_format: Av2StreamFormat,
 ) -> Av2SyntaxPayload {
     av2_mvp_sequence_header_payload_with_mode(geometry, profile, stream_format, false)
+}
+
+fn append_rgb_content_interpretation_if_needed(out: &mut Vec<u8>, rgb_identity: bool) {
+    if !rgb_identity {
+        return;
+    }
+    append_obu(
+        out,
+        Av2ObuType::ContentInterpretation,
+        &av2_rgb_identity_content_interpretation_payload(),
+    );
+}
+
+fn av2_rgb_identity_content_interpretation_payload() -> Av2SyntaxPayload {
+    let mut writer = Av2SyntaxWriter::new();
+    writer.write_literal("content_interpretation.ci_scan_type_idc", 0, 2);
+    writer.write_flag(
+        "content_interpretation.ci_color_description_present_flag",
+        true,
+    );
+    writer.write_flag(
+        "content_interpretation.ci_chroma_sample_position_present_flag",
+        false,
+    );
+    writer.write_flag(
+        "content_interpretation.ci_aspect_ratio_info_present_flag",
+        false,
+    );
+    writer.write_flag("content_interpretation.ci_timing_info_present_flag", false);
+    writer.write_literal("content_interpretation.ci_reserved_zero_2bits", 0, 2);
+    writer.write_rice_golomb(
+        "content_interpretation.color_description_idc",
+        AV2_COLOR_DESCRIPTION_IDC_SRGB,
+        2,
+    );
+    writer.write_flag("content_interpretation.full_range_flag", true);
+    writer.write_flag("content_interpretation.ci_extension_present_flag", false);
+    writer.trailing_bits();
+    writer.finish()
 }
 
 fn av2_mvp_sequence_header_payload_with_mode(
@@ -2510,8 +2674,7 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
     let tile_layout = if ibc.is_none() {
         Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry)
     } else {
-        Av2TileLayout::try_single_for_geometry(geometry)
-            .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry))
+        Av2TileLayout::lossless_subsampled_ibc_for_geometry(geometry)
     };
     let allow_intrabc = ibc.is_some();
     let allow_screen_content_tools = allow_intrabc || palette.is_some();
@@ -2593,8 +2756,7 @@ fn av2_lossless_subsampled_predictive_closed_loop_key_payload(
     let tile_layout = if ibc.is_none() {
         Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry)
     } else {
-        Av2TileLayout::try_single_for_geometry(geometry)
-            .unwrap_or_else(|| Av2TileLayout::for_geometry(geometry))
+        Av2TileLayout::lossless_subsampled_ibc_for_geometry(geometry)
     };
     let allow_intrabc = ibc.is_some();
     let allow_screen_content_tools = allow_intrabc || palette.is_some();
@@ -3064,6 +3226,119 @@ mod tests {
     }
 
     #[test]
+    fn av2_rgb24_repack_uses_planar_gbr_identity_order() {
+        let geometry = Av2VideoGeometry {
+            width: 2,
+            height: 1,
+        };
+        let rgb = vec![1, 2, 3, 4, 5, 6];
+
+        let planar = rgb24_to_planar_gbr(&rgb, geometry);
+
+        assert_eq!(planar, vec![2, 5, 3, 6, 1, 4]);
+        assert_eq!(planar_gbr_to_rgb24(&planar, geometry), rgb);
+    }
+
+    #[test]
+    fn av2_rgb24_lossless_emits_identity_metadata_and_packed_recon() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format: PixelFormat::Rgb24,
+        };
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+        let input: Vec<u8> = (0..frame_len)
+            .map(|index| ((index * 17 + 3) & 0xff) as u8)
+            .collect();
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("AV2 rgb24 lossless encode should preserve packed RGB bytes");
+
+        assert_eq!(recon, input);
+        let ci_header = av2_obu_header(Av2ObuType::ContentInterpretation);
+        assert!(
+            output
+                .windows(ci_header.len())
+                .any(|window| window == ci_header.as_slice()),
+            "RGB identity stream should carry a content-interpretation OBU"
+        );
+    }
+
+    #[test]
+    fn av2_rgb24_non_lossless_emits_identity_metadata_and_packed_recon() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format: PixelFormat::Rgb24,
+        };
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+        let input: Vec<u8> = (0..frame_len)
+            .map(|index| ((index * 29 + 7) & 0xff) as u8)
+            .collect();
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions::default(),
+            None,
+        )
+        .expect("AV2 rgb24 non-lossless encode should keep public RGB byte layout");
+
+        assert_eq!(recon, input);
+        let ci_header = av2_obu_header(Av2ObuType::ContentInterpretation);
+        assert!(
+            output
+                .windows(ci_header.len())
+                .any(|window| window == ci_header.as_slice()),
+            "RGB identity stream should carry a content-interpretation OBU"
+        );
+    }
+
+    #[test]
+    fn av2_rgb_identity_content_interpretation_uses_srgb_idc() {
+        let payload = av2_rgb_identity_content_interpretation_payload();
+
+        assert!(
+            payload.fields.iter().any(|field| {
+                field.name == "content_interpretation.color_description_idc"
+                    && field.code == Av2SyntaxCode::RiceGolomb
+                    && field.bit_count == 4
+            }),
+            "sRGB color_description_idc=4 should be Rice-Golomb coded with k=2"
+        );
+        assert!(payload.fields.iter().any(|field| {
+            field.name == "content_interpretation.full_range_flag"
+                && field.code == Av2SyntaxCode::Flag
+        }));
+    }
+
+    #[test]
     fn av2_fixed_black_444_emits_generated_obu_stream_and_reconstruction() {
         for geometry in supported_black_444_geometries() {
             let request = Av2EncodeRequest {
@@ -3119,12 +3394,14 @@ mod tests {
             request.format.bit_depth(),
             &Av2Mvp444FrameMode::from_frame(&first, geometry, request.format.bit_depth())
                 .expect("first frame mode"),
+            false,
         );
         expected_output.extend_from_slice(&av2_mvp_444_bitstream_for_mode(
             geometry,
             request.format.bit_depth(),
             &Av2Mvp444FrameMode::from_frame(&second, geometry, request.format.bit_depth())
                 .expect("second frame mode"),
+            false,
         ));
         assert_eq!(output, expected_output);
         assert_eq!(recon, input);
