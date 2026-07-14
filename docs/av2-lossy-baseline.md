@@ -137,13 +137,13 @@ Delta columns compare against the previous current chart for this report.
 
 | Vector | Format | Lossless size | Lossless Mbps | Lossless fps | Lossless PSNR | Lossy size | Lossy Mbps | Lossy fps | Lossy PSNR | Lossy bytes delta | Lossy FPS delta | Lossy PSNR delta | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.04 | inf | 4.55 MiB | 11.44 | 6.95 | 24.24 | 0 | +12.7% | +0.00 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
-| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 12.26 | inf | 4.89 MiB | 12.31 | 6.01 | 25.38 | 0 | +15.2% | +0.00 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
-| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 9.89 | inf | 5.34 MiB | 13.44 | 4.38 | 26.97 | 0 | +17.2% | +0.00 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
-| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.85 | inf | 11.77 MiB | 118.51 | 4.81 | 25.24 | 0 | +8.8% | +0.00 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
-| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.97 | inf | 12.31 MiB | 123.88 | 4.11 | 26.28 | 0 | +9.5% | +0.00 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
-| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.68 | inf | 12.92 MiB | 130.04 | 3.16 | 27.70 | 0 | +16.4% | +0.00 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
-| Total | mixed | 81.68 MiB | n/a | 8.56 | inf | 51.78 MiB | n/a | 4.59 | n/a | 0 | +13.4% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
+| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.04 | inf | 3.34 MiB | 8.40 | 7.02 | 24.17 | -1,267,791 | +0.9% | -0.07 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
+| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 12.26 | inf | 3.64 MiB | 9.16 | 5.81 | 25.34 | -1,314,077 | -3.3% | -0.04 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
+| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 9.89 | inf | 4.06 MiB | 10.22 | 4.27 | 26.80 | -1,340,713 | -2.6% | -0.17 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
+| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.85 | inf | 9.93 MiB | 99.98 | 4.87 | 25.22 | -1,929,844 | +1.3% | -0.02 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
+| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.97 | inf | 10.45 MiB | 105.14 | 4.04 | 26.25 | -1,951,850 | -1.5% | -0.03 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
+| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.68 | inf | 11.00 MiB | 110.69 | 3.07 | 27.59 | -2,015,517 | -2.8% | -0.10 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
+| Total | mixed | 81.68 MiB | n/a | 8.56 | inf | 42.41 MiB | n/a | 4.52 | n/a | -9,819,792 | -1.6% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
 
 ### Reused Lossy TXB Analysis
 
@@ -215,3 +215,38 @@ make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
 make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
 QP24 reference probe: checker_420_8, canary_422_10, canary_444_10 all pass
 ```
+
+### Adaptive Lossy Tile Layout
+
+This checkpoint moves the AV2 QP path from one 64x64 tile per superblock to
+the adaptive coarse software tile layout already used by the fast lossless
+subsampled path. It also routes the lossy DC-delta TXB shortcut through the
+generic coefficient writers instead of hand-emitting a one-coefficient syntax
+subset. The DC writer change fixes reference decode for lossy Scene crops; the
+coarser tile layout fixes high-depth 1080p QP streams that previously
+desynchronized AVM while reducing tile overhead.
+
+The six-vector QP24 set improves from 51.78 MiB to 42.41 MiB. Total speed moves
+from 4.59 fps to 4.52 fps, and PSNR changes stay within 0.17 dB.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
+QP24 reference probe: 1-frame Scene/Mission 420/422/444 8/10-bit all pass
+QP24 50-frame metrics: local-aomctc-b2-scc-1080p-lossless-50f, PSNR by ffmpeg psnr filter
+```
+
+Lossy `qp=24` versus the direct-sample checkpoint:
+
+| Vector | Format | FF size | FF Mbps | FF fps | FF PSNR | Bytes delta | FPS delta | PSNR delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 3.34 MiB | 8.40 | 7.02 | 24.17 | -1,267,791 | +0.9% | -0.07 |
+| SceneComposition_1_422 | yuv422p8 | 3.64 MiB | 9.16 | 5.81 | 25.34 | -1,314,077 | -3.3% | -0.04 |
+| SceneComposition_1_444 | yuv444p8 | 4.06 MiB | 10.22 | 4.27 | 26.80 | -1,340,713 | -2.6% | -0.17 |
+| MissionControlClip1_420 | yuv420p10le | 9.93 MiB | 99.98 | 4.87 | 25.22 | -1,929,844 | +1.3% | -0.02 |
+| MissionControlClip1_422 | yuv422p10le | 10.45 MiB | 105.14 | 4.04 | 26.25 | -1,951,850 | -1.5% | -0.03 |
+| MissionControlClip1_444 | yuv444p10le | 11.00 MiB | 110.69 | 3.07 | 27.59 | -2,015,517 | -2.8% | -0.10 |
+| Total | mixed | 42.41 MiB | n/a | 4.52 | n/a | -9,819,792 | -1.6% | n/a |

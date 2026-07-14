@@ -412,6 +412,10 @@ impl Av2TileLayout {
         }
     }
 
+    fn lossy_subsampled_for_geometry(geometry: Av2VideoGeometry) -> Self {
+        Self::lossless_subsampled_fast_for_geometry(geometry)
+    }
+
     fn tile_count(&self) -> usize {
         self.regions.len()
     }
@@ -1791,7 +1795,7 @@ fn av2_lossy_subsampled_trace_jsonl_for_frame(
             frame.len()
         ));
     }
-    let tile_layout = Av2TileLayout::for_geometry(geometry);
+    let tile_layout = Av2TileLayout::lossy_subsampled_for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
     let sequence = av2_mvp_sequence_header_payload(geometry, profile, stream_format);
     let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
@@ -2462,7 +2466,7 @@ fn av2_lossy_subsampled_closed_loop_key_payload(
     reconstruction: &mut [u8],
     qp: u8,
 ) -> Av2SyntaxPayload {
-    let tile_layout = Av2TileLayout::for_geometry(geometry);
+    let tile_layout = Av2TileLayout::lossy_subsampled_for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
     let mut payload = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
     let tile_payloads: Vec<_> = tile_layout

@@ -815,17 +815,9 @@ fn write_y_dc_delta_txb(
     dc_sign_ctx: u8,
     delta: i16,
 ) -> u8 {
-    if delta == 0 {
-        write_y_txb_all_zero(writer, skip_ctx);
-        return 0;
-    }
-    let level = dc_delta_level(delta);
-    write_y_txb_nonzero(writer, skip_ctx);
-    write_eob_one_y(writer);
-    write_y_dc_level(writer, level);
-    write_y_dc_sign(writer, delta < 0, dc_sign_ctx);
-    write_y_dc_high_range(writer, level);
-    lossless_entropy_context(u32::from(level), i32::from(delta.signum()))
+    let coefficients = dc_delta_coefficients(delta);
+    let (context, _) = write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients);
+    context
 }
 
 fn write_u_black_dc_txb(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
@@ -872,35 +864,14 @@ fn write_chroma_dc_delta_txb(
     skip_ctx: u8,
     delta: i16,
 ) -> (u8, bool) {
-    if delta == 0 {
-        match plane {
-            Av2ChromaPlane::U => write_u_txb_all_zero(writer, skip_ctx, false),
-            Av2ChromaPlane::V => write_v_txb_all_zero(writer, skip_ctx),
-        }
-        return (0, false);
-    }
-
-    let level = dc_delta_level(delta);
-    match plane {
-        Av2ChromaPlane::U => write_u_txb_nonzero(writer, skip_ctx, false),
-        Av2ChromaPlane::V => write_v_txb_nonzero(writer, skip_ctx),
-    }
-    write_eob_one_uv(writer);
-    write_uv_dc_level(writer, level);
-    let sign_name = match plane {
-        Av2ChromaPlane::U => "tile.coeff.u.dc_sign_negative",
-        Av2ChromaPlane::V => "tile.coeff.v.dc_sign_negative",
-    };
-    writer.write_literal_bit(sign_name, delta < 0);
-    write_uv_dc_high_range(writer, level);
-    (
-        lossless_entropy_context(u32::from(level), i32::from(delta.signum())),
-        true,
-    )
+    let coefficients = dc_delta_coefficients(delta);
+    write_chroma_bdpcm_txb(writer, plane, skip_ctx, &coefficients, false)
 }
 
-fn dc_delta_level(delta: i16) -> u16 {
-    (i32::from(delta).unsigned_abs() as u16) * 4
+fn dc_delta_coefficients(delta: i16) -> [i32; TX4X4_SAMPLES] {
+    let mut coefficients = [0i32; TX4X4_SAMPLES];
+    coefficients[0] = i32::from(delta) * 32;
+    coefficients
 }
 
 fn luma_palette_tx4x4_coefficients(
