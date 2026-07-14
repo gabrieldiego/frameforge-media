@@ -161,6 +161,19 @@ make compare-compression CODEC=av2 \
   COMPRESSION_DIRECT_SOURCE_FILES=1
 ```
 
+For AV2 lossy QP comparisons, set `COMPRESSION_QP=<1..255>`. This forwards
+the dedicated `./ff encode --qp` option and treats manifest `lossless=true`
+rows as lossy FrameForge rows for that comparison run:
+
+```sh
+make compare-compression CODEC=av2 \
+  COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f \
+  COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom \
+  COMPRESSION_REFERENCE_PRESET=realtime-screen \
+  COMPRESSION_QP=24 \
+  COMPRESSION_DIRECT_SOURCE_FILES=1
+```
+
 For AV2 native reference comparisons, the Makefile defaults to
 `COMPRESSION_REFERENCE_PRESET=fast`, which keeps `--cpu-used=9` and adds AVM
 threading and low-latency speed options. Use

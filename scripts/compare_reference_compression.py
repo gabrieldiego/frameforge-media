@@ -45,6 +45,7 @@ class ComparisonResult:
     frameforge_fps: float
     frame_count: int
     lossless: bool
+    qp: int | None
     reference_cached: bool
     log: Path
 
@@ -69,6 +70,15 @@ def main() -> int:
         action="append",
         default=[],
         help="extra FrameForge --set key[=value] setting; repeat for multiple settings",
+    )
+    parser.add_argument(
+        "--qp",
+        type=parse_qp,
+        default=None,
+        help=(
+            "FrameForge AV2 lossy QP; when present, it overrides manifest "
+            "lossless=true rows for the FrameForge encode"
+        ),
     )
     parser.add_argument(
         "--reference-backend",
@@ -153,7 +163,7 @@ def main() -> int:
             "  mode={mode} baseline={backend} reference={cache} "
             "FrameForge={ff} byte(s), reference={ref} byte(s), "
             "ratio={ratio:.3f}x, encode={fps} fps".format(
-                mode="lossless" if result.lossless else "default",
+                mode=result_mode(result),
                 backend=args.reference_backend,
                 cache="cached" if result.reference_cached else "fresh",
                 ff=result.frameforge_bytes,
@@ -184,7 +194,7 @@ def main() -> int:
         total_frames += result.frame_count
         total_frameforge_seconds += result.frameforge_seconds
         delta = result.frameforge_bytes - result.reference_bytes
-        mode = "lossless" if result.lossless else "default"
+        mode = result_mode(result)
         cache = "cached" if result.reference_cached else "fresh"
         print(
             f"| {index} | {result.vector_name} | {mode} | {cache} | {result.frameforge_bytes} | "
@@ -289,6 +299,12 @@ def source_file_path(vector: generate_test_vectors.TestVector) -> Path:
     return (REPO_ROOT / path).resolve(strict=False)
 
 
+def effective_frameforge_lossless(
+    vector: generate_test_vectors.TestVector, args: argparse.Namespace
+) -> bool:
+    return vector.lossless and args.qp is None
+
+
 def run_case(
     vector: generate_test_vectors.TestVector,
     vector_path: Path,
@@ -298,6 +314,7 @@ def run_case(
     frameforge_output, reference_output, log = case_paths(Path(vector.filename).stem, args)
     if frameforge_output.exists():
         frameforge_output.unlink()
+    lossless = effective_frameforge_lossless(vector, args)
 
     frameforge_cmd = [
         str(args.ff),
@@ -316,10 +333,12 @@ def run_case(
             f"{args.codec}:{frameforge_output}",
         ]
     )
-    if vector.lossless:
+    if lossless:
         frameforge_cmd.extend(["--set", "lossless"])
     for setting in args.setting:
         frameforge_cmd.extend(["--set", setting])
+    if args.qp is not None:
+        frameforge_cmd.extend(["--qp", str(args.qp)])
     reference_cmd = reference_encode_command(
         vector,
         vector_path,
@@ -400,7 +419,8 @@ def run_case(
         frameforge_seconds=frameforge_seconds,
         frameforge_fps=frameforge_fps,
         frame_count=vector.frames,
-        lossless=vector.lossless,
+        lossless=lossless,
+        qp=args.qp,
         reference_cached=reference_cached,
         log=log,
     )
@@ -559,7 +579,7 @@ def reference_cache_metadata(
             "frames": vector.frames,
             "format": vector.fmt,
             "fps": vector.fps,
-            "lossless": vector.lossless,
+            "lossless": effective_frameforge_lossless(vector, args),
         },
     }
     if args.reference_backend != REFERENCE_BACKEND_NATIVE:
@@ -602,7 +622,7 @@ def rav1e_reference_encode_command(
     bit_depth, _chroma = av1_pixel_format(vector.fmt)
     if bit_depth not in {8, 10, 12}:
         raise SystemExit(f"unsupported rav1e reference encode pixel format: {vector.fmt}")
-    if vector.lossless:
+    if effective_frameforge_lossless(vector, args):
         raise SystemExit(
             "rav1e does not implement lossless encoding; use "
             "COMPRESSION_REFERENCE_BACKEND=reference for lossless manifests"
@@ -868,7 +888,7 @@ def av2_reference_encode_command(
         "--disable-warning-prompt",
     ]
     command.extend(avm_reference_preset_args(vector, args))
-    if vector.lossless:
+    if effective_frameforge_lossless(vector, args):
         command.append("--lossless=1")
     command.append(chroma_flag)
     command.extend(profile_args)
@@ -970,7 +990,7 @@ def vvc_reference_encode_command(
         "-c",
         str(VTM_CFG_DIR / "encoder_intra_vtm.cfg"),
     ]
-    if vector.lossless:
+    if effective_frameforge_lossless(vector, args):
         command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless.cfg")])
         if chroma_format == "444":
             command.extend(["-c", str(VTM_CFG_DIR / "lossless" / "lossless444.cfg")])
@@ -1035,6 +1055,28 @@ def parse_auto_int(value: str, field: str, min_value: int) -> int | None:
     if parsed < min_value:
         raise SystemExit(f"{field} expects auto or an integer >= {min_value}, got {parsed}")
     return parsed
+
+
+def parse_qp(value: str) -> int:
+    try:
+        qp = int(value, 10)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            f"QP expects an integer from 1 through 255, got '{value}'"
+        ) from err
+    if not (1 <= qp <= 255):
+        raise argparse.ArgumentTypeError(
+            f"QP expects an integer from 1 through 255, got '{value}'"
+        )
+    return qp
+
+
+def result_mode(result: ComparisonResult) -> str:
+    if result.lossless:
+        return "lossless"
+    if result.qp is not None:
+        return f"qp={result.qp}"
+    return "default"
 
 
 def run_logged(command: list[str]) -> subprocess.CompletedProcess[str]:
