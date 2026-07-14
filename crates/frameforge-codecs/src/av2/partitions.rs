@@ -146,7 +146,7 @@ fn luma_palette_partition_policy_allows_leaf(
         Av2PartitionPolicy::LosslessLeafLimit { max_size } => {
             block_size.width <= max_size && block_size.height <= max_size
         }
-        Av2PartitionPolicy::LosslessAdaptive32 | Av2PartitionPolicy::LosslessInterModes => false,
+        Av2PartitionPolicy::AdaptiveScreenContent | Av2PartitionPolicy::LosslessInterModes => false,
     }
 }
 

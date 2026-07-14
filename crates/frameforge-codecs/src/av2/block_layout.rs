@@ -463,7 +463,7 @@ struct Av2Black444TilePlan {
     luma_palette: bool,
     allow_intrabc: bool,
     max_ref_bv_count: usize,
-    lossless_partition_features: Option<Av2LosslessPartitionFeatures>,
+    adaptive_partition_features: Option<Av2AdaptivePartitionFeatures>,
     inter_partition_modes: Option<Av2LosslessInterTileBlockModes>,
 }
 
@@ -473,12 +473,12 @@ enum Av2PartitionPolicy {
     Fixed8x8Leaves,
     LargestLosslessLeaves,
     LosslessLeafLimit { max_size: usize },
-    LosslessAdaptive32,
+    AdaptiveScreenContent,
     LosslessInterModes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Av2LosslessPartitionFeatures {
+struct Av2AdaptivePartitionFeatures {
     simple_leaves: Vec<bool>,
     cols: usize,
     leaf_size: usize,
@@ -486,7 +486,7 @@ struct Av2LosslessPartitionFeatures {
     forced_micro_cols: usize,
 }
 
-impl Av2LosslessPartitionFeatures {
+impl Av2AdaptivePartitionFeatures {
     fn base_leaf_size(
         &self,
         row_mi: usize,
@@ -496,7 +496,7 @@ impl Av2LosslessPartitionFeatures {
         if self.requires_micro_leaf(row_mi, col_mi, block_size) {
             MVP_LEAF_BLOCK_SIZE
         } else {
-            AV2_LOSSLESS_BASE_LEAF_SIZE
+            AV2_SCREEN_ADAPTIVE_BASE_LEAF_SIZE
         }
     }
 
@@ -546,8 +546,8 @@ impl Av2LosslessPartitionFeatures {
         if self.requires_micro_leaf(row_mi, col_mi, block_size) {
             return false;
         }
-        if block_size.width <= AV2_LOSSLESS_BASE_LEAF_SIZE
-            && block_size.height <= AV2_LOSSLESS_BASE_LEAF_SIZE
+        if block_size.width <= AV2_SCREEN_ADAPTIVE_BASE_LEAF_SIZE
+            && block_size.height <= AV2_SCREEN_ADAPTIVE_BASE_LEAF_SIZE
         {
             return true;
         }

@@ -235,13 +235,18 @@ pub(crate) fn av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields(
     qp: u8,
     record_fields: bool,
 ) -> Av2EntropyPayload {
-    let plan = Av2Black444TilePlan::for_region(
+    let adaptive_partition_features =
+        adaptive_partition_features_for_source(region, geometry, bit_depth, source, false);
+    let plan = Av2Black444TilePlan::for_region_with_partition_policy_and_features(
         region,
         profile,
         chroma_format,
+        Av2PartitionPolicy::AdaptiveScreenContent,
         false,
         false,
         None,
+        None,
+        Some(adaptive_partition_features),
         None,
     );
     let mut writer =
@@ -288,7 +293,7 @@ pub(crate) fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_field
             if ibc.is_some() {
                 Av2PartitionPolicy::Fixed8x8Leaves
             } else {
-                Av2PartitionPolicy::LosslessAdaptive32
+                Av2PartitionPolicy::AdaptiveScreenContent
             },
             Av2LosslessSubsampledModeSearch::FastScreenContent,
             ibc,
@@ -359,7 +364,7 @@ pub(crate) fn av2_lossless_subsampled_fast_tile_entropy_payload_for_region_with_
         source,
         &mut scratch_recon,
         palette,
-        Av2PartitionPolicy::LosslessAdaptive32,
+        Av2PartitionPolicy::AdaptiveScreenContent,
         Av2LosslessSubsampledModeSearch::FastScreenContent,
         None,
         record_fields,
@@ -471,7 +476,7 @@ pub(crate) fn av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_f
         source,
         recon,
         palette,
-        Av2PartitionPolicy::LosslessAdaptive32,
+        Av2PartitionPolicy::AdaptiveScreenContent,
         Av2LosslessSubsampledModeSearch::FastScreenContent,
         None,
         record_fields,
@@ -587,38 +592,36 @@ impl Av2LosslessInterTileBlockModes {
 }
 
 const AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS: usize = 128 * 128;
-const AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE: usize = 64;
-const AV2_LOSSLESS_BASE_LEAF_SIZE: usize = 16;
-const AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP: usize = 4;
-const AV2_LOSSLESS_ADAPTIVE_UNIQUE_LIMIT: usize = 8;
-const AV2_LOSSLESS_ADAPTIVE_GRADIENT_UNIQUE_LIMIT: usize = 16;
-const AV2_LOSSLESS_ADAPTIVE_GRADIENT_Q8_LIMIT: u64 = 192;
-const AV2_LOSSLESS_ADAPTIVE_RANGE_LIMIT: u16 = 8;
+const AV2_SCREEN_ADAPTIVE_LEAF_SIZE: usize = 64;
+const AV2_SCREEN_ADAPTIVE_BASE_LEAF_SIZE: usize = 16;
+const AV2_SCREEN_ADAPTIVE_SAMPLE_STEP: usize = 4;
+const AV2_SCREEN_ADAPTIVE_UNIQUE_LIMIT: usize = 8;
+const AV2_SCREEN_ADAPTIVE_GRADIENT_UNIQUE_LIMIT: usize = 16;
+const AV2_SCREEN_ADAPTIVE_GRADIENT_Q8_LIMIT: u64 = 192;
+const AV2_SCREEN_ADAPTIVE_RANGE_LIMIT: u16 = 8;
 const AV2_LOSSLESS_PALETTE_PARTITION_UNIQUE_LIMIT: usize = 4;
 
 fn use_fast_lossless_subsampled_path(region: Av2TileRegion) -> bool {
     region.width * region.height >= AV2_FAST_LOSSLESS_SUBSAMPLED_MIN_PIXELS
 }
 
-fn lossless_partition_features_for_source(
+fn adaptive_partition_features_for_source(
     region: Av2TileRegion,
     geometry: Av2VideoGeometry,
     bit_depth: SampleBitDepth,
     source: &[u8],
     palette_enabled: bool,
-) -> Av2LosslessPartitionFeatures {
-    let cols = region.width.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-    let rows = region.height.div_ceil(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+) -> Av2AdaptivePartitionFeatures {
+    let cols = region.width.div_ceil(AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
+    let rows = region.height.div_ceil(AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
     let mut simple_leaves = Vec::with_capacity(cols * rows);
     for row in 0..rows {
-        let y0 = region.origin_y + row * AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE;
-        let height =
-            (region.origin_y + region.height - y0).min(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+        let y0 = region.origin_y + row * AV2_SCREEN_ADAPTIVE_LEAF_SIZE;
+        let height = (region.origin_y + region.height - y0).min(AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
         for col in 0..cols {
-            let x0 = region.origin_x + col * AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE;
-            let width =
-                (region.origin_x + region.width - x0).min(AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-            simple_leaves.push(lossless_luma_region_is_simple_for_adaptive_leaf(
+            let x0 = region.origin_x + col * AV2_SCREEN_ADAPTIVE_LEAF_SIZE;
+            let width = (region.origin_x + region.width - x0).min(AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
+            simple_leaves.push(luma_region_is_simple_for_adaptive_leaf(
                 geometry, bit_depth, source, x0, y0, width, height,
             ));
         }
@@ -638,10 +641,10 @@ fn lossless_partition_features_for_source(
             }
         }
     }
-    Av2LosslessPartitionFeatures {
+    Av2AdaptivePartitionFeatures {
         simple_leaves,
         cols,
-        leaf_size: AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE,
+        leaf_size: AV2_SCREEN_ADAPTIVE_LEAF_SIZE,
         forced_micro_blocks,
         forced_micro_cols,
     }
@@ -672,7 +675,7 @@ fn lossless_luma_8x8_is_palette_worthy(
     (2..=AV2_LOSSLESS_PALETTE_PARTITION_UNIQUE_LIMIT).contains(&unique)
 }
 
-fn lossless_luma_region_is_simple_for_adaptive_leaf(
+fn luma_region_is_simple_for_adaptive_leaf(
     geometry: Av2VideoGeometry,
     bit_depth: SampleBitDepth,
     source: &[u8],
@@ -681,8 +684,8 @@ fn lossless_luma_region_is_simple_for_adaptive_leaf(
     width: usize,
     height: usize,
 ) -> bool {
-    debug_assert!(width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
-    debug_assert!(height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE);
+    debug_assert!(width <= AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
+    debug_assert!(height <= AV2_SCREEN_ADAPTIVE_LEAF_SIZE);
     let normalize_shift = bit_depth.bits().saturating_sub(8);
     let mut seen = [false; 256];
     let mut unique = 0usize;
@@ -690,14 +693,14 @@ fn lossless_luma_region_is_simple_for_adaptive_leaf(
     let mut max_sample = 0u16;
     let mut gradient_sum = 0u64;
     let mut gradient_edges = 0u64;
-    let mut above = [0u16; AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE / AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP];
+    let mut above = [0u16; AV2_SCREEN_ADAPTIVE_LEAF_SIZE / AV2_SCREEN_ADAPTIVE_SAMPLE_STEP];
     for (sample_row, y) in (y0..(y0 + height))
-        .step_by(AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP)
+        .step_by(AV2_SCREEN_ADAPTIVE_SAMPLE_STEP)
         .enumerate()
     {
         let mut prev = None;
         for (sample_col, x) in (x0..(x0 + width))
-            .step_by(AV2_LOSSLESS_ADAPTIVE_SAMPLE_STEP)
+            .step_by(AV2_SCREEN_ADAPTIVE_SAMPLE_STEP)
             .enumerate()
         {
             let sample = read_validated_planar_sample(
@@ -731,19 +734,19 @@ fn lossless_luma_region_is_simple_for_adaptive_leaf(
     } else {
         (gradient_sum * 256) / gradient_edges
     };
-    unique <= AV2_LOSSLESS_ADAPTIVE_UNIQUE_LIMIT
-        || range <= AV2_LOSSLESS_ADAPTIVE_RANGE_LIMIT
-        || (unique <= AV2_LOSSLESS_ADAPTIVE_GRADIENT_UNIQUE_LIMIT
-            && gradient_q8 <= AV2_LOSSLESS_ADAPTIVE_GRADIENT_Q8_LIMIT)
+    unique <= AV2_SCREEN_ADAPTIVE_UNIQUE_LIMIT
+        || range <= AV2_SCREEN_ADAPTIVE_RANGE_LIMIT
+        || (unique <= AV2_SCREEN_ADAPTIVE_GRADIENT_UNIQUE_LIMIT
+            && gradient_q8 <= AV2_SCREEN_ADAPTIVE_GRADIENT_Q8_LIMIT)
 }
 
-fn choose_lossless_adaptive_32_partition(
+fn choose_adaptive_screen_content_partition(
     row_mi: usize,
     col_mi: usize,
     block_size: Av2MvpBlockSize,
     visible_rows_mi: usize,
     visible_cols_mi: usize,
-    features: &Av2LosslessPartitionFeatures,
+    features: &Av2AdaptivePartitionFeatures,
 ) -> Av2MvpPartition {
     if !block_size.is_partition_point() {
         return Av2MvpPartition::None;
@@ -761,8 +764,8 @@ fn choose_lossless_adaptive_32_partition(
         return only_allowed;
     }
     if allowed.none
-        && block_size.width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
-        && block_size.height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+        && block_size.width <= AV2_SCREEN_ADAPTIVE_LEAF_SIZE
+        && block_size.height <= AV2_SCREEN_ADAPTIVE_LEAF_SIZE
         && features.allows_larger_leaf(row_mi, col_mi, block_size)
     {
         return Av2MvpPartition::None;
@@ -775,12 +778,12 @@ fn choose_lossless_adaptive_32_partition(
         return Av2MvpPartition::None;
     }
 
-    let max_size = if block_size.width <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
-        && block_size.height <= AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+    let max_size = if block_size.width <= AV2_SCREEN_ADAPTIVE_LEAF_SIZE
+        && block_size.height <= AV2_SCREEN_ADAPTIVE_LEAF_SIZE
     {
         base_leaf_size
     } else {
-        AV2_LOSSLESS_ADAPTIVE_LEAF_SIZE
+        AV2_SCREEN_ADAPTIVE_LEAF_SIZE
     };
 
     if block_size.width == block_size.height {
@@ -944,9 +947,9 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
     copy_fast_recon: bool,
     regular_inter_frame: bool,
 ) -> Av2EntropyPayload {
-    let lossless_partition_features = (partition_policy == Av2PartitionPolicy::LosslessAdaptive32)
+    let adaptive_partition_features = (partition_policy == Av2PartitionPolicy::AdaptiveScreenContent)
         .then(|| {
-            lossless_partition_features_for_source(
+            adaptive_partition_features_for_source(
                 region,
                 geometry,
                 bit_depth,
@@ -963,7 +966,7 @@ fn av2_lossless_subsampled_tile_entropy_payload_for_region_with_policy(
         ibc.is_some(),
         ibc,
         None,
-        lossless_partition_features,
+        adaptive_partition_features,
         None,
     );
     let mut writer =
@@ -1061,7 +1064,7 @@ impl Av2Black444TilePlan {
         allow_intrabc: bool,
         ibc: Option<&Av2LocalIbc444>,
         palette: Option<&Av2LumaPalette444>,
-        lossless_partition_features: Option<Av2LosslessPartitionFeatures>,
+        adaptive_partition_features: Option<Av2AdaptivePartitionFeatures>,
         inter_partition_modes: Option<Av2LosslessInterTileBlockModes>,
     ) -> Self {
         assert!(
@@ -1092,7 +1095,7 @@ impl Av2Black444TilePlan {
             luma_palette,
             allow_intrabc,
             max_ref_bv_count,
-            lossless_partition_features,
+            adaptive_partition_features,
             inter_partition_modes,
         };
         let mut partition_context = Av2PartitionContext::new(visible_rows_mi, visible_cols_mi);
@@ -1160,15 +1163,15 @@ impl Av2Black444TilePlan {
                         max_size,
                     )
                 }
-                Av2PartitionPolicy::LosslessAdaptive32 => choose_lossless_adaptive_32_partition(
+                Av2PartitionPolicy::AdaptiveScreenContent => choose_adaptive_screen_content_partition(
                     row_mi,
                     col_mi,
                     block_size,
                     visible_rows_mi,
                     visible_cols_mi,
-                    self.lossless_partition_features
+                    self.adaptive_partition_features
                         .as_ref()
-                        .expect("adaptive lossless partitioning needs source features"),
+                        .expect("adaptive partitioning needs source features"),
                 ),
                 Av2PartitionPolicy::LosslessInterModes => choose_lossless_inter_partition(
                     row_mi,
