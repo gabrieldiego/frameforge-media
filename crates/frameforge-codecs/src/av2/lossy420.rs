@@ -78,6 +78,15 @@ struct Av2LossySubsampledTileState<'a> {
     qp: u8,
 }
 
+#[derive(Clone, Copy)]
+struct Av2LossyLeafPredictorContext<'a> {
+    leaf_x0: usize,
+    leaf_y0: usize,
+    leaf_width: usize,
+    leaf_height: usize,
+    coded_mi_context: &'a Av2CodedMiContext,
+}
+
 impl<'a> Av2LossySubsampledTileState<'a> {
     fn new(
         geometry: Av2VideoGeometry,
@@ -134,6 +143,21 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 self.region.origin_y / chroma_subsample_y(self.chroma_format),
             ),
         }
+    }
+
+    fn plane_subsampling(&self, plane: Av2LossyPlane) -> (usize, usize) {
+        match plane {
+            Av2LossyPlane::Y => (1, 1),
+            Av2LossyPlane::U | Av2LossyPlane::V => (
+                chroma_subsample_x(self.chroma_format),
+                chroma_subsample_y(self.chroma_format),
+            ),
+        }
+    }
+
+    fn coded_mi_for_plane_sample(&self, plane: Av2LossyPlane, x: usize, y: usize) -> (usize, usize) {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        ((y * sub_y) / MI_SIZE, (x * sub_x) / MI_SIZE)
     }
 
     fn txb_origin(&self, plane: Av2LossyPlane, col: usize, row: usize) -> (usize, usize) {
@@ -235,6 +259,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         x0: usize,
         y0: usize,
         mode: Av2LossySubsampledModeDecision,
+        context: Av2LossyLeafPredictorContext<'_>,
     ) -> Av2LossyTxbAnalysis {
         let mut source = [0; TX4X4_SAMPLES];
         let mut predictor = [0; TX4X4_SAMPLES];
@@ -272,6 +297,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         } else {
             0
         };
+        let smooth_edges = matches!(
+            predictor_mode,
+            Av2ChromaIntraMode::Smooth
+                | Av2ChromaIntraMode::SmoothVertical
+                | Av2ChromaIntraMode::SmoothHorizontal
+        )
+        .then(|| self.smooth_edges(plane, x0, y0, context));
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let index = local_y * TX4X4_SIZE + local_x;
@@ -282,7 +314,29 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                     Av2ChromaIntraMode::Paeth => {
                         paeth_predictor(h_pred[local_y], v_pred[local_x], above_left)
                     }
-                    _ => unreachable!("AV2 lossy mode search selects DC, H, V, or Paeth"),
+                    Av2ChromaIntraMode::Smooth
+                    | Av2ChromaIntraMode::SmoothVertical
+                    | Av2ChromaIntraMode::SmoothHorizontal => {
+                        let (above, left) =
+                            smooth_edges.expect("smooth edges are precomputed");
+                        let (smooth, smooth_v, smooth_h) =
+                            av2_highbd_smooth_intra_predictor_set(
+                                above,
+                                left,
+                                local_x,
+                                local_y,
+                                self.bit_depth,
+                            );
+                        match predictor_mode {
+                            Av2ChromaIntraMode::Smooth => smooth,
+                            Av2ChromaIntraMode::SmoothVertical => smooth_v,
+                            Av2ChromaIntraMode::SmoothHorizontal => smooth_h,
+                            _ => unreachable!("smooth predictor branch only handles smooth modes"),
+                        }
+                    }
+                    _ => unreachable!(
+                        "AV2 lossy mode search selects DC, H, V, Paeth, or smooth"
+                    ),
                 };
                 let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
                 let diff = i32::from(source_sample) - i32::from(predictor_sample);
@@ -410,6 +464,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         decision: Av2TileDecision,
         visible_rows_mi: usize,
         visible_cols_mi: usize,
+        coded_mi_context: &Av2CodedMiContext,
     ) -> Av2LossySubsampledModeDecision {
         let txb_width = decision
             .block_size
@@ -423,6 +478,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             self.txb_origin(Av2LossyPlane::Y, decision.col, decision.row);
         let luma_leaf_width = txb_width * TX4X4_SIZE;
         let luma_leaf_height = txb_height * TX4X4_SIZE;
+        let luma_context = Av2LossyLeafPredictorContext {
+            leaf_x0: luma_leaf_x0,
+            leaf_y0: luma_leaf_y0,
+            leaf_width: luma_leaf_width,
+            leaf_height: luma_leaf_height,
+            coded_mi_context,
+        };
         let mut mode = Av2LossySubsampledModeDecision::default();
         let mut luma_scores = Av2LossyIntraTxbScores::default();
         let mut luma_sampled_txbs = 0usize;
@@ -433,14 +495,11 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 }
                 let (x0, y0) =
                     self.txb_origin(Av2LossyPlane::Y, decision.col + col, decision.row + row);
-                luma_scores.add_assign(self.dc_h_v_txb_scores_for_score(
+                luma_scores.add_assign(self.intra_txb_scores_for_score(
                     Av2LossyPlane::Y,
                     x0,
                     y0,
-                    luma_leaf_x0,
-                    luma_leaf_y0,
-                    luma_leaf_width,
-                    luma_leaf_height,
+                    luma_context,
                     Av2CoefficientProxyKind::LumaTransform,
                     true,
                 ));
@@ -448,6 +507,32 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             }
         }
         luma_scores = luma_scores.scaled_to_txb_count(txb_width * txb_height, luma_sampled_txbs);
+        let luma_smooth_scores = lossy_luma_smooth_search_allowed(luma_scores, txb_width * txb_height)
+            .then(|| {
+                let mut smooth_scores = Av2LossyIntraTxbScores::default();
+                let mut sampled_txbs = 0usize;
+                for row in 0..txb_height {
+                    for col in 0..txb_width {
+                        if !lossy_mode_search_samples_txb(row, col, txb_width, txb_height) {
+                            continue;
+                        }
+                        let (x0, y0) = self.txb_origin(
+                            Av2LossyPlane::Y,
+                            decision.col + col,
+                            decision.row + row,
+                        );
+                        smooth_scores.add_assign(self.smooth_txb_scores_for_score(
+                            Av2LossyPlane::Y,
+                            x0,
+                            y0,
+                            luma_context,
+                            Av2CoefficientProxyKind::LumaTransform,
+                        ));
+                        sampled_txbs += 1;
+                    }
+                }
+                smooth_scores.scaled_to_txb_count(txb_width * txb_height, sampled_txbs)
+            });
         let mut best_luma = (mode.luma_intra_mode, usize::MAX);
         for (luma_intra_mode, syntax_penalty) in [
             (Av2LumaIntraMode::Dc, 0usize),
@@ -460,10 +545,30 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 Av2LumaIntraMode::Horizontal => luma_scores.horizontal,
                 Av2LumaIntraMode::Vertical => luma_scores.vertical,
                 Av2LumaIntraMode::Paeth => luma_scores.paeth,
-                _ => unreachable!("AV2 lossy luma mode search scores only DC, H, V, and Paeth"),
+                _ => unreachable!(
+                    "AV2 lossy luma mode search scores only DC, H, V, Paeth, and smooth"
+                ),
             } + syntax_penalty;
             if score < best_luma.1 {
                 best_luma = (luma_intra_mode, score);
+            }
+        }
+        if let Some(smooth_scores) = luma_smooth_scores {
+            for (luma_intra_mode, score) in [
+                (Av2LumaIntraMode::Smooth, smooth_scores.smooth),
+                (
+                    Av2LumaIntraMode::SmoothVertical,
+                    smooth_scores.smooth_vertical,
+                ),
+                (
+                    Av2LumaIntraMode::SmoothHorizontal,
+                    smooth_scores.smooth_horizontal,
+                ),
+            ] {
+                let score = score + 192usize;
+                if score < best_luma.1 {
+                    best_luma = (luma_intra_mode, score);
+                }
             }
         }
         mode.luma_intra_mode = best_luma.0;
@@ -493,14 +598,18 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                     }
                     let (x0, y0) =
                         self.txb_origin(plane, chroma_span.col + col, chroma_span.row + row);
-                    chroma_scores.add_assign(self.dc_h_v_txb_scores_for_score(
+                    let chroma_context = Av2LossyLeafPredictorContext {
+                        leaf_x0: chroma_leaf_x0,
+                        leaf_y0: chroma_leaf_y0,
+                        leaf_width: chroma_leaf_width,
+                        leaf_height: chroma_leaf_height,
+                        coded_mi_context,
+                    };
+                    chroma_scores.add_assign(self.intra_txb_scores_for_score(
                         plane,
                         x0,
                         y0,
-                        chroma_leaf_x0,
-                        chroma_leaf_y0,
-                        chroma_leaf_width,
-                        chroma_leaf_height,
+                        chroma_context,
                         Av2CoefficientProxyKind::ChromaTransform,
                         false,
                     ));
@@ -532,71 +641,36 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         mode
     }
 
-    fn dc_h_v_txb_scores_for_score(
+    fn intra_txb_scores_for_score(
         &self,
         plane: Av2LossyPlane,
         x0: usize,
         y0: usize,
-        leaf_x0: usize,
-        leaf_y0: usize,
-        leaf_width: usize,
-        leaf_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
         kind: Av2CoefficientProxyKind,
         score_paeth: bool,
     ) -> Av2LossyIntraTxbScores {
         let mut source = [0; TX4X4_SAMPLES];
-        let dc = i32::from(self.dc_predictor_for_score(
-            plane,
-            x0,
-            y0,
-            leaf_x0,
-            leaf_y0,
-            leaf_width,
-            leaf_height,
-        ));
+        let dc = i32::from(self.dc_predictor_for_score(plane, x0, y0, context));
         let mut h_pred = [0; TX4X4_SIZE];
         let mut v_pred = [0; TX4X4_SIZE];
         for index in 0..TX4X4_SIZE {
-            h_pred[index] = self.h_predictor_for_score(
-                plane,
-                x0,
-                y0,
-                index,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            );
-            v_pred[index] = self.v_predictor_for_score(
-                plane,
-                x0,
-                y0,
-                index,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            );
+            h_pred[index] = self.h_predictor_for_score(plane, x0, y0, index, context);
+            v_pred[index] = self.v_predictor_for_score(plane, x0, y0, index, context);
         }
         let above_left = if score_paeth {
-            self.above_left_predictor_for_score(
-                plane,
-                x0,
-                y0,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.above_left_predictor_for_score(plane, x0, y0, context)
         } else {
             0
         };
-
         let mut scores = Av2LossyIntraTxbScores {
             dc: 16,
             horizontal: 16,
             vertical: 16,
             paeth: 16,
+            smooth: 0,
+            smooth_vertical: 0,
+            smooth_horizontal: 0,
         };
         let mut dc_sum = 0i32;
         let mut horizontal_sum = 0i32;
@@ -658,7 +732,6 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         } else {
             0
         };
-
         let mut dc_sse = 0usize;
         let mut horizontal_sse = 0usize;
         let mut vertical_sse = 0usize;
@@ -698,15 +771,122 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         scores
     }
 
+    fn smooth_txb_scores_for_score(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+        kind: Av2CoefficientProxyKind,
+    ) -> Av2LossyIntraTxbScores {
+        let (smooth_above, smooth_left) = self.smooth_edges_for_score(plane, x0, y0, context);
+        let mut source = [0; TX4X4_SAMPLES];
+        let mut smooth_pred = [0; TX4X4_SAMPLES];
+        let mut smooth_vertical_pred = [0; TX4X4_SAMPLES];
+        let mut smooth_horizontal_pred = [0; TX4X4_SAMPLES];
+        let mut scores = Av2LossyIntraTxbScores {
+            dc: 0,
+            horizontal: 0,
+            vertical: 0,
+            paeth: 0,
+            smooth: 16,
+            smooth_vertical: 16,
+            smooth_horizontal: 16,
+        };
+        let mut smooth_sum = 0i32;
+        let mut smooth_vertical_sum = 0i32;
+        let mut smooth_horizontal_sum = 0i32;
+        let magnitude_scale = residual_sample_proxy_magnitude_scale(kind);
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let index = local_y * TX4X4_SIZE + local_x;
+                let sample = i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
+                source[index] = sample as Av2Sample;
+                let (smooth, smooth_v, smooth_h) = av2_highbd_smooth_intra_predictor_set(
+                    smooth_above,
+                    smooth_left,
+                    local_x,
+                    local_y,
+                    self.bit_depth,
+                );
+                smooth_pred[index] = smooth;
+                smooth_vertical_pred[index] = smooth_v;
+                smooth_horizontal_pred[index] = smooth_h;
+                let smooth_diff = sample - i32::from(smooth);
+                let smooth_vertical_diff = sample - i32::from(smooth_v);
+                let smooth_horizontal_diff = sample - i32::from(smooth_h);
+                smooth_sum += smooth_diff;
+                smooth_vertical_sum += smooth_vertical_diff;
+                smooth_horizontal_sum += smooth_horizontal_diff;
+                add_residual_sample_proxy_score(&mut scores.smooth, smooth_diff, magnitude_scale);
+                add_residual_sample_proxy_score(
+                    &mut scores.smooth_vertical,
+                    smooth_vertical_diff,
+                    magnitude_scale,
+                );
+                add_residual_sample_proxy_score(
+                    &mut scores.smooth_horizontal,
+                    smooth_horizontal_diff,
+                    magnitude_scale,
+                );
+            }
+        }
+
+        let max_delta = i32::from(self.bit_depth.max_sample());
+        let smooth_delta = quantize_i32_to_step(
+            round_div_i32(smooth_sum, TX4X4_SAMPLES as i32),
+            self.quant_step(),
+        )
+        .clamp(-max_delta, max_delta);
+        let smooth_vertical_delta = quantize_i32_to_step(
+            round_div_i32(smooth_vertical_sum, TX4X4_SAMPLES as i32),
+            self.quant_step(),
+        )
+        .clamp(-max_delta, max_delta);
+        let smooth_horizontal_delta = quantize_i32_to_step(
+            round_div_i32(smooth_horizontal_sum, TX4X4_SAMPLES as i32),
+            self.quant_step(),
+        )
+        .clamp(-max_delta, max_delta);
+
+        let mut smooth_sse = 0usize;
+        let mut smooth_vertical_sse = 0usize;
+        let mut smooth_horizontal_sse = 0usize;
+        let max_sample = i32::from(self.bit_depth.max_sample());
+        for index in 0..TX4X4_SAMPLES {
+            let source = i32::from(source[index]);
+            let smooth_recon = (i32::from(smooth_pred[index]) + smooth_delta).clamp(0, max_sample);
+            let smooth_vertical_recon =
+                (i32::from(smooth_vertical_pred[index]) + smooth_vertical_delta)
+                    .clamp(0, max_sample);
+            let smooth_horizontal_recon =
+                (i32::from(smooth_horizontal_pred[index]) + smooth_horizontal_delta)
+                    .clamp(0, max_sample);
+            smooth_sse += (source - smooth_recon).unsigned_abs() as usize
+                * (source - smooth_recon).unsigned_abs() as usize;
+            smooth_vertical_sse += (source - smooth_vertical_recon).unsigned_abs() as usize
+                * (source - smooth_vertical_recon).unsigned_abs() as usize;
+            smooth_horizontal_sse += (source - smooth_horizontal_recon).unsigned_abs() as usize
+                * (source - smooth_horizontal_recon).unsigned_abs() as usize;
+        }
+
+        scores.smooth = lossy_txb_score(scores.smooth, smooth_sse, self.quant_step());
+        scores.smooth_vertical =
+            lossy_txb_score(scores.smooth_vertical, smooth_vertical_sse, self.quant_step());
+        scores.smooth_horizontal = lossy_txb_score(
+            scores.smooth_horizontal,
+            smooth_horizontal_sse,
+            self.quant_step(),
+        );
+        scores
+    }
+
     fn dc_predictor_for_score(
         &self,
         plane: Av2LossyPlane,
         x0: usize,
         y0: usize,
-        leaf_x0: usize,
-        leaf_y0: usize,
-        leaf_width: usize,
-        leaf_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
     ) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         let have_left = x0 > tile_origin_x;
@@ -719,17 +899,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         let mut count = 0u32;
         if have_top {
             for x in x0..(x0 + TX4X4_SIZE) {
-                sum += u32::from(
-                    self.neighbor_sample_for_score(plane, x, y0 - 1, leaf_x0, leaf_y0, leaf_width, leaf_height),
-                );
+                sum += u32::from(self.neighbor_sample_for_score(plane, x, y0 - 1, context));
                 count += 1;
             }
         }
         if have_left {
             for y in y0..(y0 + TX4X4_SIZE) {
-                sum += u32::from(
-                    self.neighbor_sample_for_score(plane, x0 - 1, y, leaf_x0, leaf_y0, leaf_width, leaf_height),
-                );
+                sum += u32::from(self.neighbor_sample_for_score(plane, x0 - 1, y, context));
                 count += 1;
             }
         }
@@ -742,32 +918,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         x0: usize,
         y0: usize,
         local_y: usize,
-        leaf_x0: usize,
-        leaf_y0: usize,
-        leaf_width: usize,
-        leaf_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
     ) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         if x0 > tile_origin_x {
-            self.neighbor_sample_for_score(
-                plane,
-                x0 - 1,
-                y0 + local_y,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0 - 1, y0 + local_y, context)
         } else if y0 > tile_origin_y {
-            self.neighbor_sample_for_score(
-                plane,
-                x0,
-                y0 - 1,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0, y0 - 1, context)
         } else {
             av2_lossless_h_pred_left_edge(self.bit_depth)
         }
@@ -779,32 +936,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         x0: usize,
         y0: usize,
         local_x: usize,
-        leaf_x0: usize,
-        leaf_y0: usize,
-        leaf_width: usize,
-        leaf_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
     ) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         if y0 > tile_origin_y {
-            self.neighbor_sample_for_score(
-                plane,
-                x0 + local_x,
-                y0 - 1,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0 + local_x, y0 - 1, context)
         } else if x0 > tile_origin_x {
-            self.neighbor_sample_for_score(
-                plane,
-                x0 - 1,
-                y0,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0 - 1, y0, context)
         } else {
             av2_lossless_v_pred_above_edge(self.bit_depth)
         }
@@ -815,47 +953,122 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         plane: Av2LossyPlane,
         x0: usize,
         y0: usize,
-        leaf_x0: usize,
-        leaf_y0: usize,
-        leaf_width: usize,
-        leaf_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
     ) -> Av2Sample {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         let have_left = x0 > tile_origin_x;
         let have_top = y0 > tile_origin_y;
         if have_left && have_top {
-            self.neighbor_sample_for_score(
-                plane,
-                x0 - 1,
-                y0 - 1,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0 - 1, y0 - 1, context)
         } else if have_top {
-            self.neighbor_sample_for_score(
-                plane,
-                x0,
-                y0 - 1,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0, y0 - 1, context)
         } else if have_left {
-            self.neighbor_sample_for_score(
-                plane,
-                x0 - 1,
-                y0,
-                leaf_x0,
-                leaf_y0,
-                leaf_width,
-                leaf_height,
-            )
+            self.neighbor_sample_for_score(plane, x0 - 1, y0, context)
         } else {
             av2_lossless_dc_predictor(self.bit_depth)
         }
+    }
+
+    fn smooth_edges(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+    ) -> ([Av2Sample; TX4X4_SIZE + 1], [Av2Sample; TX4X4_SIZE + 1]) {
+        let edge_sample = |plane, x, y| self.recon_sample(plane, x, y);
+        self.smooth_edges_with(plane, x0, y0, context, &edge_sample)
+    }
+
+    fn smooth_edges_for_score(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+    ) -> ([Av2Sample; TX4X4_SIZE + 1], [Av2Sample; TX4X4_SIZE + 1]) {
+        let edge_sample = |plane, x, y| self.neighbor_sample_for_score(plane, x, y, context);
+        self.smooth_edges_with(plane, x0, y0, context, &edge_sample)
+    }
+
+    fn smooth_edges_with<EdgeSample>(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+        edge_sample: &EdgeSample,
+    ) -> ([Av2Sample; TX4X4_SIZE + 1], [Av2Sample; TX4X4_SIZE + 1])
+    where
+        EdgeSample: Fn(Av2LossyPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); TX4X4_SIZE + 1];
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); TX4X4_SIZE + 1];
+
+        if have_top {
+            for local_x in 0..TX4X4_SIZE {
+                above[local_x] = edge_sample(plane, x0 + local_x, y0 - 1);
+            }
+        } else if have_left {
+            above[..TX4X4_SIZE].fill(edge_sample(plane, x0 - 1, y0));
+        }
+
+        if have_left {
+            for local_y in 0..TX4X4_SIZE {
+                left[local_y] = edge_sample(plane, x0 - 1, y0 + local_y);
+            }
+        } else if have_top {
+            left[..TX4X4_SIZE].fill(edge_sample(plane, x0, y0 - 1));
+        }
+
+        let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+        let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+        let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+        let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+        let top_right_x = x0 + TX4X4_SIZE;
+        let superblock_top_row = y0 % plane_sb_height == 0;
+        let external_top_right_coded =
+            have_top && y0 == context.leaf_y0 && top_right_x < plane_width && {
+                let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, top_right_x, y0 - 1);
+                superblock_top_row
+                    || (top_right_x < sb_right && context.coded_mi_context.is_coded(row_mi, col_mi))
+            };
+        if have_top
+            && top_right_x < plane_width
+            && (top_right_x < context.leaf_x0 + context.leaf_width || external_top_right_coded)
+        {
+            above[TX4X4_SIZE] = edge_sample(plane, top_right_x, y0 - 1);
+        } else {
+            above[TX4X4_SIZE] = above[TX4X4_SIZE - 1];
+        }
+
+        let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+        let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+        let bottom_left_y = y0 + TX4X4_SIZE;
+        let superblock_left_col = x0 % plane_sb_width == 0;
+        let external_bottom_left_coded =
+            have_left && x0 == context.leaf_x0 && bottom_left_y < sb_bottom && {
+                let (row_mi, col_mi) =
+                    self.coded_mi_for_plane_sample(plane, x0 - 1, bottom_left_y);
+                superblock_left_col || context.coded_mi_context.is_coded(row_mi, col_mi)
+            };
+        if have_left
+            && x0 == context.leaf_x0
+            && bottom_left_y < plane_height
+            && (bottom_left_y < context.leaf_y0 + context.leaf_height
+                || external_bottom_left_coded)
+        {
+            left[TX4X4_SIZE] = edge_sample(plane, x0 - 1, bottom_left_y);
+        } else {
+            left[TX4X4_SIZE] = left[TX4X4_SIZE - 1];
+        }
+
+        (above, left)
     }
 
     fn neighbor_sample_for_score(
@@ -863,12 +1076,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         plane: Av2LossyPlane,
         x: usize,
         y: usize,
-        leaf_x0: usize,
-        leaf_y0: usize,
-        leaf_width: usize,
-        leaf_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
     ) -> Av2Sample {
-        if x >= leaf_x0 && x < leaf_x0 + leaf_width && y >= leaf_y0 && y < leaf_y0 + leaf_height {
+        if x >= context.leaf_x0
+            && x < context.leaf_x0 + context.leaf_width
+            && y >= context.leaf_y0
+            && y < context.leaf_y0 + context.leaf_height
+        {
             self.source_sample(plane, x, y)
         } else {
             self.recon_sample(plane, x, y)
@@ -955,6 +1169,9 @@ struct Av2LossyIntraTxbScores {
     horizontal: usize,
     vertical: usize,
     paeth: usize,
+    smooth: usize,
+    smooth_vertical: usize,
+    smooth_horizontal: usize,
 }
 
 impl Av2LossyIntraTxbScores {
@@ -963,6 +1180,9 @@ impl Av2LossyIntraTxbScores {
         self.horizontal += other.horizontal;
         self.vertical += other.vertical;
         self.paeth += other.paeth;
+        self.smooth += other.smooth;
+        self.smooth_vertical += other.smooth_vertical;
+        self.smooth_horizontal += other.smooth_horizontal;
     }
 
     fn scaled_to_txb_count(self, total_txbs: usize, sampled_txbs: usize) -> Self {
@@ -974,6 +1194,9 @@ impl Av2LossyIntraTxbScores {
             horizontal: self.horizontal.saturating_mul(total_txbs) / sampled_txbs,
             vertical: self.vertical.saturating_mul(total_txbs) / sampled_txbs,
             paeth: self.paeth.saturating_mul(total_txbs) / sampled_txbs,
+            smooth: self.smooth.saturating_mul(total_txbs) / sampled_txbs,
+            smooth_vertical: self.smooth_vertical.saturating_mul(total_txbs) / sampled_txbs,
+            smooth_horizontal: self.smooth_horizontal.saturating_mul(total_txbs) / sampled_txbs,
         }
     }
 }
@@ -984,6 +1207,27 @@ fn lossy_mode_search_samples_txb(row: usize, col: usize, width: usize, height: u
         return true;
     }
     (row % 2 == 0 && col % 2 == 0) || row + 1 == height || col + 1 == width
+}
+
+fn lossy_luma_smooth_search_allowed(scores: Av2LossyIntraTxbScores, total_txbs: usize) -> bool {
+    let txb_count = total_txbs.max(1);
+    let best_directional = scores
+        .horizontal
+        .min(scores.vertical)
+        .min(scores.paeth);
+    let best_basic = scores.dc.min(best_directional);
+    let per_txb_residual = best_basic / txb_count;
+    if per_txb_residual < 128 {
+        return false;
+    }
+
+    // Smooth predictors are most useful on low-frequency ramps where DC is
+    // still competitive with the axis/Paeth modes. Hard screen edges usually
+    // make H/V/Paeth dominate DC; skip those leaves and keep the search budget
+    // for gradient-like regions.
+    let directional_advantage = scores.dc.saturating_sub(best_directional);
+    let max_directional_advantage = (scores.dc / 4).max(txb_count * 64);
+    directional_advantage <= max_directional_advantage
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

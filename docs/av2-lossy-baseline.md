@@ -137,13 +137,13 @@ Delta columns compare against the previous current chart for this report.
 
 | Vector | Format | Lossless size | Lossless Mbps | Lossless fps | Lossless PSNR | Lossy size | Lossy Mbps | Lossy fps | Lossy PSNR | Lossy bytes delta | Lossy FPS delta | Lossy PSNR delta | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.08 | inf | 2.51 MiB | 6.31 | 6.31 | 24.28 | -54,616 | -7.1% | +0.00 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
-| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 11.88 | inf | 2.75 MiB | 6.93 | 5.16 | 25.39 | -54,251 | -7.0% | +0.00 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
-| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 10.07 | inf | 3.15 MiB | 7.92 | 3.63 | 26.87 | -53,685 | -2.4% | -0.00 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
-| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.86 | inf | 6.24 MiB | 62.82 | 4.26 | 25.17 | -171,518 | -6.6% | -0.09 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
-| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.86 | inf | 6.48 MiB | 65.27 | 3.45 | 26.20 | -180,291 | +0.0% | -0.08 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
-| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.62 | inf | 6.80 MiB | 68.42 | 2.50 | 27.70 | -170,608 | +1.6% | -0.09 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
-| Total | mixed | 81.68 MiB | n/a | 8.50 | inf | 27.93 MiB | n/a | 3.87 | n/a | -684,969 | -2.5% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
+| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.08 | inf | 2.50 MiB | 6.30 | 5.44 | 24.27 | -4,536 | -13.8% | -0.01 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
+| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 11.88 | inf | 2.75 MiB | 6.92 | 4.47 | 25.37 | -4,749 | -13.4% | -0.02 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
+| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 10.07 | inf | 3.14 MiB | 7.91 | 3.19 | 26.86 | -4,401 | -12.1% | -0.01 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
+| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.86 | inf | 6.05 MiB | 60.95 | 3.65 | 25.14 | -195,564 | -14.3% | -0.03 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
+| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.86 | inf | 6.30 MiB | 63.38 | 2.99 | 26.17 | -196,194 | -13.3% | -0.03 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
+| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.62 | inf | 6.61 MiB | 66.54 | 2.26 | 27.68 | -195,447 | -9.6% | -0.02 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
+| Total | mixed | 81.68 MiB | n/a | 8.50 | inf | 27.35 MiB | n/a | 3.39 | n/a | -600,891 | -12.4% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
 
 ### Reused Lossy TXB Analysis
 
@@ -396,3 +396,39 @@ Lossy `qp=24` versus the precomputed-predictor checkpoint:
 | MissionControlClip1_422 | yuv422p10le | 6.48 MiB | 65.27 | 3.45 | 26.20 | -180,291 | +0.0% | -0.08 |
 | MissionControlClip1_444 | yuv444p10le | 6.80 MiB | 68.42 | 2.50 | 27.70 | -170,608 | +1.6% | -0.09 |
 | Total | mixed | 27.93 MiB | n/a | 3.87 | n/a | -684,969 | -2.5% | n/a |
+
+### Adaptive Smooth Lossy Intra Candidate
+
+This checkpoint adds AV2 smooth, smooth-vertical, and smooth-horizontal as
+luma-only lossy intra candidates. Smooth is probed in a second stage: the
+encoder first scores DC/H/V/Paeth, then only runs the smooth scorer on leaves
+where the cheap scores look gradient-like. The smooth scorer is split from the
+generic DC/H/V/Paeth scorer so selected leaves do not repeat unused work.
+
+The six-vector QP24 set improves from 29,284,107 bytes to 28,683,216 bytes.
+Total measured encode speed moves from 3.87 fps to 3.39 fps. PSNR drops by
+about 0.01 to 0.03 dB, while bitrate drops by about 2.1%.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+```
+
+PSNR for 4:2:2 and 10-bit rows was measured with scratch `--recon` encodes
+and ffmpeg's `psnr` filter, using matching raw reconstruction framerates.
+
+Lossy `qp=24` versus the luma Paeth checkpoint:
+
+| Vector | Format | FF size | FF Mbps | FF fps | FF PSNR | Bytes delta | FPS delta | PSNR delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2.50 MiB | 6.30 | 5.44 | 24.27 | -4,536 | -13.8% | -0.01 |
+| SceneComposition_1_422 | yuv422p8 | 2.75 MiB | 6.92 | 4.47 | 25.37 | -4,749 | -13.4% | -0.02 |
+| SceneComposition_1_444 | yuv444p8 | 3.14 MiB | 7.91 | 3.19 | 26.86 | -4,401 | -12.1% | -0.01 |
+| MissionControlClip1_420 | yuv420p10le | 6.05 MiB | 60.95 | 3.65 | 25.14 | -195,564 | -14.3% | -0.03 |
+| MissionControlClip1_422 | yuv422p10le | 6.30 MiB | 63.38 | 2.99 | 26.17 | -196,194 | -13.3% | -0.03 |
+| MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.54 | 2.26 | 27.68 | -195,447 | -9.6% | -0.02 |
+| Total | mixed | 27.35 MiB | n/a | 3.39 | n/a | -600,891 | -12.4% | n/a |

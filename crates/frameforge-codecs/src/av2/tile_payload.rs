@@ -937,13 +937,15 @@ fn cached_lossy_subsampled_mode(
     decision: Av2TileDecision,
     visible_rows_mi: usize,
     visible_cols_mi: usize,
+    coded_mi_context: &Av2CodedMiContext,
 ) -> Av2LossySubsampledModeDecision {
     if let Some((row, col, block_size, mode)) = cache {
         if *row == decision.row && *col == decision.col && *block_size == decision.block_size {
             return *mode;
         }
     }
-    let mode = lossy.mode_decision_for_leaf(decision, visible_rows_mi, visible_cols_mi);
+    let mode =
+        lossy.mode_decision_for_leaf(decision, visible_rows_mi, visible_cols_mi, coded_mi_context);
     *cache = Some((decision.row, decision.col, decision.block_size, mode));
     mode
 }
@@ -1688,6 +1690,8 @@ impl Av2Black444TilePlan {
             Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut intrabc_context =
             Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut coded_mi_context =
+            Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut mode_cache: Option<(
@@ -1727,6 +1731,7 @@ impl Av2Black444TilePlan {
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        &coded_mi_context,
                     );
                     let mode_syntax = luma_mode_context.syntax_for_leaf(
                         decision.row,
@@ -1763,6 +1768,7 @@ impl Av2Black444TilePlan {
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        &coded_mi_context,
                     );
                     write_intra_chroma_mode(
                         writer,
@@ -1779,6 +1785,7 @@ impl Av2Black444TilePlan {
                         *decision,
                         self.visible_rows_mi,
                         self.visible_cols_mi,
+                        &coded_mi_context,
                     );
                     write_lossy_subsampled_residual_coefficients(
                         writer,
@@ -1788,6 +1795,7 @@ impl Av2Black444TilePlan {
                         &mut txb_contexts,
                         lossy,
                         mode,
+                        &coded_mi_context,
                     );
                     intrabc_context.update_leaf(
                         decision.row,
@@ -1796,6 +1804,7 @@ impl Av2Black444TilePlan {
                         false,
                         false,
                     );
+                    coded_mi_context.update_leaf(decision.row, decision.col, decision.block_size);
                 }
                 Av2TileDecisionKind::IntrabcFlag(_)
                 | Av2TileDecisionKind::IntrabcCopy { .. }

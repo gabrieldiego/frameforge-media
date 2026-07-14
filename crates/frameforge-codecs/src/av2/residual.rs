@@ -20,6 +20,7 @@ fn write_lossy_subsampled_residual_coefficients(
     contexts: &mut Av2TxbEntropyContexts,
     lossy: &mut Av2LossySubsampledTileState<'_>,
     mode: Av2LossySubsampledModeDecision,
+    coded_mi_context: &Av2CodedMiContext,
 ) {
     let txb_width = decision
         .block_size
@@ -29,6 +30,15 @@ fn write_lossy_subsampled_residual_coefficients(
         .block_size
         .tx4x4_height()
         .min(visible_rows_mi.saturating_sub(decision.row));
+    let (luma_leaf_x0, luma_leaf_y0) =
+        lossy.txb_origin(Av2LossyPlane::Y, decision.col, decision.row);
+    let luma_context = Av2LossyLeafPredictorContext {
+        leaf_x0: luma_leaf_x0,
+        leaf_y0: luma_leaf_y0,
+        leaf_width: txb_width * TX4X4_SIZE,
+        leaf_height: txb_height * TX4X4_SIZE,
+        coded_mi_context,
+    };
     for row in 0..txb_height {
         let abs_row = decision.row + row;
         for col in 0..txb_width {
@@ -37,7 +47,16 @@ fn write_lossy_subsampled_residual_coefficients(
                 luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
             let (x0, y0) = lossy.txb_origin(Av2LossyPlane::Y, abs_col, abs_row);
-            let context = write_lossy_luma_txb(writer, skip_ctx, dc_sign_ctx, lossy, x0, y0, mode);
+            let context = write_lossy_luma_txb(
+                writer,
+                skip_ctx,
+                dc_sign_ctx,
+                lossy,
+                x0,
+                y0,
+                mode,
+                luma_context,
+            );
             contexts.y_above[abs_col] = context;
             contexts.y_left[abs_row] = context;
         }
@@ -49,6 +68,15 @@ fn write_lossy_subsampled_residual_coefficients(
         visible_cols_mi,
         lossy.chroma_format,
     );
+    let (chroma_leaf_x0, chroma_leaf_y0) =
+        lossy.txb_origin(Av2LossyPlane::U, chroma_span.col, chroma_span.row);
+    let chroma_context = Av2LossyLeafPredictorContext {
+        leaf_x0: chroma_leaf_x0,
+        leaf_y0: chroma_leaf_y0,
+        leaf_width: chroma_span.width * TX4X4_SIZE,
+        leaf_height: chroma_span.height * TX4X4_SIZE,
+        coded_mi_context,
+    };
     let mut last_u_txb_nonzero = false;
     for row in 0..chroma_span.height {
         let abs_row = chroma_span.row + row;
@@ -66,6 +94,7 @@ fn write_lossy_subsampled_residual_coefficients(
                 x0,
                 y0,
                 mode,
+                chroma_context,
             );
             contexts.u_above[abs_col] = context;
             contexts.u_left[abs_row] = context;
@@ -93,6 +122,7 @@ fn write_lossy_subsampled_residual_coefficients(
                 x0,
                 y0,
                 mode,
+                chroma_context,
             );
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
@@ -108,9 +138,10 @@ fn write_lossy_luma_txb(
     x0: usize,
     y0: usize,
     mode: Av2LossySubsampledModeDecision,
+    context: Av2LossyLeafPredictorContext<'_>,
 ) -> u8 {
     let plane = Av2LossyPlane::Y;
-    let analysis = lossy.analyze_txb(plane, x0, y0, mode);
+    let analysis = lossy.analyze_txb(plane, x0, y0, mode, context);
     let coefficients = tx4x4_coefficients_from_residual(&analysis.residual, false);
     let quantized_candidate =
         if lossy_should_try_ac_quantized(analysis.dc_sse, lossy.quant_step()) {
@@ -171,12 +202,13 @@ fn write_lossy_chroma_txb(
     x0: usize,
     y0: usize,
     mode: Av2LossySubsampledModeDecision,
+    context: Av2LossyLeafPredictorContext<'_>,
 ) -> (u8, bool) {
     let plane = match chroma_plane {
         Av2ChromaPlane::U => Av2LossyPlane::U,
         Av2ChromaPlane::V => Av2LossyPlane::V,
     };
-    let analysis = lossy.analyze_txb(plane, x0, y0, mode);
+    let analysis = lossy.analyze_txb(plane, x0, y0, mode, context);
     let coefficients = tx4x4_coefficients_from_residual(&analysis.residual, false);
     let quantized_candidate =
         if lossy_should_try_ac_quantized(analysis.dc_sse, lossy.quant_step()) {
