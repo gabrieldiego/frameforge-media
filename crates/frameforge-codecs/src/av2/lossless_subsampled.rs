@@ -156,6 +156,23 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
 
     fn source_block4x4(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> [i32; 16] {
         let mut block = [0i32; TX4X4_SAMPLES];
+        if self.bit_depth.bits() <= 8 {
+            let stride = match plane {
+                Av2LosslessPlane::Y => self.geometry.width,
+                Av2LosslessPlane::U | Av2LosslessPlane::V => self.c_width,
+            };
+            let start = self.offset(plane, x0, y0);
+            for local_y in 0..TX4X4_SIZE {
+                let row_start = start + local_y * stride;
+                let row = &self.source[row_start..row_start + TX4X4_SIZE];
+                let block_row = local_y * TX4X4_SIZE;
+                block[block_row] = i32::from(row[0]);
+                block[block_row + 1] = i32::from(row[1]);
+                block[block_row + 2] = i32::from(row[2]);
+                block[block_row + 3] = i32::from(row[3]);
+            }
+            return block;
+        }
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 block[local_y * TX4X4_SIZE + local_x] =
@@ -1156,16 +1173,66 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         kind: Av2CoefficientProxyKind,
     ) -> Av2DcHvBdpcmTxbScores {
         let source = self.source_block4x4(plane, x0, y0);
-        let dc = i32::from(self.dc_predictor_for_score(plane, x0, y0, leaf_x0, leaf_y0));
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        let mut left = [0i32; TX4X4_SIZE];
+        let mut above = [0i32; TX4X4_SIZE];
+        if have_left {
+            for local_y in 0..TX4X4_SIZE {
+                left[local_y] = i32::from(self.neighbor_sample_for_score(
+                    plane,
+                    x0 - 1,
+                    y0 + local_y,
+                    leaf_x0,
+                    leaf_y0,
+                ));
+            }
+        }
+        if have_top {
+            for local_x in 0..TX4X4_SIZE {
+                above[local_x] = i32::from(self.neighbor_sample_for_score(
+                    plane,
+                    x0 + local_x,
+                    y0 - 1,
+                    leaf_x0,
+                    leaf_y0,
+                ));
+            }
+        }
+
+        let dc = if have_left || have_top {
+            let mut sum = 0i32;
+            let mut count = 0i32;
+            if have_top {
+                sum += above.iter().sum::<i32>();
+                count += TX4X4_SIZE as i32;
+            }
+            if have_left {
+                sum += left.iter().sum::<i32>();
+                count += TX4X4_SIZE as i32;
+            }
+            (sum + count / 2) / count
+        } else {
+            i32::from(av2_lossless_dc_predictor(self.bit_depth))
+        };
+
         let mut h_pred = [0i32; TX4X4_SIZE];
+        if have_left {
+            h_pred = left;
+        } else if have_top {
+            h_pred.fill(above[0]);
+        } else {
+            h_pred.fill(i32::from(av2_lossless_h_pred_left_edge(self.bit_depth)));
+        }
+
         let mut v_pred = [0i32; TX4X4_SIZE];
-        for index in 0..TX4X4_SIZE {
-            h_pred[index] = i32::from(self.h_predictor_for_score(
-                plane, x0, y0, index, leaf_x0, leaf_y0,
-            ));
-            v_pred[index] = i32::from(self.v_predictor_for_score(
-                plane, x0, y0, index, leaf_x0, leaf_y0,
-            ));
+        if have_top {
+            v_pred = above;
+        } else if have_left {
+            v_pred.fill(left[0]);
+        } else {
+            v_pred.fill(i32::from(av2_lossless_v_pred_above_edge(self.bit_depth)));
         }
 
         let magnitude_scale = residual_sample_proxy_magnitude_scale(kind);

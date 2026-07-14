@@ -87,25 +87,25 @@ speed direction.
 ## Active Regression Comparison
 
 This row-oriented chart tracks the current performance guardrails after the
-`Lossless IBC Search Work Reduction` checkpoint. Each vector has a
+`Fast Lossless Score Edge Reuse` checkpoint. Each vector has a
 `lossless+predictive` row and a `qp=24` row so future changes can compare
 lossless and lossy behavior from the same place.
 
 | Vector | Format | Mode | FF bytes | FF size | FF fps | Quality guardrail |
 |---|---:|---|---:|---:|---:|---|
-| SceneComposition_1_420 | yuv420p8 | lossless+predictive | 4,279,979 | 4.08 MiB | 14.87 | exact |
+| SceneComposition_1_420 | yuv420p8 | lossless+predictive | 4,279,979 | 4.08 MiB | 14.37 | exact |
 | SceneComposition_1_420 | yuv420p8 | qp=24 | 2,618,257 | 2.50 MiB | 5.65 | lossy smoke stable |
-| SceneComposition_1_422 | yuv422p8 | lossless+predictive | 4,817,495 | 4.59 MiB | 13.59 | exact |
+| SceneComposition_1_422 | yuv422p8 | lossless+predictive | 4,817,495 | 4.59 MiB | 13.13 | exact |
 | SceneComposition_1_422 | yuv422p8 | qp=24 | 2,872,543 | 2.74 MiB | 4.54 | lossy |
-| SceneComposition_1_444 | yuv444p8 | lossless+predictive | 5,764,622 | 5.50 MiB | 10.57 | exact |
+| SceneComposition_1_444 | yuv444p8 | lossless+predictive | 5,764,622 | 5.50 MiB | 10.73 | exact |
 | SceneComposition_1_444 | yuv444p8 | qp=24 | 3,273,374 | 3.12 MiB | 3.35 | lossy |
-| MissionControlClip1_420 | yuv420p10le | lossless+predictive | 19,498,834 | 18.60 MiB | 7.80 | exact |
+| MissionControlClip1_420 | yuv420p10le | lossless+predictive | 19,498,834 | 18.60 MiB | 8.14 | exact |
 | MissionControlClip1_420 | yuv420p10le | qp=24 | 6,349,562 | 6.06 MiB | 3.74 | lossy |
-| MissionControlClip1_422 | yuv422p10le | lossless+predictive | 22,689,992 | 21.64 MiB | 6.90 | exact |
+| MissionControlClip1_422 | yuv422p10le | lossless+predictive | 22,689,992 | 21.64 MiB | 6.98 | exact |
 | MissionControlClip1_422 | yuv422p10le | qp=24 | 6,599,158 | 6.29 MiB | 3.11 | lossy |
-| MissionControlClip1_444 | yuv444p10le | lossless+predictive | 28,597,197 | 27.27 MiB | 5.63 | exact |
+| MissionControlClip1_444 | yuv444p10le | lossless+predictive | 28,597,197 | 27.27 MiB | 5.86 | exact |
 | MissionControlClip1_444 | yuv444p10le | qp=24 | 6,928,645 | 6.61 MiB | 2.35 | lossy |
-| Total | mixed | lossless+predictive | 85,648,119 | 81.68 MiB | 8.75 | exact |
+| Total | mixed | lossless+predictive | 85,648,119 | 81.68 MiB | 8.88 | exact |
 | Total | mixed | qp=24 | 28,641,539 | 27.31 MiB | 3.51 | lossy |
 
 ## Checkpoints
@@ -678,3 +678,49 @@ bytes at 5.00 fps with exact reconstruction. The one-vector QP24 lossy smoke
 check on `SceneComposition_1_420` produced 2,618,257 bytes and 5.61 fps,
 matching the previous byte count and showing no lossy-path regression beyond
 normal timing noise.
+
+### Fast Lossless Score Edge Reuse
+
+This checkpoint reduces the sampled intra lossless scoring cost without
+changing mode decisions. The DC/H/V/BDPCM scorer now loads the 4x4 source
+block once and reuses one left-edge and one above-edge vector for the five
+candidate score accumulators. The 8-bit source block path uses direct safe row
+slices after construction-time buffer validation; higher bit depths keep the
+existing validated sample helper.
+
+On the 200-run first-frame gprof sampling profile for
+`SceneComposition_1_420`, sampled time moved from 29.47 s to 28.70 s (-2.6%).
+The first-frame lossless payload stayed byte-identical at 387,721 bytes. The
+non-predictive first-vector intra lossless guardrail improved from 5.00 fps to
+5.78 fps with the same 24,498,025 bytes and exact reconstruction.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs av2_local_ibc --all-features
+cargo test -p frameforge-codecs --all-features
+make profile-av2-i-lossless GPROF_SAMPLE_RUNS=200
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_DIRECT_SOURCE_FILES=1
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_LIMIT=1 COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_DIRECT_SOURCE_FILES=1
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1 COMPRESSION_LIMIT=1
+make test
+```
+
+Lossless predictive guardrail versus the lossless IBC search work reduction
+checkpoint:
+
+| Vector | Format | FF bytes | FF size | FF fps | Bytes delta | FPS delta | Recon |
+|---|---:|---:|---:|---:|---:|---:|---|
+| SceneComposition_1_420 | yuv420p8 | 4,279,979 | 4.08 MiB | 14.37 | 0 | -3.4% | exact |
+| SceneComposition_1_422 | yuv422p8 | 4,817,495 | 4.59 MiB | 13.13 | 0 | -3.4% | exact |
+| SceneComposition_1_444 | yuv444p8 | 5,764,622 | 5.50 MiB | 10.73 | 0 | +1.5% | exact |
+| MissionControlClip1_420 | yuv420p10le | 19,498,834 | 18.60 MiB | 8.14 | 0 | +4.4% | exact |
+| MissionControlClip1_422 | yuv422p10le | 22,689,992 | 21.64 MiB | 6.98 | 0 | +1.2% | exact |
+| MissionControlClip1_444 | yuv444p10le | 28,597,197 | 27.27 MiB | 5.86 | 0 | +4.1% | exact |
+| Total | mixed | 85,648,119 | 81.68 MiB | 8.88 | 0 | +1.5% | exact |
+
+The one-vector QP24 lossy smoke check on `SceneComposition_1_420` produced
+2,618,257 bytes and 5.51 fps, matching the previous byte count and showing no
+lossy-path regression beyond normal timing noise.
