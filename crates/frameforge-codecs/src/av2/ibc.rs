@@ -99,6 +99,45 @@ struct Av2LocalIbcBlock444 {
     copy_vector: Option<Av2LocalIbcVector>,
 }
 
+#[derive(Debug, Default)]
+struct Av2TileIbcHashIndex {
+    buckets: Vec<Av2TileIbcHashBucket>,
+}
+
+#[derive(Debug)]
+struct Av2TileIbcHashBucket {
+    hash: u32,
+    block_indices: Vec<usize>,
+}
+
+impl Av2TileIbcHashIndex {
+    fn insert(&mut self, hash: u32, block_index: usize) {
+        let bucket =
+            if let Some(bucket) = self.buckets.iter_mut().find(|bucket| bucket.hash == hash) {
+                bucket
+            } else {
+                self.buckets.push(Av2TileIbcHashBucket {
+                    hash,
+                    block_indices: Vec::new(),
+                });
+                self.buckets
+                    .last_mut()
+                    .expect("new IBC hash bucket was just inserted")
+            };
+        match bucket.block_indices.binary_search(&block_index) {
+            Ok(_) => {}
+            Err(index) => bucket.block_indices.insert(index, block_index),
+        }
+    }
+
+    fn candidates(&self, hash: u32) -> &[usize] {
+        self.buckets
+            .iter()
+            .find(|bucket| bucket.hash == hash)
+            .map_or(&[], |bucket| bucket.block_indices.as_slice())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av2LocalIbc444 {
     blocks: Vec<Av2LocalIbcBlock444>,
@@ -260,6 +299,7 @@ fn build_local_ibc(
                 })
                 .collect()
             };
+            let mut hash_index = Av2TileIbcHashIndex::default();
             for leaf in leaf_order {
                 assert_eq!(leaf.x % AV2_IBC_HASH_BLOCK_SIZE, 0);
                 assert_eq!(leaf.y % AV2_IBC_HASH_BLOCK_SIZE, 0);
@@ -281,6 +321,7 @@ fn build_local_ibc(
                         block_y,
                         &mut any_copy,
                         &mut stats,
+                        &mut hash_index,
                     );
                 } else {
                     mark_local_ibc_intra_leaf(
@@ -292,6 +333,7 @@ fn build_local_ibc(
                         leaf.width / AV2_IBC_HASH_BLOCK_SIZE,
                         leaf.height / AV2_IBC_HASH_BLOCK_SIZE,
                         &mut stats,
+                        &mut hash_index,
                     );
                 }
             }
@@ -320,6 +362,7 @@ fn visit_local_ibc_block(
     block_y: usize,
     any_copy: &mut bool,
     stats: &mut Av2LocalIbcStats,
+    hash_index: &mut Av2TileIbcHashIndex,
 ) {
     let block_index = block_y * blocks_wide + block_x;
     let hash = blocks[block_index].hash;
@@ -469,23 +512,23 @@ fn visit_local_ibc_block(
         )),
         (false, false) => None,
     };
-    let explicit_candidate = find_local_explicit_candidate(
-        blocks,
-        coded_blocks,
-        frame,
-        geometry,
-        chroma_format,
-        bit_depth,
-        blocks_wide,
-        blocks_high,
-        block_x,
-        block_y,
-        hash,
-        &bvp_stack,
-    );
     let candidate = direct_candidate
         .map(|(drl_idx, vector)| (Av2LocalIbcCopy::DirectDrl { drl_idx }, vector))
-        .or(explicit_candidate);
+        .or_else(|| {
+            find_local_explicit_candidate(
+                blocks,
+                hash_index.candidates(hash),
+                frame,
+                geometry,
+                chroma_format,
+                bit_depth,
+                blocks_wide,
+                blocks_high,
+                block_x,
+                block_y,
+                &bvp_stack,
+            )
+        });
     let (candidate_copy, copy_vector) = if let Some((copy, vector)) = candidate {
         if vector == AV2_IBC_BV_ABOVE_8X8 {
             stats.selected_above_copy_blocks += 1;
@@ -500,11 +543,12 @@ fn visit_local_ibc_block(
     blocks[block_index].candidate_copy = candidate_copy;
     blocks[block_index].copy_vector = copy_vector;
     coded_blocks[block_index] = true;
+    hash_index.insert(hash, block_index);
 }
 
 fn find_local_explicit_candidate(
     blocks: &[Av2LocalIbcBlock444],
-    coded_blocks: &[bool],
+    candidate_indices: &[usize],
     frame: &[u8],
     geometry: Av2VideoGeometry,
     chroma_format: Av2ChromaFormat,
@@ -513,49 +557,43 @@ fn find_local_explicit_candidate(
     blocks_high: usize,
     block_x: usize,
     block_y: usize,
-    hash: u32,
     bvp_stack: &[Av2LocalIbcVector],
 ) -> Option<(Av2LocalIbcCopy, Av2LocalIbcVector)> {
-    let tile_blocks = AV2_IBC_TILE_SIZE / AV2_IBC_HASH_BLOCK_SIZE;
-    let tile_block_x0 = (block_x / tile_blocks) * tile_blocks;
-    let tile_block_y0 = (block_y / tile_blocks) * tile_blocks;
-    let tile_block_x1 = (tile_block_x0 + tile_blocks).min(blocks_wide);
-    let tile_block_y1 = (tile_block_y0 + tile_blocks).min(blocks_high);
     let mut best: Option<(Av2LocalIbcCopy, Av2LocalIbcVector, u32)> = None;
 
-    for ref_block_y in tile_block_y0..tile_block_y1 {
-        for ref_block_x in tile_block_x0..tile_block_x1 {
-            let ref_index = ref_block_y * blocks_wide + ref_block_x;
-            if !coded_blocks[ref_index] || blocks[ref_index].hash != hash {
-                continue;
-            }
-            let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
-            let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
-            let ref_x0 = ref_block_x * AV2_IBC_HASH_BLOCK_SIZE;
-            let ref_y0 = ref_block_y * AV2_IBC_HASH_BLOCK_SIZE;
-            if !planar_yuv_8x8_regions_equal(
-                frame,
-                geometry,
-                chroma_format,
-                bit_depth,
-                x0,
-                y0,
-                ref_x0,
-                ref_y0,
-            ) {
-                continue;
-            }
-            let vector = Av2LocalIbcVector {
-                row_px: ((ref_block_y as isize - block_y as isize)
-                    * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
-                col_px: ((ref_block_x as isize - block_x as isize)
-                    * AV2_IBC_HASH_BLOCK_SIZE as isize) as i16,
-            };
-            if !local_ibc_vector_is_valid_8x8(block_x, block_y, blocks_wide, blocks_high, vector) {
-                continue;
-            }
-            update_best_explicit_candidate(&mut best, bvp_stack, vector);
+    for &ref_index in candidate_indices {
+        let ref_block_y = ref_index / blocks_wide;
+        let ref_block_x = ref_index % blocks_wide;
+        let x0 = block_x * AV2_IBC_HASH_BLOCK_SIZE;
+        let y0 = block_y * AV2_IBC_HASH_BLOCK_SIZE;
+        let ref_x0 = ref_block_x * AV2_IBC_HASH_BLOCK_SIZE;
+        let ref_y0 = ref_block_y * AV2_IBC_HASH_BLOCK_SIZE;
+        debug_assert_eq!(
+            blocks[ref_index].hash,
+            blocks[block_y * blocks_wide + block_x].hash
+        );
+        if !planar_yuv_8x8_regions_equal(
+            frame,
+            geometry,
+            chroma_format,
+            bit_depth,
+            x0,
+            y0,
+            ref_x0,
+            ref_y0,
+        ) {
+            continue;
         }
+        let vector = Av2LocalIbcVector {
+            row_px: ((ref_block_y as isize - block_y as isize) * AV2_IBC_HASH_BLOCK_SIZE as isize)
+                as i16,
+            col_px: ((ref_block_x as isize - block_x as isize) * AV2_IBC_HASH_BLOCK_SIZE as isize)
+                as i16,
+        };
+        if !local_ibc_vector_is_valid_8x8(block_x, block_y, blocks_wide, blocks_high, vector) {
+            continue;
+        }
+        update_best_explicit_candidate(&mut best, bvp_stack, vector);
     }
 
     best.map(|(copy, vector, _)| (copy, vector))
@@ -658,6 +696,7 @@ fn mark_local_ibc_intra_leaf(
     leaf_blocks_wide: usize,
     leaf_blocks_high: usize,
     stats: &mut Av2LocalIbcStats,
+    hash_index: &mut Av2TileIbcHashIndex,
 ) {
     for local_y in 0..leaf_blocks_high {
         for local_x in 0..leaf_blocks_wide {
@@ -676,6 +715,7 @@ fn mark_local_ibc_intra_leaf(
             blocks[block_index].candidate_copy = None;
             blocks[block_index].copy_vector = None;
             coded_blocks[block_index] = true;
+            hash_index.insert(blocks[block_index].hash, block_index);
         }
     }
 }
@@ -1065,6 +1105,37 @@ mod tests {
         let ibc = build_local_ibc_444(&frame, geometry).expect("IBC hash map should build");
         assert_eq!(ibc.candidate_drl_idx(8, 56), Some(3));
         assert!(ibc.any_copy());
+    }
+
+    #[test]
+    fn av2_local_ibc_hash_finds_non_adjacent_explicit_copy() {
+        let geometry = Av2VideoGeometry {
+            width: 32,
+            height: 8,
+        };
+        let plane_len = geometry.width * geometry.height;
+        let mut frame = vec![0; plane_len * 3];
+        for plane in 0..3 {
+            for y in 0..geometry.height {
+                for x in 0..8 {
+                    let repeated = (plane * 19 + y * 7 + x * 5) as u8;
+                    let separator = repeated.wrapping_add(53);
+                    let tail = repeated.wrapping_add(101);
+                    frame[plane * plane_len + y * geometry.width + x] = repeated;
+                    frame[plane * plane_len + y * geometry.width + x + 8] = separator;
+                    frame[plane * plane_len + y * geometry.width + x + 16] = repeated;
+                    frame[plane * plane_len + y * geometry.width + x + 24] = tail;
+                }
+            }
+        }
+
+        let ibc = build_local_ibc_444(&frame, geometry).expect("IBC hash map should build");
+        assert_eq!(ibc.candidate_drl_idx(0, 0), None);
+        assert_eq!(ibc.candidate_drl_idx(8, 0), None);
+        assert!(matches!(
+            ibc.candidate_copy(16, 0),
+            Some(Av2LocalIbcCopy::ExplicitDv(_))
+        ));
     }
 
     #[test]

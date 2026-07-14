@@ -3,8 +3,20 @@ PYTHON ?= python3
 CARGO_FEATURES ?= all
 CARGO_FLAGS := $(if $(filter all,$(strip $(CARGO_FEATURES))),--all-features,$(if $(strip $(CARGO_FEATURES)),--features "$(CARGO_FEATURES)",))
 PROFILE ?=
-GPROF_RUSTFLAGS ?= -C debuginfo=2 -C force-frame-pointers=yes -C link-arg=-pg
+GPROF_RUSTFLAGS ?= -C debuginfo=2 -C force-frame-pointers=yes -C symbol-mangling-version=v0 -C codegen-units=1 -C lto=no -C link-arg=-pg
 GPROF_TARGET_DIR ?= target/gprof
+GPROF_SAMPLE_RUNS ?= 200
+GPROF_PROFILE_CODEC ?= av2
+GPROF_PROFILE_NAME ?= scenecomposition_1_420_i_lossless_1f
+GPROF_PROFILE_INPUT ?= /media/gabriel/storage/YUV/aomctc/b2_scc/SceneComposition_1.y4m
+GPROF_PROFILE_FRAMES ?= 1
+GPROF_PROFILE_SETTINGS ?= lossless
+GPROF_PROFILE_OUT_DIR ?= verification/generated/profiling
+GPROF_PROFILE_SAMPLE_DIR ?= $(GPROF_PROFILE_OUT_DIR)/$(GPROF_PROFILE_NAME)_samples
+GPROF_PROFILE_OUTPUT ?= $(GPROF_PROFILE_OUT_DIR)/$(GPROF_PROFILE_NAME).obu
+GPROF_PROFILE_RECON ?= $(GPROF_PROFILE_OUT_DIR)/$(GPROF_PROFILE_NAME)_recon.yuv
+GPROF_PROFILE_REPORT ?= $(GPROF_PROFILE_OUT_DIR)/$(GPROF_PROFILE_NAME)_$(GPROF_SAMPLE_RUNS)x.gprof.txt
+GPROF_PROFILE_RUN_LOG ?= $(GPROF_PROFILE_OUT_DIR)/$(GPROF_PROFILE_NAME).last-run.log
 BUILD_TARGET_DIR := target
 BUILD_BINARY := ./ff
 BUILD_ENV :=
@@ -58,8 +70,9 @@ COMPRESSION_SETTINGS_FLAG := $(foreach setting,$(COMPRESSION_SETTINGS),--setting
 COMPRESSION_QP_FLAG := $(if $(strip $(COMPRESSION_QP)),--qp "$(COMPRESSION_QP)",)
 COMPRESSION_REFRESH_REFERENCE_FLAG := $(if $(filter 1 true yes,$(COMPRESSION_REFRESH_REFERENCE)),--refresh-reference,)
 COMPRESSION_DIRECT_SOURCE_FILES_FLAG := $(if $(filter 1 true yes,$(COMPRESSION_DIRECT_SOURCE_FILES)),--direct-source-files,)
+GPROF_PROFILE_SETTINGS_FLAG := $(foreach setting,$(GPROF_PROFILE_SETTINGS),--set "$(setting)")
 
-.PHONY: help check-tools fmt check test build debug run reference-list reference-setup test-vector-sets test-vectors validate-set compare-compression regression clean release-check
+.PHONY: help check-tools fmt check test build debug run reference-list reference-setup test-vector-sets test-vectors validate-set compare-compression profile-av2-i-lossless regression clean release-check
 
 help:
 	@printf '%s\n' \
@@ -70,7 +83,10 @@ help:
 		'  make test             Run Rust tests' \
 		'  make build            Build release CLI and copy it to ./ff' \
 		'  make build PROFILE=gprof' \
-		'                         Build gprof-friendly ./ff-gprof under target/gprof' \
+		'                         Build gprof sampling-friendly ./ff-gprof under target/gprof' \
+		'  make profile-av2-i-lossless' \
+		'                         Aggregate gprof samples for the first lossless AV2 I-frame' \
+		'                         Override GPROF_SAMPLE_RUNS, GPROF_PROFILE_INPUT, or GPROF_PROFILE_SETTINGS' \
 		'  make debug            Build the debug workspace artifacts' \
 		'  make run ARGS="..."   Run the ff CLI' \
 		'  make reference-list   List declared external reference tools' \
@@ -143,6 +159,20 @@ validate-set: build
 
 compare-compression: build
 	$(PYTHON) scripts/compare_reference_compression.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
+
+profile-av2-i-lossless:
+	$(MAKE) build PROFILE=gprof
+	mkdir -p "$(GPROF_PROFILE_SAMPLE_DIR)"
+	rm -f "$(GPROF_PROFILE_SAMPLE_DIR)"/gmon.* "$(GPROF_PROFILE_REPORT)" "$(GPROF_PROFILE_OUTPUT)" "$(GPROF_PROFILE_RECON)" "$(GPROF_PROFILE_RUN_LOG)"
+	for i in $$(seq 1 $(GPROF_SAMPLE_RUNS)); do \
+		if ! GMON_OUT_PREFIX="$(GPROF_PROFILE_SAMPLE_DIR)/gmon" ./ff-gprof encode "$(GPROF_PROFILE_INPUT)" --frames "$(GPROF_PROFILE_FRAMES)" --encode "$(GPROF_PROFILE_CODEC):$(GPROF_PROFILE_OUTPUT)" --recon "$(GPROF_PROFILE_RECON)" $(GPROF_PROFILE_SETTINGS_FLAG) >"$(GPROF_PROFILE_RUN_LOG)" 2>&1; then \
+			cat "$(GPROF_PROFILE_RUN_LOG)"; \
+			exit 1; \
+		fi; \
+	done
+	gprof -b ./ff-gprof "$(GPROF_PROFILE_SAMPLE_DIR)"/gmon.* > "$(GPROF_PROFILE_REPORT)"
+	@printf 'wrote %s from %s first-frame run(s)\n' "$(GPROF_PROFILE_REPORT)" "$(GPROF_SAMPLE_RUNS)"
+	@head -40 "$(GPROF_PROFILE_REPORT)"
 
 regression: build
 	$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec av2 smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
