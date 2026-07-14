@@ -66,6 +66,7 @@ def main() -> int:
     if not args.ff.exists():
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
         return 2
+    args.ff = args.ff.resolve()
 
     vector_set = load_vector_set(args.set, args.set_dir)
     if args.source_filters:

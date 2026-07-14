@@ -2,6 +2,19 @@ CARGO ?= cargo
 PYTHON ?= python3
 CARGO_FEATURES ?= all
 CARGO_FLAGS := $(if $(filter all,$(strip $(CARGO_FEATURES))),--all-features,$(if $(strip $(CARGO_FEATURES)),--features "$(CARGO_FEATURES)",))
+PROFILE ?=
+GPROF_RUSTFLAGS ?= -C debuginfo=2 -C force-frame-pointers=yes -C link-arg=-pg
+GPROF_TARGET_DIR ?= target/gprof
+BUILD_TARGET_DIR := target
+BUILD_BINARY := ./ff
+BUILD_ENV :=
+ifeq ($(strip $(PROFILE)),gprof)
+BUILD_TARGET_DIR := $(GPROF_TARGET_DIR)
+BUILD_BINARY := ./ff-gprof
+BUILD_ENV := RUSTFLAGS="$(GPROF_RUSTFLAGS)" CARGO_TARGET_DIR="$(GPROF_TARGET_DIR)"
+else ifneq ($(strip $(PROFILE)),)
+$(error unsupported PROFILE '$(PROFILE)'; expected PROFILE=gprof)
+endif
 ARGS ?=
 CODEC ?= av2
 TEST_VECTOR_SET ?= smoke
@@ -56,6 +69,8 @@ help:
 		'  make check            Type-check the Rust workspace' \
 		'  make test             Run Rust tests' \
 		'  make build            Build release CLI and copy it to ./ff' \
+		'  make build PROFILE=gprof' \
+		'                         Build gprof-friendly ./ff-gprof under target/gprof' \
 		'  make debug            Build the debug workspace artifacts' \
 		'  make run ARGS="..."   Run the ff CLI' \
 		'  make reference-list   List declared external reference tools' \
@@ -101,9 +116,9 @@ test:
 	$(CARGO) test --workspace $(CARGO_FLAGS)
 
 build:
-	$(CARGO) build --release -p frameforge-cli $(CARGO_FLAGS)
-	cp target/release/ff ./ff
-	chmod 755 ./ff
+	$(BUILD_ENV) $(CARGO) build --release -p frameforge-cli $(CARGO_FLAGS)
+	cp $(BUILD_TARGET_DIR)/release/ff $(BUILD_BINARY)
+	chmod 755 $(BUILD_BINARY)
 
 debug:
 	$(CARGO) build --workspace $(CARGO_FLAGS)
@@ -124,17 +139,17 @@ test-vectors:
 	$(PYTHON) scripts/generate_test_vectors.py "$(TEST_VECTOR_SET)" --set-dir "$(VALIDATION_SET_DIR)" --out-dir "$(VALIDATION_OUT_DIR)"
 
 validate-set: build
-	$(PYTHON) scripts/run_validation_set.py --codec "$(CODEC)" "$(VALIDATION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" $(VALIDATION_SOURCE_FLAG) $(VALIDATION_STOP_FLAG) $(VALIDATION_LIMIT_FLAG) $(VALIDATION_SETTINGS_FLAG)
+	$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(VALIDATION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" $(VALIDATION_SOURCE_FLAG) $(VALIDATION_STOP_FLAG) $(VALIDATION_LIMIT_FLAG) $(VALIDATION_SETTINGS_FLAG)
 
 compare-compression: build
-	$(PYTHON) scripts/compare_reference_compression.py --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
+	$(PYTHON) scripts/compare_reference_compression.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
 
 regression: build
-	$(PYTHON) scripts/run_validation_set.py --codec av2 smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
-	$(PYTHON) scripts/run_validation_set.py --codec vvc smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
+	$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec av2 smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
+	$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec vvc smoke --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" --stop-on-fail
 
 release-check: check-tools fmt check test build
 
 clean:
 	$(CARGO) clean
-	rm -f ./ff
+	rm -f ./ff ./ff-gprof gmon.out gprof.txt

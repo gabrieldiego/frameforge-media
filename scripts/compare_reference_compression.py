@@ -135,6 +135,7 @@ def main() -> int:
     if not args.ff.exists():
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
         return 2
+    args.ff = args.ff.resolve()
 
     reference_encoder = resolve_reference_encoder(args.codec, args.reference_backend)
     cases = comparison_cases(args)
