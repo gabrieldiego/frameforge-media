@@ -150,19 +150,21 @@ impl<'a> Av2LossySubsampledTileState<'a> {
     }
 
     fn source_sample(&self, plane: Av2LossyPlane, x: usize, y: usize) -> Av2Sample {
-        read_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
-            .expect("validated AV2 planar lossy source must contain every sample")
+        self.read_sample(self.source, self.offset(plane, x, y))
     }
 
     fn recon_sample(&self, plane: Av2LossyPlane, x: usize, y: usize) -> Av2Sample {
-        read_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
-            .expect("validated AV2 planar lossy reconstruction must contain every sample")
+        self.read_sample(self.recon, self.offset(plane, x, y))
     }
 
     fn set_recon_sample(&mut self, plane: Av2LossyPlane, x: usize, y: usize, sample: Av2Sample) {
         let offset = self.offset(plane, x, y);
-        write_planar_sample(self.recon, offset, sample, self.bit_depth)
-            .expect("validated AV2 planar lossy reconstruction must contain every sample");
+        write_lossy_planar_sample(self.recon, offset, sample, self.bit_depth);
+    }
+
+    #[inline(always)]
+    fn read_sample(&self, input: &[u8], sample_index: usize) -> Av2Sample {
+        read_lossy_planar_sample(input, sample_index, self.bit_depth)
     }
 
     fn luma_dc_predictor(&self, plane: Av2LossyPlane, x0: usize, y0: usize) -> Av2Sample {
@@ -372,6 +374,37 @@ fn txb_dc_recon_sse(
         sse += (diff * diff) as usize;
     }
     sse
+}
+
+#[inline(always)]
+fn read_lossy_planar_sample(
+    input: &[u8],
+    sample_index: usize,
+    bit_depth: SampleBitDepth,
+) -> Av2Sample {
+    let offset = sample_index * bit_depth.bytes_per_sample();
+    if bit_depth.bits() <= 8 {
+        u16::from(input[offset])
+    } else {
+        u16::from_le_bytes([input[offset], input[offset + 1]])
+    }
+}
+
+#[inline(always)]
+fn write_lossy_planar_sample(
+    output: &mut [u8],
+    sample_index: usize,
+    sample: Av2Sample,
+    bit_depth: SampleBitDepth,
+) {
+    let offset = sample_index * bit_depth.bytes_per_sample();
+    if bit_depth.bits() <= 8 {
+        output[offset] = sample as u8;
+    } else {
+        let bytes = sample.to_le_bytes();
+        output[offset] = bytes[0];
+        output[offset + 1] = bytes[1];
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

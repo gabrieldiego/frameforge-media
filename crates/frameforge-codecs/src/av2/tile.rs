@@ -15,8 +15,6 @@ use crate::av2::palette::{
     AV2_LUMA_PALETTE_MAX_COLORS, AV2_LUMA_PALETTE_MIN_COLORS,
 };
 use crate::picture::SampleBitDepth;
-use frameforge_core::{read_planar_sample, write_planar_sample};
-
 include!("cdfs.rs");
 include!("block_layout.rs");
 include!("tile_payload.rs");
