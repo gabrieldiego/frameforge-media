@@ -214,27 +214,6 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
-    fn predictor_sample(
-        &self,
-        plane: Av2LossyPlane,
-        x0: usize,
-        y0: usize,
-        local_x: usize,
-        local_y: usize,
-        mode: Av2LossySubsampledModeDecision,
-    ) -> Av2Sample {
-        let mode = match plane {
-            Av2LossyPlane::Y => chroma_mode_for_luma_mode(mode.luma_intra_mode),
-            Av2LossyPlane::U | Av2LossyPlane::V => mode.chroma_intra_mode,
-        };
-        match mode {
-            Av2ChromaIntraMode::Dc => self.dc_predictor(plane, x0, y0),
-            Av2ChromaIntraMode::Horizontal => self.h_predictor(plane, x0, y0, local_y),
-            Av2ChromaIntraMode::Vertical => self.v_predictor(plane, x0, y0, local_x),
-            _ => unreachable!("AV2 lossy mode search currently selects DC, H, or V only"),
-        }
-    }
-
     fn analyze_txb(
         &self,
         plane: Av2LossyPlane,
@@ -246,11 +225,36 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         let mut predictor = [0; TX4X4_SAMPLES];
         let mut residual = [0i32; TX4X4_SAMPLES];
         let mut sum = 0i32;
+        let predictor_mode = match plane {
+            Av2LossyPlane::Y => chroma_mode_for_luma_mode(mode.luma_intra_mode),
+            Av2LossyPlane::U | Av2LossyPlane::V => mode.chroma_intra_mode,
+        };
+        let dc_pred = if predictor_mode == Av2ChromaIntraMode::Dc {
+            self.dc_predictor(plane, x0, y0)
+        } else {
+            0
+        };
+        let mut h_pred = [0; TX4X4_SIZE];
+        if predictor_mode == Av2ChromaIntraMode::Horizontal {
+            for (local_y, pred) in h_pred.iter_mut().enumerate() {
+                *pred = self.h_predictor(plane, x0, y0, local_y);
+            }
+        }
+        let mut v_pred = [0; TX4X4_SIZE];
+        if predictor_mode == Av2ChromaIntraMode::Vertical {
+            for (local_x, pred) in v_pred.iter_mut().enumerate() {
+                *pred = self.v_predictor(plane, x0, y0, local_x);
+            }
+        }
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let index = local_y * TX4X4_SIZE + local_x;
-                let predictor_sample =
-                    self.predictor_sample(plane, x0, y0, local_x, local_y, mode);
+                let predictor_sample = match predictor_mode {
+                    Av2ChromaIntraMode::Dc => dc_pred,
+                    Av2ChromaIntraMode::Horizontal => h_pred[local_y],
+                    Av2ChromaIntraMode::Vertical => v_pred[local_x],
+                    _ => unreachable!("AV2 lossy mode search currently selects DC, H, or V only"),
+                };
                 let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
                 let diff = i32::from(source_sample) - i32::from(predictor_sample);
                 source[index] = source_sample;
