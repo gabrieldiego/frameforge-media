@@ -7,7 +7,8 @@ use crate::av2::entropy::{Av2EntropyPayload, Av2EntropyWriter};
 use crate::av2::ibc::{Av2IntrabcExplicitDv, Av2LocalIbc444};
 use crate::av2::intra_prediction::{
     av2_chroma_directional_angle, av2_intra_residual4x4, directional_interpolate,
-    directional_interpolate_with_delta, zone2_directional_predictor, ChromaD135Edges,
+    directional_interpolate_with_delta, paeth_predictor, zone2_directional_predictor,
+    ChromaD135Edges,
 };
 use crate::av2::palette::{
     av2_luma_mode_syntax_for_block, Av2ChromaIntraMode, Av2LumaDirectionalMode, Av2LumaIntraMode,

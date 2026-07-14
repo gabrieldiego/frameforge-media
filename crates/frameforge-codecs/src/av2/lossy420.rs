@@ -214,6 +214,21 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
+    fn above_left_predictor(&self, plane: Av2LossyPlane, x0: usize, y0: usize) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if have_left && have_top {
+            self.recon_sample(plane, x0 - 1, y0 - 1)
+        } else if have_top {
+            self.recon_sample(plane, x0, y0 - 1)
+        } else if have_left {
+            self.recon_sample(plane, x0 - 1, y0)
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        }
+    }
+
     fn analyze_txb(
         &self,
         plane: Av2LossyPlane,
@@ -235,17 +250,28 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             0
         };
         let mut h_pred = [0; TX4X4_SIZE];
-        if predictor_mode == Av2ChromaIntraMode::Horizontal {
+        if matches!(
+            predictor_mode,
+            Av2ChromaIntraMode::Horizontal | Av2ChromaIntraMode::Paeth
+        ) {
             for (local_y, pred) in h_pred.iter_mut().enumerate() {
                 *pred = self.h_predictor(plane, x0, y0, local_y);
             }
         }
         let mut v_pred = [0; TX4X4_SIZE];
-        if predictor_mode == Av2ChromaIntraMode::Vertical {
+        if matches!(
+            predictor_mode,
+            Av2ChromaIntraMode::Vertical | Av2ChromaIntraMode::Paeth
+        ) {
             for (local_x, pred) in v_pred.iter_mut().enumerate() {
                 *pred = self.v_predictor(plane, x0, y0, local_x);
             }
         }
+        let above_left = if predictor_mode == Av2ChromaIntraMode::Paeth {
+            self.above_left_predictor(plane, x0, y0)
+        } else {
+            0
+        };
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let index = local_y * TX4X4_SIZE + local_x;
@@ -253,7 +279,10 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                     Av2ChromaIntraMode::Dc => dc_pred,
                     Av2ChromaIntraMode::Horizontal => h_pred[local_y],
                     Av2ChromaIntraMode::Vertical => v_pred[local_x],
-                    _ => unreachable!("AV2 lossy mode search currently selects DC, H, or V only"),
+                    Av2ChromaIntraMode::Paeth => {
+                        paeth_predictor(h_pred[local_y], v_pred[local_x], above_left)
+                    }
+                    _ => unreachable!("AV2 lossy mode search selects DC, H, V, or Paeth"),
                 };
                 let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
                 let diff = i32::from(source_sample) - i32::from(predictor_sample);
@@ -395,7 +424,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         let luma_leaf_width = txb_width * TX4X4_SIZE;
         let luma_leaf_height = txb_height * TX4X4_SIZE;
         let mut mode = Av2LossySubsampledModeDecision::default();
-        let mut luma_scores = Av2LossyDcHvTxbScores::default();
+        let mut luma_scores = Av2LossyIntraTxbScores::default();
         let mut luma_sampled_txbs = 0usize;
         for row in 0..txb_height {
             for col in 0..txb_width {
@@ -413,6 +442,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                     luma_leaf_width,
                     luma_leaf_height,
                     Av2CoefficientProxyKind::LumaTransform,
+                    true,
                 ));
                 luma_sampled_txbs += 1;
             }
@@ -423,12 +453,14 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             (Av2LumaIntraMode::Dc, 0usize),
             (Av2LumaIntraMode::Horizontal, 32usize),
             (Av2LumaIntraMode::Vertical, 32usize),
+            (Av2LumaIntraMode::Paeth, 128usize),
         ] {
             let score = match luma_intra_mode {
                 Av2LumaIntraMode::Dc => luma_scores.dc,
                 Av2LumaIntraMode::Horizontal => luma_scores.horizontal,
                 Av2LumaIntraMode::Vertical => luma_scores.vertical,
-                _ => unreachable!("AV2 lossy luma mode search scores only DC, H, and V"),
+                Av2LumaIntraMode::Paeth => luma_scores.paeth,
+                _ => unreachable!("AV2 lossy luma mode search scores only DC, H, V, and Paeth"),
             } + syntax_penalty;
             if score < best_luma.1 {
                 best_luma = (luma_intra_mode, score);
@@ -446,7 +478,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             self.txb_origin(Av2LossyPlane::U, chroma_span.col, chroma_span.row);
         let chroma_leaf_width = chroma_span.width * TX4X4_SIZE;
         let chroma_leaf_height = chroma_span.height * TX4X4_SIZE;
-        let mut chroma_scores = Av2LossyDcHvTxbScores::default();
+        let mut chroma_scores = Av2LossyIntraTxbScores::default();
         let mut chroma_sampled_txbs = 0usize;
         for plane in [Av2LossyPlane::U, Av2LossyPlane::V] {
             for row in 0..chroma_span.height {
@@ -470,6 +502,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                         chroma_leaf_width,
                         chroma_leaf_height,
                         Av2CoefficientProxyKind::ChromaTransform,
+                        false,
                     ));
                     chroma_sampled_txbs += 1;
                 }
@@ -480,17 +513,17 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             chroma_sampled_txbs,
         );
         let mut best_chroma = (mode.chroma_intra_mode, usize::MAX);
-        for chroma_intra_mode in [
-            Av2ChromaIntraMode::Horizontal,
-            Av2ChromaIntraMode::Vertical,
-            Av2ChromaIntraMode::Dc,
+        for (chroma_intra_mode, syntax_penalty) in [
+            (Av2ChromaIntraMode::Horizontal, 0usize),
+            (Av2ChromaIntraMode::Vertical, 0usize),
+            (Av2ChromaIntraMode::Dc, 0usize),
         ] {
             let score = match chroma_intra_mode {
                 Av2ChromaIntraMode::Dc => chroma_scores.dc,
                 Av2ChromaIntraMode::Horizontal => chroma_scores.horizontal,
                 Av2ChromaIntraMode::Vertical => chroma_scores.vertical,
                 _ => unreachable!("AV2 lossy chroma mode search scores only DC, H, and V"),
-            };
+            } + syntax_penalty;
             if score < best_chroma.1 {
                 best_chroma = (chroma_intra_mode, score);
             }
@@ -509,7 +542,8 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         leaf_width: usize,
         leaf_height: usize,
         kind: Av2CoefficientProxyKind,
-    ) -> Av2LossyDcHvTxbScores {
+        score_paeth: bool,
+    ) -> Av2LossyIntraTxbScores {
         let mut source = [0; TX4X4_SAMPLES];
         let dc = i32::from(self.dc_predictor_for_score(
             plane,
@@ -520,10 +554,10 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             leaf_width,
             leaf_height,
         ));
-        let mut h_pred = [0i32; TX4X4_SIZE];
-        let mut v_pred = [0i32; TX4X4_SIZE];
+        let mut h_pred = [0; TX4X4_SIZE];
+        let mut v_pred = [0; TX4X4_SIZE];
         for index in 0..TX4X4_SIZE {
-            h_pred[index] = i32::from(self.h_predictor_for_score(
+            h_pred[index] = self.h_predictor_for_score(
                 plane,
                 x0,
                 y0,
@@ -532,8 +566,8 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 leaf_y0,
                 leaf_width,
                 leaf_height,
-            ));
-            v_pred[index] = i32::from(self.v_predictor_for_score(
+            );
+            v_pred[index] = self.v_predictor_for_score(
                 plane,
                 x0,
                 y0,
@@ -542,26 +576,43 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 leaf_y0,
                 leaf_width,
                 leaf_height,
-            ));
+            );
         }
+        let above_left = if score_paeth {
+            self.above_left_predictor_for_score(
+                plane,
+                x0,
+                y0,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+            )
+        } else {
+            0
+        };
 
-        let mut scores = Av2LossyDcHvTxbScores {
+        let mut scores = Av2LossyIntraTxbScores {
             dc: 16,
             horizontal: 16,
             vertical: 16,
+            paeth: 16,
         };
         let mut dc_sum = 0i32;
         let mut horizontal_sum = 0i32;
         let mut vertical_sum = 0i32;
+        let mut paeth_sum = 0i32;
         let magnitude_scale = residual_sample_proxy_magnitude_scale(kind);
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let index = local_y * TX4X4_SIZE + local_x;
                 let sample = i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
                 source[index] = sample as Av2Sample;
+                let horizontal = i32::from(h_pred[local_y]);
+                let vertical = i32::from(v_pred[local_x]);
                 let dc_diff = sample - dc;
-                let horizontal_diff = sample - h_pred[local_y];
-                let vertical_diff = sample - v_pred[local_x];
+                let horizontal_diff = sample - horizontal;
+                let vertical_diff = sample - vertical;
                 dc_sum += dc_diff;
                 horizontal_sum += horizontal_diff;
                 vertical_sum += vertical_diff;
@@ -576,6 +627,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                     vertical_diff,
                     magnitude_scale,
                 );
+                if score_paeth {
+                    let paeth =
+                        i32::from(paeth_predictor(h_pred[local_y], v_pred[local_x], above_left));
+                    let paeth_diff = sample - paeth;
+                    paeth_sum += paeth_diff;
+                    add_residual_sample_proxy_score(&mut scores.paeth, paeth_diff, magnitude_scale);
+                }
             }
         }
         let max_delta = i32::from(self.bit_depth.max_sample());
@@ -591,30 +649,52 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             self.quant_step(),
         )
         .clamp(-max_delta, max_delta);
+        let paeth_delta = if score_paeth {
+            quantize_i32_to_step(
+                round_div_i32(paeth_sum, TX4X4_SAMPLES as i32),
+                self.quant_step(),
+            )
+            .clamp(-max_delta, max_delta)
+        } else {
+            0
+        };
 
         let mut dc_sse = 0usize;
         let mut horizontal_sse = 0usize;
         let mut vertical_sse = 0usize;
+        let mut paeth_sse = 0usize;
         let max_sample = i32::from(self.bit_depth.max_sample());
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let index = local_y * TX4X4_SIZE + local_x;
                 let source = i32::from(source[index]);
                 let dc_recon = (dc + dc_delta).clamp(0, max_sample);
-                let horizontal_recon = (h_pred[local_y] + horizontal_delta).clamp(0, max_sample);
-                let vertical_recon = (v_pred[local_x] + vertical_delta).clamp(0, max_sample);
+                let horizontal_recon =
+                    (i32::from(h_pred[local_y]) + horizontal_delta).clamp(0, max_sample);
+                let vertical_recon =
+                    (i32::from(v_pred[local_x]) + vertical_delta).clamp(0, max_sample);
                 dc_sse += (source - dc_recon).unsigned_abs() as usize
                     * (source - dc_recon).unsigned_abs() as usize;
                 horizontal_sse += (source - horizontal_recon).unsigned_abs() as usize
                     * (source - horizontal_recon).unsigned_abs() as usize;
                 vertical_sse += (source - vertical_recon).unsigned_abs() as usize
                     * (source - vertical_recon).unsigned_abs() as usize;
+                if score_paeth {
+                    let paeth =
+                        i32::from(paeth_predictor(h_pred[local_y], v_pred[local_x], above_left));
+                    let paeth_recon = (paeth + paeth_delta).clamp(0, max_sample);
+                    paeth_sse += (source - paeth_recon).unsigned_abs() as usize
+                        * (source - paeth_recon).unsigned_abs() as usize;
+                }
             }
         }
 
         scores.dc = lossy_txb_score(scores.dc, dc_sse, self.quant_step());
         scores.horizontal = lossy_txb_score(scores.horizontal, horizontal_sse, self.quant_step());
         scores.vertical = lossy_txb_score(scores.vertical, vertical_sse, self.quant_step());
+        if score_paeth {
+            scores.paeth = lossy_txb_score(scores.paeth, paeth_sse, self.quant_step());
+        }
         scores
     }
 
@@ -730,6 +810,54 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
+    fn above_left_predictor_for_score(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        leaf_x0: usize,
+        leaf_y0: usize,
+        leaf_width: usize,
+        leaf_height: usize,
+    ) -> Av2Sample {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if have_left && have_top {
+            self.neighbor_sample_for_score(
+                plane,
+                x0 - 1,
+                y0 - 1,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+            )
+        } else if have_top {
+            self.neighbor_sample_for_score(
+                plane,
+                x0,
+                y0 - 1,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+            )
+        } else if have_left {
+            self.neighbor_sample_for_score(
+                plane,
+                x0 - 1,
+                y0,
+                leaf_x0,
+                leaf_y0,
+                leaf_width,
+                leaf_height,
+            )
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        }
+    }
+
     fn neighbor_sample_for_score(
         &self,
         plane: Av2LossyPlane,
@@ -822,17 +950,19 @@ impl Default for Av2LossySubsampledModeDecision {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Av2LossyDcHvTxbScores {
+struct Av2LossyIntraTxbScores {
     dc: usize,
     horizontal: usize,
     vertical: usize,
+    paeth: usize,
 }
 
-impl Av2LossyDcHvTxbScores {
+impl Av2LossyIntraTxbScores {
     fn add_assign(&mut self, other: Self) {
         self.dc += other.dc;
         self.horizontal += other.horizontal;
         self.vertical += other.vertical;
+        self.paeth += other.paeth;
     }
 
     fn scaled_to_txb_count(self, total_txbs: usize, sampled_txbs: usize) -> Self {
@@ -843,6 +973,7 @@ impl Av2LossyDcHvTxbScores {
             dc: self.dc.saturating_mul(total_txbs) / sampled_txbs,
             horizontal: self.horizontal.saturating_mul(total_txbs) / sampled_txbs,
             vertical: self.vertical.saturating_mul(total_txbs) / sampled_txbs,
+            paeth: self.paeth.saturating_mul(total_txbs) / sampled_txbs,
         }
     }
 }
