@@ -432,3 +432,33 @@ Lossy `qp=24` versus the luma Paeth checkpoint:
 | MissionControlClip1_422 | yuv422p10le | 6.30 MiB | 63.38 | 2.99 | 26.17 | -196,194 | -13.3% | -0.03 |
 | MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.54 | 2.26 | 27.68 | -195,447 | -9.6% | -0.02 |
 | Total | mixed | 27.35 MiB | n/a | 3.39 | n/a | -600,891 | -12.4% | n/a |
+
+### Lossy Scoring SSE Cleanup
+
+This checkpoint keeps AV2 QP mode decisions, bitstreams, bitrate, and PSNR
+unchanged. The lossy intra scoring loops now compute each reconstruction
+difference once before squaring it for SSE, instead of recomputing absolute
+differences twice per predictor. The measured effect is small and within some
+run-to-run noise on the Scene rows, but the 10-bit rows improve and the total
+six-vector QP24 encode speed moves from 3.39 fps to 3.42 fps.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=auto
+make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless VALIDATION_REFERENCE_MODE=auto
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+```
+
+Lossy `qp=24` versus the adaptive smooth checkpoint:
+
+| Vector | Format | FF size | FF Mbps | FF fps | FF PSNR | Bytes delta | FPS delta | PSNR delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2.50 MiB | 6.30 | 5.38 | 24.27 | 0 | -1.1% | +0.00 |
+| SceneComposition_1_422 | yuv422p8 | 2.75 MiB | 6.92 | 4.42 | 25.37 | 0 | -1.1% | +0.00 |
+| SceneComposition_1_444 | yuv444p8 | 3.14 MiB | 7.91 | 3.19 | 26.86 | 0 | +0.0% | +0.00 |
+| MissionControlClip1_420 | yuv420p10le | 6.05 MiB | 60.95 | 3.73 | 25.14 | 0 | +2.2% | +0.00 |
+| MissionControlClip1_422 | yuv422p10le | 6.30 MiB | 63.38 | 3.03 | 26.17 | 0 | +1.3% | +0.00 |
+| MissionControlClip1_444 | yuv444p10le | 6.61 MiB | 66.54 | 2.33 | 27.68 | 0 | +3.1% | +0.00 |
+| Total | mixed | 27.35 MiB | n/a | 3.42 | n/a | 0 | +0.9% | n/a |

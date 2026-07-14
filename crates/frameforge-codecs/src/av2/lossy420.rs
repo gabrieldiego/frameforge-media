@@ -746,18 +746,18 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                     (i32::from(h_pred[local_y]) + horizontal_delta).clamp(0, max_sample);
                 let vertical_recon =
                     (i32::from(v_pred[local_x]) + vertical_delta).clamp(0, max_sample);
-                dc_sse += (source - dc_recon).unsigned_abs() as usize
-                    * (source - dc_recon).unsigned_abs() as usize;
-                horizontal_sse += (source - horizontal_recon).unsigned_abs() as usize
-                    * (source - horizontal_recon).unsigned_abs() as usize;
-                vertical_sse += (source - vertical_recon).unsigned_abs() as usize
-                    * (source - vertical_recon).unsigned_abs() as usize;
+                let dc_diff = source - dc_recon;
+                let horizontal_diff = source - horizontal_recon;
+                let vertical_diff = source - vertical_recon;
+                dc_sse += (dc_diff * dc_diff) as usize;
+                horizontal_sse += (horizontal_diff * horizontal_diff) as usize;
+                vertical_sse += (vertical_diff * vertical_diff) as usize;
                 if score_paeth {
                     let paeth =
                         i32::from(paeth_predictor(h_pred[local_y], v_pred[local_x], above_left));
                     let paeth_recon = (paeth + paeth_delta).clamp(0, max_sample);
-                    paeth_sse += (source - paeth_recon).unsigned_abs() as usize
-                        * (source - paeth_recon).unsigned_abs() as usize;
+                    let paeth_diff = source - paeth_recon;
+                    paeth_sse += (paeth_diff * paeth_diff) as usize;
                 }
             }
         }
@@ -862,12 +862,12 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             let smooth_horizontal_recon =
                 (i32::from(smooth_horizontal_pred[index]) + smooth_horizontal_delta)
                     .clamp(0, max_sample);
-            smooth_sse += (source - smooth_recon).unsigned_abs() as usize
-                * (source - smooth_recon).unsigned_abs() as usize;
-            smooth_vertical_sse += (source - smooth_vertical_recon).unsigned_abs() as usize
-                * (source - smooth_vertical_recon).unsigned_abs() as usize;
-            smooth_horizontal_sse += (source - smooth_horizontal_recon).unsigned_abs() as usize
-                * (source - smooth_horizontal_recon).unsigned_abs() as usize;
+            let smooth_diff = source - smooth_recon;
+            let smooth_vertical_diff = source - smooth_vertical_recon;
+            let smooth_horizontal_diff = source - smooth_horizontal_recon;
+            smooth_sse += (smooth_diff * smooth_diff) as usize;
+            smooth_vertical_sse += (smooth_vertical_diff * smooth_vertical_diff) as usize;
+            smooth_horizontal_sse += (smooth_horizontal_diff * smooth_horizontal_diff) as usize;
         }
 
         scores.smooth = lossy_txb_score(scores.smooth, smooth_sse, self.quant_step());
