@@ -129,6 +129,15 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
     }
 
+    fn plane_region_limit(&self, plane: Av2LosslessPlane) -> (usize, usize) {
+        let (origin_x, origin_y) = self.plane_origin(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        (
+            origin_x + self.region.width / sub_x,
+            origin_y + self.region.height / sub_y,
+        )
+    }
+
     fn plane_subsampling(&self, plane: Av2LosslessPlane) -> (usize, usize) {
         match plane {
             Av2LosslessPlane::Y => (1, 1),
@@ -146,7 +155,12 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         y: usize,
     ) -> (usize, usize) {
         let (sub_x, sub_y) = self.plane_subsampling(plane);
-        ((y * sub_y) / MI_SIZE, (x * sub_x) / MI_SIZE)
+        let luma_x = x * sub_x;
+        let luma_y = y * sub_y;
+        (
+            luma_y.saturating_sub(self.region.origin_y) / MI_SIZE,
+            luma_x.saturating_sub(self.region.origin_x) / MI_SIZE,
+        )
     }
 
     fn txb_origin(&self, plane: Av2LosslessPlane, col: usize, row: usize) -> (usize, usize) {
@@ -1709,6 +1723,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     {
         let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
         let (plane_width, plane_height) = self.plane_geometry(plane);
+        let (plane_region_right, plane_region_bottom) = self.plane_region_limit(plane);
         let (sub_x, sub_y) = self.plane_subsampling(plane);
         let have_top = y0 > tile_origin_y;
         let have_left = x0 > tile_origin_x;
@@ -1734,16 +1749,19 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
         let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
         let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
-        let sb_right = (sb_origin_x + plane_sb_width).min(plane_width);
+        let sb_right = (sb_origin_x + plane_sb_width)
+            .min(plane_width)
+            .min(plane_region_right);
         let top_right_x = x0 + TX4X4_SIZE;
         let superblock_top_row = y0 % plane_sb_height == 0;
-        let external_top_right_coded = have_top && y0 == leaf_y0 && top_right_x < plane_width && {
-            let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, top_right_x, y0 - 1);
-            superblock_top_row
-                || (top_right_x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
-        };
+        let external_top_right_coded =
+            have_top && y0 == leaf_y0 && top_right_x < plane_region_right && {
+                let (row_mi, col_mi) = self.coded_mi_for_plane_sample(plane, top_right_x, y0 - 1);
+                superblock_top_row
+                    || (top_right_x < sb_right && coded_mi_context.is_coded(row_mi, col_mi))
+            };
         if have_top
-            && top_right_x < plane_width
+            && top_right_x < plane_region_right
             && (top_right_x < leaf_x0 + leaf_width || external_top_right_coded)
         {
             above[TX4X4_SIZE] = edge_sample(plane, top_right_x, y0 - 1);
@@ -1752,7 +1770,9 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         }
 
         let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
-        let sb_bottom = (sb_origin_y + plane_sb_height).min(plane_height);
+        let sb_bottom = (sb_origin_y + plane_sb_height)
+            .min(plane_height)
+            .min(plane_region_bottom);
         let bottom_left_y = y0 + TX4X4_SIZE;
         let superblock_left_col = x0 % plane_sb_width == 0;
         let external_bottom_left_coded =
@@ -1762,7 +1782,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             };
         if have_left
             && x0 == leaf_x0
-            && bottom_left_y < plane_height
+            && bottom_left_y < plane_region_bottom
             && (bottom_left_y < leaf_y0 + leaf_height || external_bottom_left_coded)
         {
             left[TX4X4_SIZE] = edge_sample(plane, x0 - 1, bottom_left_y);

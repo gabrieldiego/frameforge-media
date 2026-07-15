@@ -88,26 +88,32 @@ speed direction.
 ## Active Regression Comparison
 
 This row-oriented chart tracks the current performance guardrails after the
-`High-Bit Lossless Block Reuse` checkpoint. Each vector has a
+`Reference-Clean Smooth Edge Search And Transform Step 32` checkpoint. Each vector has a
 `lossless+predictive` row and a `qp=24` row so future changes can compare
 lossless and lossy behavior from the same place.
 
 | Vector | Format | Mode | FF bytes | FF size | FF fps | Quality guardrail |
 |---|---:|---|---:|---:|---:|---|
-| SceneComposition_1_420 | yuv420p8 | lossless+predictive | 4,279,979 | 4.08 MiB | 15.88 | exact |
-| SceneComposition_1_420 | yuv420p8 | qp=24 | 2,618,257 | 2.50 MiB | 5.65 | lossy smoke stable |
-| SceneComposition_1_422 | yuv422p8 | lossless+predictive | 4,817,495 | 4.59 MiB | 13.32 | exact |
-| SceneComposition_1_422 | yuv422p8 | qp=24 | 2,872,543 | 2.74 MiB | 4.54 | lossy |
+| SceneComposition_1_420 | yuv420p8 | lossless+predictive | 4,291,092 | 4.09 MiB | 15.88 | exact |
+| SceneComposition_1_420 | yuv420p8 | qp=24 | 4,421,286 | 4.22 MiB | 3.60 | lossy |
+| SceneComposition_1_422 | yuv422p8 | lossless+predictive | 4,828,242 | 4.60 MiB | 13.32 | exact |
+| SceneComposition_1_422 | yuv422p8 | qp=24 | 4,665,752 | 4.45 MiB | 3.08 | lossy |
 | screen_wayland_activity_rgb | rgb24 | lossless+predictive | 3,604,512 | 3.44 MiB | 15.43 | exact |
-| screen_wayland_activity_rgb | rgb24 | qp=24 | 8,179,011 | 7.80 MiB | 2.27 | lossy |
-| MissionControlClip1_420 | yuv420p10le | lossless+predictive | 19,498,834 | 18.60 MiB | 8.10 | exact |
-| MissionControlClip1_420 | yuv420p10le | qp=24 | 6,349,562 | 6.06 MiB | 3.74 | lossy |
-| MissionControlClip1_422 | yuv422p10le | lossless+predictive | 22,689,992 | 21.64 MiB | 7.01 | exact |
-| MissionControlClip1_422 | yuv422p10le | qp=24 | 6,599,158 | 6.29 MiB | 3.11 | lossy |
-| MissionControlClip1_444 | yuv444p10le | lossless+predictive | 28,597,197 | 27.27 MiB | 5.85 | exact |
-| MissionControlClip1_444 | yuv444p10le | qp=24 | 6,928,645 | 6.61 MiB | 2.35 | lossy |
-| Total | mixed | lossless+predictive | 83,488,009 | 79.62 MiB | 9.38 | exact |
-| Total | mixed | qp=24 | 33,547,176 | 31.99 MiB | 3.24 | lossy |
+| screen_wayland_activity_rgb | rgb24 | qp=24 | 15,624,289 | 14.90 MiB | 1.33 | lossy, AVM match |
+| MissionControlClip1_420 | yuv420p10le | lossless+predictive | 19,506,013 | 18.60 MiB | 8.10 | exact |
+| MissionControlClip1_420 | yuv420p10le | qp=24 | 9,831,758 | 9.38 MiB | 2.61 | lossy |
+| MissionControlClip1_422 | yuv422p10le | lossless+predictive | 22,696,844 | 21.65 MiB | 7.01 | exact |
+| MissionControlClip1_422 | yuv422p10le | qp=24 | 10,078,372 | 9.61 MiB | 2.16 | lossy |
+| MissionControlClip1_444 | yuv444p10le | lossless+predictive | 28,604,479 | 27.28 MiB | 5.85 | exact |
+| MissionControlClip1_444 | yuv444p10le | qp=24 | 10,407,740 | 9.93 MiB | 1.53 | lossy |
+| Total | mixed | lossless+predictive | 83,531,182 | 79.66 MiB | 9.38 | exact |
+| Total | mixed | qp=24 | 55,029,197 | 52.48 MiB | 2.10 | lossy |
+
+The lossless byte counts in this chart are refreshed from strict validation
+after the smooth-edge availability fix. The lossless FPS rows remain from the
+previous 50-frame timing guardrail because `validate-set` does not emit per-row
+timing; the exactness and byte deltas are the critical guardrails for this
+checkpoint.
 
 ## Checkpoints
 
@@ -167,13 +173,13 @@ RGB output.
 
 | Vector | Format | FF lossless size | FF lossless Mbps | FF lossless fps | FF qp24 size | FF qp24 Mbps | FF qp24 fps | FF qp24 PSNR | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 15.88 | 2.50 MiB | 6.28 | 5.63 | 24.27 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
-| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 13.32 | 2.74 MiB | 6.89 | 4.72 | 25.37 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
-| screen_wayland_activity_rgb | rgb24 | 3.44 MiB | 17.30 | 15.43 | 7.80 MiB | 39.26 | 2.27 | 23.43 | 0.41 MiB | 2.09 | 22.42 | 47.78 |
-| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 8.10 | 6.06 MiB | 60.96 | 3.71 | 25.14 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
-| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 7.01 | 6.29 MiB | 63.35 | 3.10 | 26.17 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
-| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.85 | 6.61 MiB | 66.51 | 2.34 | 27.68 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
-| Total | mixed | 79.62 MiB | n/a | 9.38 | 31.99 MiB | n/a | 3.24 | n/a | 3.23 MiB | n/a | 19.85 | n/a |
+| SceneComposition_1_420 | yuv420p8 | 4.09 MiB | 10.30 | 15.88 | 4.22 MiB | 10.61 | 3.60 | 27.25 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
+| SceneComposition_1_422 | yuv422p8 | 4.60 MiB | 11.59 | 13.32 | 4.45 MiB | 11.20 | 3.08 | 28.23 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
+| screen_wayland_activity_rgb | rgb24 | 3.44 MiB | 17.30 | 15.43 | 14.90 MiB | 75.00 | 1.33 | 27.45 | 0.41 MiB | 2.09 | 22.42 | 47.78 |
+| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.26 | 8.10 | 9.38 MiB | 94.38 | 2.61 | 28.09 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
+| MissionControlClip1_422 | yuv422p10le | 21.65 MiB | 217.89 | 7.01 | 9.61 MiB | 96.75 | 2.16 | 28.94 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
+| MissionControlClip1_444 | yuv444p10le | 27.28 MiB | 274.60 | 5.85 | 9.93 MiB | 99.91 | 1.53 | 30.28 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
+| Total | mixed | 79.66 MiB | n/a | 9.38 | 52.48 MiB | n/a | 2.10 | n/a | 3.23 MiB | n/a | 19.85 | n/a |
 
 Current first-frame three-way comparison:
 
@@ -183,13 +189,13 @@ therefore much noisier than the 50-frame chart.
 
 | Vector | Format | FF lossless size | FF lossless Mbps | FF lossless fps | FF qp24 size | FF qp24 Mbps | FF qp24 fps | FF qp24 PSNR | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SceneComposition_1_420 | yuv420p8 | 0.38 MiB | 47.86 | 3.12 | 0.04 MiB | 5.24 | 5.40 | 24.60 | 0.16 MiB | 20.55 | 3.49 | 53.25 |
-| SceneComposition_1_422 | yuv422p8 | 0.43 MiB | 54.55 | 3.03 | 0.05 MiB | 5.74 | 4.47 | 25.71 | 0.18 MiB | 22.78 | 3.24 | 53.49 |
-| screen_wayland_activity_rgb | rgb24 | 0.89 MiB | 224.23 | 2.38 | 0.15 MiB | 38.96 | 2.12 | 23.50 | 0.29 MiB | 74.17 | 1.87 | 51.34 |
-| MissionControlClip1_420 | yuv420p10le | 1.25 MiB | 630.22 | 1.91 | 0.18 MiB | 90.83 | 3.40 | 24.60 | 0.33 MiB | 167.71 | 2.34 | 49.51 |
-| MissionControlClip1_422 | yuv422p10le | 1.47 MiB | 738.02 | 1.70 | 0.19 MiB | 93.26 | 3.00 | 25.67 | 0.36 MiB | 179.68 | 2.19 | 50.23 |
-| MissionControlClip1_444 | yuv444p10le | 1.86 MiB | 935.13 | 1.26 | 0.19 MiB | 96.92 | 2.23 | 27.16 | 0.39 MiB | 195.78 | 2.03 | 51.20 |
-| Total | mixed | 6.28 MiB | n/a | n/a | 0.80 MiB | n/a | n/a | n/a | 1.72 MiB | n/a | n/a | n/a |
+| SceneComposition_1_420 | yuv420p8 | 0.38 MiB | 47.86 | 3.12 | 0.08 MiB | 9.51 | 3.54 | 27.70 | 0.16 MiB | 20.55 | 3.49 | 53.25 |
+| SceneComposition_1_422 | yuv422p8 | 0.43 MiB | 54.55 | 3.03 | 0.08 MiB | 10.07 | 3.02 | 28.66 | 0.18 MiB | 22.78 | 3.24 | 53.49 |
+| screen_wayland_activity_rgb | rgb24 | 0.89 MiB | 224.23 | 2.38 | 0.29 MiB | 73.82 | 1.32 | 27.48 | 0.29 MiB | 74.17 | 1.87 | 51.34 |
+| MissionControlClip1_420 | yuv420p10le | 1.25 MiB | 630.22 | 1.91 | 0.27 MiB | 134.19 | 2.44 | 27.95 | 0.33 MiB | 167.71 | 2.34 | 49.51 |
+| MissionControlClip1_422 | yuv422p10le | 1.47 MiB | 738.02 | 1.70 | 0.27 MiB | 136.60 | 2.11 | 28.73 | 0.36 MiB | 179.68 | 2.19 | 50.23 |
+| MissionControlClip1_444 | yuv444p10le | 1.86 MiB | 935.13 | 1.26 | 0.28 MiB | 140.06 | 1.52 | 30.12 | 0.39 MiB | 195.78 | 2.03 | 51.20 |
+| Total | mixed | 6.28 MiB | n/a | n/a | 1.27 MiB | n/a | n/a | n/a | 1.72 MiB | n/a | n/a | n/a |
 
 ### Reused Lossy TXB Analysis
 
@@ -803,3 +809,233 @@ checkpoint:
 The one-vector QP24 lossy smoke check on `SceneComposition_1_420` produced
 2,618,257 bytes and 5.33 fps, matching the previous byte count and showing no
 lossy-path regression beyond normal timing noise.
+
+### Lossy Key-Frame TXB RD Search
+
+This checkpoint targets the first-frame quality gap on
+`screen_wayland_activity_rgb`. The retained change follows the same broad
+direction used by production AV1 encoders: spend more search on intra blocks,
+use transform-domain residual choices, and keep a rate/distortion-style score
+instead of picking a single residual quantizer. The AV1 technical overview
+describes intra prediction, block partitioning, transform coding, and the need
+to balance coding gain with encoder complexity. libaom's
+`intra_mode_search.c` and `tx_search.c` provide the same practical pattern:
+evaluate intra modes with pruning, then evaluate transform decisions with an
+RD score. The beyond-AV1 coding-tools paper was also checked for all-intra
+partition/prediction/transform direction, but this checkpoint keeps to syntax
+already supported by FrameForge.
+
+The fixed-leaf change applies to every lossy key frame, so the active
+six-vector charts above were refreshed after this checkpoint. PSNR improves on
+all measured rows, but bitrate also rises materially; the next quality pass
+should recover rate with a real lossy quantized transform path and a better
+entropy-rate estimate.
+
+Implementation notes:
+
+- Lossy key frames now use fixed 8x8 leaves so every 8x8 screen block gets a
+  local intra mode decision instead of being absorbed into larger adaptive
+  leaves.
+- Each TXB can now choose among DC-only, spatial quantized residual, refined
+  spatial residual, transform-domain quantized residual, and exact residual.
+- The TXB score now includes SSE plus a small variance-retention term so hard
+  text and UI edges are less likely to collapse to flat DC residuals.
+- Smooth luma mode remains disabled in lossy mode because an exact-luma
+  diagnostic showed the current smooth predictor approximation is not
+  reference-clean with AVM on RGB luma.
+- A directional-mode experiment was not retained; it was slower and only moved
+  the tested RGB key frame by about 0.01 dB.
+
+References checked:
+
+- [A Technical Overview of AV1](https://arxiv.org/abs/2008.06091)
+- [Study On Coding Tools Beyond AV1](https://arxiv.org/abs/2012.13491)
+- [libaom intra mode search](https://aomedia.googlesource.com/aom/+/refs/heads/main/av1/encoder/intra_mode_search.c)
+- [libaom transform search](https://aomedia.googlesource.com/aom/+/refs/heads/main/av1/encoder/tx_search.c)
+- [rav1e RDO implementation](https://github.com/xiph/rav1e/blob/master/src/rdo.rs)
+
+Wayland RGB QP24 comparison:
+
+| Run | Frames | Bytes | Size | Mbps | FPS | PSNR avg | Reference |
+|---|---:|---:|---:|---:|---:|---:|---|
+| FF previous | 1 | 162,348 | 0.15 MiB | 38.96 | 2.12 | 23.50 | internal |
+| FF current | 1 | 285,484 | 0.27 MiB | 68.52 | 1.43 | 27.06 | AVM match |
+| ffmpeg/libaom | 1 | 309,036 | 0.29 MiB | 74.17 | 1.87 | 51.34 | n/a |
+| FF previous | 50 | 8,179,011 | 7.80 MiB | 39.26 | 2.27 | 23.43 | internal |
+| FF current | 50 | 14,467,029 | 13.80 MiB | 69.44 | 1.49 | 27.00 | AVM match |
+| ffmpeg/libaom | 50 | n/a | 0.41 MiB | 2.09 | 22.42 | 47.78 | n/a |
+
+The gain is real but still not enough: the first-frame PSNR improves by
+3.56 dB while staying slightly below ffmpeg/libaom's first-frame byte count,
+but the 50-frame comparison remains dominated by FrameForge's missing lossy
+predictive path. Even on the single key frame, matching ffmpeg quality will
+require a true lossy quantized transform path instead of signaling lossless
+qindex and emulating quantization in software residual choices.
+
+Rejected follow-up probes:
+
+| Probe | First-frame bytes | PSNR avg | Decision |
+|---|---:|---:|---|
+| Variance weight 8 | 408,931 | 27.89 | Rejected: too many bytes for less than 1 dB |
+| Transform step 16x | 302,321 | 26.71 | Rejected: worse PSNR at higher bytes |
+| Transform candidate disabled | 296,523 | 26.10 | Rejected: current transform candidate helps both size and quality |
+
+Validation:
+
+```text
+make build
+cargo test -p frameforge-codecs --all-features
+manual Wayland RGB first-frame QP24 encode + ffmpeg PSNR
+manual Wayland RGB 50-frame QP24 encode + ffmpeg PSNR
+manual AVM decode of 1-frame and 50-frame streams, normalized planar GBR to packed RGB, hash matched
+manual six-row QP24 FrameForge refresh under verification/generated/lossy_quality
+```
+
+### Reference-Clean Smooth Edge Search And Transform Step 32
+
+This checkpoint refines the previous lossy key-frame heuristics by instrumenting
+mode and TXB choices with `FRAMEFORGE_AV2_LOSSY_STATS`, then keeping only the
+changes that moved the six-vector guardrail in the right direction. The first
+statistics pass showed that exact residuals still dominated the supposedly
+lossy TXB choices, especially on the RGB screen capture: exact won about 79%
+of luma TXBs and 65-80% of chroma TXBs, while transform residual choices were
+only about 2-3%. That made aggressive exact-residual suppression tempting, but
+the direct probe lost too much quality.
+
+The retained changes are:
+
+- Fix smooth-edge availability to use tile-local coded-MI coordinates and tile
+  region boundaries. This makes luma/chroma smooth prediction reference-clean
+  with AVM at tile edges.
+- Re-enable guarded luma smooth search in lossy mode, with a syntax surcharge
+  so smooth is used only when it materially reduces distortion.
+- Add guarded chroma smooth search with no extra surcharge after measuring that
+  a chroma surcharge made the RGB row slightly worse.
+- Tighten the transform-domain residual step from `quant_step * 48` to
+  `quant_step * 32`, which improves PSNR on every measured row without making
+  exact residuals dominate more than before.
+
+Retained first-frame deltas versus the previous active chart:
+
+| Vector | Format | Bytes delta | PSNR delta |
+|---|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | +5,577 | +0.52 dB |
+| SceneComposition_1_422 | yuv422p8 | +4,877 | +0.46 dB |
+| screen_wayland_activity_rgb | rgb24 | +22,118 | +0.42 dB |
+| MissionControlClip1_420 | yuv420p10le | +7,954 | +0.84 dB |
+| MissionControlClip1_422 | yuv422p10le | +6,898 | +0.71 dB |
+| MissionControlClip1_444 | yuv444p10le | +6,914 | +0.70 dB |
+| Total | mixed | +54,338 | n/a |
+
+Retained 50-frame deltas versus the previous active chart:
+
+| Vector | Format | Bytes delta | PSNR delta |
+|---|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | +291,136 | +0.49 dB |
+| SceneComposition_1_422 | yuv422p8 | +231,760 | +0.44 dB |
+| screen_wayland_activity_rgb | rgb24 | +1,157,260 | +0.45 dB |
+| MissionControlClip1_420 | yuv420p10le | +239,474 | +0.67 dB |
+| MissionControlClip1_422 | yuv422p10le | +184,103 | +0.59 dB |
+| MissionControlClip1_444 | yuv444p10le | +197,966 | +0.52 dB |
+| Total | mixed | +2,301,699 | n/a |
+
+The RGB single-frame row is now 307,602 bytes and 27.48 dB, still just under
+ffmpeg/libaom's single-frame byte count of 309,036 bytes but far below its
+51.34 dB PSNR. The result confirms that the new heuristics have useful
+quality signal, but also that the remaining gap is structural: FrameForge is
+still coding with lossless qindex syntax and software residual decisions
+instead of a proper lossy transform/quantizer model.
+
+Rejected probes:
+
+| Probe | First-frame bytes | PSNR avg | Decision |
+|---|---:|---:|---|
+| Exact residual tax | 346,155 | 26.19 | Rejected: exact TXBs fell to 12-22% but quality dropped too much |
+| Transform step 24 | 310,883 | 27.27 | Rejected: worse quality and larger than step 32 |
+| Chroma smooth surcharge 64 | 286,765 | 27.25 | Rejected: slightly worse than no chroma surcharge |
+| Luma smooth surcharge 64 | 286,658 | 27.24 | Rejected: worse RGB PSNR than the retained luma surcharge 192 |
+
+Lossless predictive validation remains exact on the six-vector set. The
+lossless total moved from 83,488,009 bytes to 83,531,182 bytes, a 43,173-byte
+increase, because the edge-availability fix changes legal smooth decisions at
+tile boundaries. That is recorded as a small bitrate delta rather than a
+correctness regression.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+manual Wayland RGB first-frame QP24 encode + ffmpeg PSNR + AVM normalized RGB hash match
+manual Wayland RGB 50-frame QP24 encode + ffmpeg PSNR + AVM normalized RGB hash match
+manual six-row first-frame and 50-frame QP24 refresh under verification/generated/lossy_quality
+```
+
+### Key-Frame Quality Guard And Fine DC Offsets
+
+This checkpoint focuses on making the RGB Wayland sample viable as a lossy key
+frame. The previous working point after the quality-biased TXB RD search was
+close to lossless size, but still only reached 40.43 dB because a small number
+of cheap DC-delta choices carried most of the remaining error. The retained
+change keeps the lossy residual path transparent but makes three key-frame
+decisions more quality-aware:
+
+- DC-only residuals now use a finer quantization step than AC residuals. At
+  QP24 this is an integer DC offset, which fixes the coarse flat-region bias
+  without adding AC coefficients.
+- Transform residual candidates use a denser coefficient step (`quant_step * 2`
+  for QP24) after the finer DC path made transform residuals rate-effective.
+- The TXB selector has a QP-scaled quality guard. If the chosen non-exact
+  candidate exceeds `quant_step^2 * 16 / 9` SSE for a 4x4 block, the encoder
+  spends the bits for an exact residual instead of allowing a visibly bad key
+  block.
+
+Wayland RGB QP24 first-frame comparison:
+
+| Run | Bytes | Size | Mbps @30fps | PSNR avg | Delta vs prior working point |
+|---|---:|---:|---:|---:|---:|
+| FF documented active row | 307,602 | 0.293 MiB | 73.82 | 27.48 | n/a |
+| FF prior working point | 838,708 | 0.800 MiB | 201.29 | 40.43 | n/a |
+| FF current | 905,328 | 0.863 MiB | 217.28 | 51.57 | +66,620 bytes, +11.13 dB |
+| ffmpeg/libaom | 309,036 | 0.295 MiB | 74.17 | 51.34 | n/a |
+
+Wayland RGB QP24 50-frame comparison:
+
+| Run | Frames | Bytes | Size | Mbps | FPS | PSNR avg |
+|---|---:|---:|---:|---:|---:|---:|
+| FF current | 50 | 45,741,095 | 43.622 MiB | 219.56 | ~1.57 | 51.80 |
+| ffmpeg/libaom cached row | 50 | n/a | 0.41 MiB | 2.09 | 22.42 | 47.78 |
+
+The first-frame PSNR is now in the ffmpeg/libaom quality neighborhood, but the
+bitrate is not: FrameForge spends roughly 2.9x the first-frame bytes to reach
+similar PSNR, and the 50-frame result is much larger because this path still
+emits independent key frames. The next structural rate work should be lossy
+screen-content tools or a predictive lossy path, not more exact-residual
+forcing.
+
+Selected and rejected first-frame probes:
+
+| Probe | Bytes | PSNR avg | Decision |
+|---|---:|---:|---|
+| Prior working point: TX step 16, quality RD | 838,708 | 40.43 | Baseline for this pass |
+| DC step QP/4 | 859,530 | 43.13 | Useful, but QP/8 was better |
+| DC step QP/8 | 852,509 | 43.26 | Better bytes and PSNR than QP/4 |
+| DC step QP/16 | 856,554 | 43.43 | Retained as the DC baseline |
+| DC QP/16 + TX step QP*8 | 865,748 | 44.66 | Useful transform-density gain |
+| DC QP/16 + TX step QP*4 | 872,357 | 45.45 | Useful, but QP*2 had a better small gain |
+| DC QP/16 + TX step QP*2 | 874,347 | 45.67 | Retained before quality guard |
+| TXB SSE cap 64 | 933,982 | 64.21 | Rejected: too close to lossless size |
+| TXB SSE cap 256 | 922,993 | 56.92 | Rejected: over target quality for extra bytes |
+| TXB SSE cap 512 | 914,688 | 54.30 | Rejected: still higher bytes than needed |
+| TXB SSE cap 1024 | 905,328 | 51.57 | Retained |
+| TXB SSE cap 1536 | 899,147 | 49.81 | Rejected: below the target quality range |
+
+Validation:
+
+```text
+cargo build --release -p frameforge-cli --all-features
+cargo test -p frameforge-codecs --all-features
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+manual Wayland RGB first-frame QP24 encode + ffmpeg PSNR
+manual Wayland RGB 50-frame QP24 encode + ffmpeg PSNR
+```

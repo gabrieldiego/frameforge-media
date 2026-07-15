@@ -1735,6 +1735,8 @@ impl Av2Black444TilePlan {
             Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut luma_mode_context =
             Av2LumaModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut fsc_mode_context =
+            Av2FscModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
         let mut mode_cache: Option<(
             usize,
             usize,
@@ -1780,23 +1782,32 @@ impl Av2Black444TilePlan {
                         &coded_mi_context,
                         mode_syntax,
                     );
-                    let mode_index = mode_syntax.index_for(mode.luma_intra_mode);
+                    let coded_luma_mode = mode.coded_luma_mode();
+                    let mode_index = mode_syntax.index_for(coded_luma_mode);
+                    let fsc_context =
+                        fsc_mode_context.context(decision.row, decision.col, decision.block_size);
                     write_intra_luma_mode(
                         writer,
                         *decision,
-                        mode.luma_intra_mode,
+                        coded_luma_mode,
                         mode_syntax.context,
                         mode_index,
-                        false,
-                        false,
-                        false,
-                        0,
+                        mode.luma_bdpcm_horz.is_some(),
+                        mode.luma_bdpcm_horz.unwrap_or(false),
+                        mode.use_fsc,
+                        fsc_context,
                     );
                     luma_mode_context.update_leaf(
                         decision.row,
                         decision.col,
                         decision.block_size,
-                        mode.luma_intra_mode,
+                        coded_luma_mode,
+                    );
+                    fsc_mode_context.update_leaf(
+                        decision.row,
+                        decision.col,
+                        decision.block_size,
+                        mode.use_fsc,
                     );
                 }
                 Av2TileDecisionKind::IntraChromaMode {
@@ -1816,8 +1827,8 @@ impl Av2Black444TilePlan {
                     write_intra_chroma_mode(
                         writer,
                         *decision,
-                        false,
-                        mode.luma_intra_mode,
+                        mode.chroma_use_bdpcm,
+                        mode.coded_luma_mode(),
                         mode.chroma_intra_mode,
                     );
                 }

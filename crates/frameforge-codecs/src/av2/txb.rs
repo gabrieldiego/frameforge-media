@@ -106,6 +106,53 @@ fn av2_fwht4x4(input: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
     output
 }
 
+fn av2_iwht4x4(coefficients: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
+    // Mirrors AVM av2_highbd_iwht4x4_16_add_c(), excluding the final
+    // predictor add and clipping step.
+    let mut output = [0i32; TX4X4_SAMPLES];
+    for i in 0..TX4X4_SIZE {
+        let mut a1 = coefficients[i * TX4X4_SIZE] >> 3;
+        let mut c1 = coefficients[i * TX4X4_SIZE + 1] >> 3;
+        let mut d1 = coefficients[i * TX4X4_SIZE + 2] >> 3;
+        let mut b1 = coefficients[i * TX4X4_SIZE + 3] >> 3;
+
+        a1 += c1;
+        d1 -= b1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= b1;
+        d1 += c1;
+
+        output[i * TX4X4_SIZE] = a1;
+        output[i * TX4X4_SIZE + 1] = b1;
+        output[i * TX4X4_SIZE + 2] = c1;
+        output[i * TX4X4_SIZE + 3] = d1;
+    }
+
+    let pass0 = output;
+    for i in 0..TX4X4_SIZE {
+        let mut a1 = pass0[i];
+        let mut c1 = pass0[TX4X4_SIZE + i];
+        let mut d1 = pass0[2 * TX4X4_SIZE + i];
+        let mut b1 = pass0[3 * TX4X4_SIZE + i];
+
+        a1 += c1;
+        d1 -= b1;
+        let e1 = (a1 - d1) >> 1;
+        b1 = e1 - b1;
+        c1 = e1 - c1;
+        a1 -= b1;
+        d1 += c1;
+
+        output[i] = a1;
+        output[TX4X4_SIZE + i] = b1;
+        output[2 * TX4X4_SIZE + i] = c1;
+        output[3 * TX4X4_SIZE + i] = d1;
+    }
+    output
+}
+
 fn write_luma_palette_residual_txb(
     writer: &mut Av2EntropyWriter,
     skip_ctx: u8,
