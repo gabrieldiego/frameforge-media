@@ -20,11 +20,12 @@ Local set:
 local-aomctc-b2-scc-1080p-lossless-50f
 ```
 
-Each row encodes 50 frames at 1920x1080:
+Each row encodes 50 frames. The AOM CTC rows are 1920x1080; the RGB
+screen-capture row is 2560x1440 and uses raw packed `rgb24` input:
 
 - SceneComposition_1 4:2:0 8-bit, original Y4M, 15 fps.
 - SceneComposition_1 4:2:2 8-bit, chroma-upsampled local Y4M, 15 fps.
-- SceneComposition_1 4:4:4 8-bit, chroma-upsampled local Y4M, 15 fps.
+- screen_wayland_activity_rgb 8-bit RGB, raw Wayland screen capture, 30 fps.
 - MissionControlClip1 4:2:0 10-bit, original Y4M, 60 fps.
 - MissionControlClip1 4:2:2 10-bit, chroma-upsampled local Y4M, 60 fps.
 - MissionControlClip1 4:4:4 10-bit, chroma-upsampled local Y4M, 60 fps.
@@ -87,26 +88,26 @@ speed direction.
 ## Active Regression Comparison
 
 This row-oriented chart tracks the current performance guardrails after the
-`Fast Lossless Score Edge Reuse` checkpoint. Each vector has a
+`High-Bit Lossless Block Reuse` checkpoint. Each vector has a
 `lossless+predictive` row and a `qp=24` row so future changes can compare
 lossless and lossy behavior from the same place.
 
 | Vector | Format | Mode | FF bytes | FF size | FF fps | Quality guardrail |
 |---|---:|---|---:|---:|---:|---|
-| SceneComposition_1_420 | yuv420p8 | lossless+predictive | 4,279,979 | 4.08 MiB | 14.37 | exact |
+| SceneComposition_1_420 | yuv420p8 | lossless+predictive | 4,279,979 | 4.08 MiB | 15.88 | exact |
 | SceneComposition_1_420 | yuv420p8 | qp=24 | 2,618,257 | 2.50 MiB | 5.65 | lossy smoke stable |
-| SceneComposition_1_422 | yuv422p8 | lossless+predictive | 4,817,495 | 4.59 MiB | 13.13 | exact |
+| SceneComposition_1_422 | yuv422p8 | lossless+predictive | 4,817,495 | 4.59 MiB | 13.32 | exact |
 | SceneComposition_1_422 | yuv422p8 | qp=24 | 2,872,543 | 2.74 MiB | 4.54 | lossy |
-| SceneComposition_1_444 | yuv444p8 | lossless+predictive | 5,764,622 | 5.50 MiB | 10.73 | exact |
-| SceneComposition_1_444 | yuv444p8 | qp=24 | 3,273,374 | 3.12 MiB | 3.35 | lossy |
-| MissionControlClip1_420 | yuv420p10le | lossless+predictive | 19,498,834 | 18.60 MiB | 8.14 | exact |
+| screen_wayland_activity_rgb | rgb24 | lossless+predictive | 3,604,512 | 3.44 MiB | 15.43 | exact |
+| screen_wayland_activity_rgb | rgb24 | qp=24 | 8,179,011 | 7.80 MiB | 2.27 | lossy |
+| MissionControlClip1_420 | yuv420p10le | lossless+predictive | 19,498,834 | 18.60 MiB | 8.10 | exact |
 | MissionControlClip1_420 | yuv420p10le | qp=24 | 6,349,562 | 6.06 MiB | 3.74 | lossy |
-| MissionControlClip1_422 | yuv422p10le | lossless+predictive | 22,689,992 | 21.64 MiB | 6.98 | exact |
+| MissionControlClip1_422 | yuv422p10le | lossless+predictive | 22,689,992 | 21.64 MiB | 7.01 | exact |
 | MissionControlClip1_422 | yuv422p10le | qp=24 | 6,599,158 | 6.29 MiB | 3.11 | lossy |
-| MissionControlClip1_444 | yuv444p10le | lossless+predictive | 28,597,197 | 27.27 MiB | 5.86 | exact |
+| MissionControlClip1_444 | yuv444p10le | lossless+predictive | 28,597,197 | 27.27 MiB | 5.85 | exact |
 | MissionControlClip1_444 | yuv444p10le | qp=24 | 6,928,645 | 6.61 MiB | 2.35 | lossy |
-| Total | mixed | lossless+predictive | 85,648,119 | 81.68 MiB | 8.88 | exact |
-| Total | mixed | qp=24 | 28,641,539 | 27.31 MiB | 3.51 | lossy |
+| Total | mixed | lossless+predictive | 83,488,009 | 79.62 MiB | 9.38 | exact |
+| Total | mixed | qp=24 | 33,547,176 | 31.99 MiB | 3.24 | lossy |
 
 ## Checkpoints
 
@@ -155,19 +156,40 @@ realtime-screen target:
 | MissionControlClip1_444 | yuv444p10le | 13.05 MiB | 131.34 | 1.59 | 27.60 | -76,015 | -2.6% | -0.00 | 0.74 MiB | 14.21 | 36.74 | 17.46x |
 | Total | mixed | 52.15 MiB | n/a | 2.30 | n/a | -296,636 | -1.7% | n/a | 3.25 MiB | n/a | n/a | 16.06x |
 
-Current three-way comparison:
+Current 50-frame three-way comparison with the RGB screen-capture slot:
 
-Delta columns compare against the previous current chart for this report.
+The ffmpeg/libaom row is the realtime-screen predictive baseline. FrameForge
+`qp=24` is currently all-intra, so the RGB screen-capture row intentionally
+shows the current missing lossy predictive path rather than an all-intra-only
+comparison. For the RGB row, ffmpeg is fed raw packed `rgb24`, converted to
+full-range `gbrp` with GBR matrix metadata, and scored against decoded packed
+RGB output.
 
-| Vector | Format | Lossless size | Lossless Mbps | Lossless fps | Lossless PSNR | Lossy size | Lossy Mbps | Lossy fps | Lossy PSNR | Lossy bytes delta | Lossy FPS delta | Lossy PSNR delta | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 14.08 | inf | 2.50 MiB | 6.30 | 5.44 | 24.27 | -4,536 | -13.8% | -0.01 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
-| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 11.88 | inf | 2.75 MiB | 6.92 | 4.47 | 25.37 | -4,749 | -13.4% | -0.02 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
-| SceneComposition_1_444 | yuv444p8 | 5.50 MiB | 13.84 | 10.07 | inf | 3.14 MiB | 7.91 | 3.19 | 26.86 | -4,401 | -12.1% | -0.01 | 0.42 MiB | 1.06 | 28.13 | 47.24 |
-| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 7.86 | inf | 6.05 MiB | 60.95 | 3.65 | 25.14 | -195,564 | -14.3% | -0.03 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
-| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 6.86 | inf | 6.30 MiB | 63.38 | 2.99 | 26.17 | -196,194 | -13.3% | -0.03 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
-| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.62 | inf | 6.61 MiB | 66.54 | 2.26 | 27.68 | -195,447 | -9.6% | -0.02 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
-| Total | mixed | 81.68 MiB | n/a | 8.50 | inf | 27.35 MiB | n/a | 3.39 | n/a | -600,891 | -12.4% | n/a | 3.25 MiB | n/a | 20.47 | n/a |
+| Vector | Format | FF lossless size | FF lossless Mbps | FF lossless fps | FF qp24 size | FF qp24 Mbps | FF qp24 fps | FF qp24 PSNR | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 4.08 MiB | 10.27 | 15.88 | 2.50 MiB | 6.28 | 5.63 | 24.27 | 0.34 MiB | 0.85 | 33.31 | 45.05 |
+| SceneComposition_1_422 | yuv422p8 | 4.59 MiB | 11.56 | 13.32 | 2.74 MiB | 6.89 | 4.72 | 25.37 | 0.39 MiB | 0.98 | 31.09 | 46.02 |
+| screen_wayland_activity_rgb | rgb24 | 3.44 MiB | 17.30 | 15.43 | 7.80 MiB | 39.26 | 2.27 | 23.43 | 0.41 MiB | 2.09 | 22.42 | 47.78 |
+| MissionControlClip1_420 | yuv420p10le | 18.60 MiB | 187.19 | 8.10 | 6.06 MiB | 60.96 | 3.71 | 25.14 | 0.65 MiB | 6.55 | 17.21 | 33.80 |
+| MissionControlClip1_422 | yuv422p10le | 21.64 MiB | 217.82 | 7.01 | 6.29 MiB | 63.35 | 3.10 | 26.17 | 0.70 MiB | 7.02 | 14.94 | 34.98 |
+| MissionControlClip1_444 | yuv444p10le | 27.27 MiB | 274.53 | 5.85 | 6.61 MiB | 66.51 | 2.34 | 27.68 | 0.74 MiB | 7.47 | 14.21 | 36.74 |
+| Total | mixed | 79.62 MiB | n/a | 9.38 | 31.99 MiB | n/a | 3.24 | n/a | 3.23 MiB | n/a | 19.85 | n/a |
+
+Current first-frame three-way comparison:
+
+This one-frame view removes the inter-frame advantage and is the key-frame
+quality/bitrate diagnostic. Single-frame FPS includes process startup and is
+therefore much noisier than the 50-frame chart.
+
+| Vector | Format | FF lossless size | FF lossless Mbps | FF lossless fps | FF qp24 size | FF qp24 Mbps | FF qp24 fps | FF qp24 PSNR | ffmpeg size | ffmpeg Mbps | ffmpeg fps | ffmpeg PSNR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 0.38 MiB | 47.86 | 3.12 | 0.04 MiB | 5.24 | 5.40 | 24.60 | 0.16 MiB | 20.55 | 3.49 | 53.25 |
+| SceneComposition_1_422 | yuv422p8 | 0.43 MiB | 54.55 | 3.03 | 0.05 MiB | 5.74 | 4.47 | 25.71 | 0.18 MiB | 22.78 | 3.24 | 53.49 |
+| screen_wayland_activity_rgb | rgb24 | 0.89 MiB | 224.23 | 2.38 | 0.15 MiB | 38.96 | 2.12 | 23.50 | 0.29 MiB | 74.17 | 1.87 | 51.34 |
+| MissionControlClip1_420 | yuv420p10le | 1.25 MiB | 630.22 | 1.91 | 0.18 MiB | 90.83 | 3.40 | 24.60 | 0.33 MiB | 167.71 | 2.34 | 49.51 |
+| MissionControlClip1_422 | yuv422p10le | 1.47 MiB | 738.02 | 1.70 | 0.19 MiB | 93.26 | 3.00 | 25.67 | 0.36 MiB | 179.68 | 2.19 | 50.23 |
+| MissionControlClip1_444 | yuv444p10le | 1.86 MiB | 935.13 | 1.26 | 0.19 MiB | 96.92 | 2.23 | 27.16 | 0.39 MiB | 195.78 | 2.03 | 51.20 |
+| Total | mixed | 6.28 MiB | n/a | n/a | 0.80 MiB | n/a | n/a | n/a | 1.72 MiB | n/a | n/a | n/a |
 
 ### Reused Lossy TXB Analysis
 
@@ -723,4 +745,61 @@ checkpoint:
 
 The one-vector QP24 lossy smoke check on `SceneComposition_1_420` produced
 2,618,257 bytes and 5.51 fps, matching the previous byte count and showing no
+lossy-path regression beyond normal timing noise.
+
+### High-Bit Lossless Block Reuse
+
+This checkpoint generalizes the source-block reuse from the sampled scoring
+path into the source-backed 4x4 residual helpers. The 4x4 source block loader
+now uses direct safe row slices for both 8-bit and high-bit-depth planar input,
+and the source-backed DC/H/V intra residual, DPCM residual, and luma-palette
+residual paths reuse that loaded block instead of rereading the same samples
+inside each residual loop. Mode decisions and syntax are unchanged.
+
+The six first-frame I-only gprof sweep uses 100 sampled runs per row from the
+`local-aomctc-b2-scc-1080p-lossless-50f` manifest. All first-frame payload
+sizes stayed byte-identical.
+
+| Vector | Format | First-frame bytes | Before sampled s | After sampled s | Delta |
+|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 387,721 | 14.47 | 14.29 | -1.2% |
+| SceneComposition_1_422 | yuv422p8 | 443,864 | 16.99 | 16.47 | -3.1% |
+| SceneComposition_1_444 | yuv444p8 | 535,455 | 18.51 | 18.26 | -1.4% |
+| MissionControlClip1_420 | yuv420p10le | 1,305,766 | 36.32 | 34.33 | -5.5% |
+| MissionControlClip1_422 | yuv422p10le | 1,530,687 | 39.92 | 39.01 | -2.3% |
+| MissionControlClip1_444 | yuv444p10le | 1,940,894 | 48.99 | 46.72 | -4.6% |
+
+The biggest localized win is the source-backed DPCM residual bucket on 10-bit
+content: `MissionControlClip1_420` moved from 1.15 s to 0.20 s, and
+`MissionControlClip1_422` moved from 1.96 s to 0.20 s in the 100-run profiles.
+The dense 4:4:4 rows remain primarily entropy-bound, especially in chroma
+coefficient and chroma BDPCM writing.
+
+Validation:
+
+```text
+cargo test -p frameforge-codecs --all-features
+six first-frame gprof profiles with GPROF_SAMPLE_RUNS=100
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_DIRECT_SOURCE_FILES=1
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1 COMPRESSION_LIMIT=1
+make test
+```
+
+Lossless predictive guardrail versus the fast lossless score edge reuse
+checkpoint:
+
+| Vector | Format | FF bytes | FF size | FF fps | Bytes delta | FPS delta | Recon |
+|---|---:|---:|---:|---:|---:|---:|---|
+| SceneComposition_1_420 | yuv420p8 | 4,279,979 | 4.08 MiB | 15.88 | 0 | +10.5% | exact |
+| SceneComposition_1_422 | yuv422p8 | 4,817,495 | 4.59 MiB | 13.32 | 0 | +1.4% | exact |
+| SceneComposition_1_444 | yuv444p8 | 5,764,622 | 5.50 MiB | 10.82 | 0 | +0.8% | exact |
+| MissionControlClip1_420 | yuv420p10le | 19,498,834 | 18.60 MiB | 8.10 | 0 | -0.5% | exact |
+| MissionControlClip1_422 | yuv422p10le | 22,689,992 | 21.64 MiB | 7.01 | 0 | +0.4% | exact |
+| MissionControlClip1_444 | yuv444p10le | 28,597,197 | 27.27 MiB | 5.85 | 0 | -0.2% | exact |
+| Total | mixed | 85,648,119 | 81.68 MiB | 8.99 | 0 | +1.2% | exact |
+
+The one-vector QP24 lossy smoke check on `SceneComposition_1_420` produced
+2,618,257 bytes and 5.33 fps, matching the previous byte count and showing no
 lossy-path regression beyond normal timing noise.

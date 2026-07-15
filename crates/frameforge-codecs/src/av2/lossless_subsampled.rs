@@ -156,11 +156,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
 
     fn source_block4x4(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> [i32; 16] {
         let mut block = [0i32; TX4X4_SAMPLES];
+        let stride = match plane {
+            Av2LosslessPlane::Y => self.geometry.width,
+            Av2LosslessPlane::U | Av2LosslessPlane::V => self.c_width,
+        };
         if self.bit_depth.bits() <= 8 {
-            let stride = match plane {
-                Av2LosslessPlane::Y => self.geometry.width,
-                Av2LosslessPlane::U | Av2LosslessPlane::V => self.c_width,
-            };
             let start = self.offset(plane, x0, y0);
             for local_y in 0..TX4X4_SIZE {
                 let row_start = start + local_y * stride;
@@ -173,11 +173,16 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             }
             return block;
         }
+        let start = self.offset(plane, x0, y0) * 2;
+        let stride_bytes = stride * 2;
         for local_y in 0..TX4X4_SIZE {
-            for local_x in 0..TX4X4_SIZE {
-                block[local_y * TX4X4_SIZE + local_x] =
-                    i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y));
-            }
+            let row_start = start + local_y * stride_bytes;
+            let row = &self.source[row_start..row_start + TX4X4_SIZE * 2];
+            let block_row = local_y * TX4X4_SIZE;
+            block[block_row] = i32::from(Av2Sample::from_le_bytes([row[0], row[1]]));
+            block[block_row + 1] = i32::from(Av2Sample::from_le_bytes([row[2], row[3]]));
+            block[block_row + 2] = i32::from(Av2Sample::from_le_bytes([row[4], row[5]]));
+            block[block_row + 3] = i32::from(Av2Sample::from_le_bytes([row[6], row[7]]));
         }
         block
     }
@@ -482,13 +487,14 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         y0: usize,
     ) -> [i32; TX4X4_SAMPLES] {
         let mut residual = [0i32; TX4X4_SAMPLES];
+        let source = self.source_block4x4(Av2LosslessPlane::Y, x0, y0);
         for local_y in 0..TX4X4_SIZE {
             let y = y0 + local_y;
             for local_x in 0..TX4X4_SIZE {
                 let x = x0 + local_x;
-                residual[local_y * TX4X4_SIZE + local_x] =
-                    i32::from(self.source_sample(Av2LosslessPlane::Y, x, y))
-                        - i32::from(palette.region_prediction_sample(region, x, y));
+                let pos = local_y * TX4X4_SIZE + local_x;
+                residual[pos] =
+                    source[pos] - i32::from(palette.region_prediction_sample(region, x, y));
             }
         }
         residual
@@ -951,15 +957,12 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         mode: Av2ChromaIntraMode,
     ) -> Option<[i32; TX4X4_SAMPLES]> {
         let mut residual = [0i32; TX4X4_SAMPLES];
+        let source = self.source_block4x4(plane, x0, y0);
         match mode {
             Av2ChromaIntraMode::Dc => {
                 let predictor = i32::from(self.source_backed_dc_predictor(plane, x0, y0));
-                for local_y in 0..TX4X4_SIZE {
-                    for local_x in 0..TX4X4_SIZE {
-                        residual[local_y * TX4X4_SIZE + local_x] =
-                            i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
-                                - predictor;
-                    }
+                for index in 0..TX4X4_SAMPLES {
+                    residual[index] = source[index] - predictor;
                 }
                 Some(residual)
             }
@@ -967,10 +970,10 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 for local_y in 0..TX4X4_SIZE {
                     let predictor =
                         i32::from(self.source_backed_h_predictor(plane, x0, y0, local_y));
+                    let row_start = local_y * TX4X4_SIZE;
                     for local_x in 0..TX4X4_SIZE {
-                        residual[local_y * TX4X4_SIZE + local_x] =
-                            i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
-                                - predictor;
+                        let pos = row_start + local_x;
+                        residual[pos] = source[pos] - predictor;
                     }
                 }
                 Some(residual)
@@ -982,9 +985,8 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
                 }
                 for local_y in 0..TX4X4_SIZE {
                     for local_x in 0..TX4X4_SIZE {
-                        residual[local_y * TX4X4_SIZE + local_x] =
-                            i32::from(self.source_sample(plane, x0 + local_x, y0 + local_y))
-                                - predictors[local_x];
+                        let pos = local_y * TX4X4_SIZE + local_x;
+                        residual[pos] = source[pos] - predictors[local_x];
                     }
                 }
                 Some(residual)
@@ -1001,23 +1003,31 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         horz: bool,
     ) -> [i32; TX4X4_SAMPLES] {
         let mut residual = [0i32; TX4X4_SAMPLES];
-        for local_y in 0..TX4X4_SIZE {
+        let source = self.source_block4x4(plane, x0, y0);
+        if horz {
+            for local_y in 0..TX4X4_SIZE {
+                let row_start = local_y * TX4X4_SIZE;
+                let predictor = i32::from(self.source_backed_h_predictor(plane, x0, y0, local_y));
+                residual[row_start] = source[row_start] - predictor;
+                for local_x in 1..TX4X4_SIZE {
+                    let pos = row_start + local_x;
+                    residual[pos] = source[pos] - source[pos - 1];
+                }
+            }
+        } else {
+            let mut predictors = [0i32; TX4X4_SIZE];
+            for (local_x, predictor) in predictors.iter_mut().enumerate() {
+                *predictor = i32::from(self.source_backed_v_predictor(plane, x0, y0, local_x));
+            }
             for local_x in 0..TX4X4_SIZE {
-                let x = x0 + local_x;
-                let y = y0 + local_y;
-                let sample = i32::from(self.source_sample(plane, x, y));
-                let predicted_delta = if horz {
-                    if local_x == 0 {
-                        sample - i32::from(self.source_backed_h_predictor(plane, x0, y0, local_y))
-                    } else {
-                        sample - i32::from(self.source_sample(plane, x - 1, y))
-                    }
-                } else if local_y == 0 {
-                    sample - i32::from(self.source_backed_v_predictor(plane, x0, y0, local_x))
-                } else {
-                    sample - i32::from(self.source_sample(plane, x, y - 1))
-                };
-                residual[local_y * TX4X4_SIZE + local_x] = predicted_delta;
+                residual[local_x] = source[local_x] - predictors[local_x];
+            }
+            for local_y in 1..TX4X4_SIZE {
+                let row_start = local_y * TX4X4_SIZE;
+                for local_x in 0..TX4X4_SIZE {
+                    let pos = row_start + local_x;
+                    residual[pos] = source[pos] - source[pos - TX4X4_SIZE];
+                }
             }
         }
         residual
