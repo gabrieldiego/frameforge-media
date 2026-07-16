@@ -9,6 +9,8 @@ mod intra_prediction;
 mod motion;
 mod palette;
 mod planar;
+#[cfg(feature = "av2-sb-bit-profile")]
+mod sb_bits;
 mod syntax;
 mod tile;
 
@@ -174,6 +176,72 @@ impl Av2StreamFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2DeltaQParams {
+    present: bool,
+    resolution_log2: u8,
+}
+
+impl Av2DeltaQParams {
+    const fn disabled() -> Self {
+        Self {
+            present: false,
+            resolution_log2: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2QuantizationParams {
+    base_qindex: u16,
+    delta_q: Av2DeltaQParams,
+    using_qmatrix: bool,
+}
+
+impl Av2QuantizationParams {
+    const fn lossless() -> Self {
+        Self {
+            base_qindex: 0,
+            delta_q: Av2DeltaQParams::disabled(),
+            using_qmatrix: false,
+        }
+    }
+
+    fn regular_qp(qp: u8, bit_depth: SampleBitDepth) -> Self {
+        Self {
+            base_qindex: av2_base_qindex_for_qp(qp, bit_depth),
+            delta_q: Av2DeltaQParams::disabled(),
+            using_qmatrix: false,
+        }
+    }
+
+    const fn is_coded_lossless(self) -> bool {
+        self.base_qindex == 0 && !self.delta_q.present && !self.using_qmatrix
+    }
+}
+
+fn av2_base_qindex_for_qp(qp: u8, bit_depth: SampleBitDepth) -> u16 {
+    let scaled = (u32::from(qp.max(1)) * 10).div_ceil(3);
+    (scaled as u16).min(av2_max_qindex(bit_depth))
+}
+
+fn av2_qindex_bits(bit_depth: SampleBitDepth) -> u8 {
+    if bit_depth.bits() == 8 {
+        8
+    } else {
+        9
+    }
+}
+
+fn av2_max_qindex(bit_depth: SampleBitDepth) -> u16 {
+    match bit_depth.bits() {
+        8 => 255,
+        10 => 255 + 2 * 24,
+        12 => 255 + 4 * 24,
+        bits => unreachable!("unsupported AV2 bit depth {bits}"),
+    }
+}
+
 fn av2_lossless_dc_predictor(bit_depth: SampleBitDepth) -> Av2Sample {
     128u16 << u32::from(bit_depth.bits() - 8)
 }
@@ -232,7 +300,9 @@ impl Av2Black444MvpProfile {
             // AVM read_sequence_transform_quant_entropy_group_tool_flags()
             // derives IDTX intra from FSC when FSC is enabled.
             enable_idtx_intra: true,
-            enable_chroma_dctonly: false,
+            // The regular-q writer reconstructs chroma as DCT_DCT until it
+            // grows chroma tx-type selection and signaling.
+            enable_chroma_dctonly: true,
             enable_cctx: false,
             // AV2 v1.0.0 tile_group_obu() updates CDFs while decode_tile()
             // parses symbols unless this header flag disables adaptation.
@@ -694,9 +764,6 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
-    if options.predictive && !options.lossless {
-        return Err("AV2 predictive mode is currently implemented only for lossless encode".into());
-    }
     let rgb_identity = request.format == PixelFormat::Rgb24;
 
     let source_expected_len =
@@ -709,7 +776,10 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     debug_assert_eq!(source_expected_len, coded_expected_len);
     let mut predictive_started = false;
     let mut predictive_reference: Option<Vec<u8>> = None;
+    let mut predictive_reconstruction: Option<Vec<u8>> = None;
     for frame_index in 0..request.params.frames {
+        #[cfg(feature = "av2-sb-bit-profile")]
+        sb_bits::set_current_frame(frame_index);
         let mut source_frame = vec![0; source_expected_len];
         input.read_exact(&mut source_frame).map_err(|err| {
             format!(
@@ -813,14 +883,75 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
             options.qp.is_some() || stream_format.chroma_format == Av2ChromaFormat::Yuv420;
         if use_lossy_residual_path {
             let qp = options.qp.unwrap_or(AV2_LOSSY_DEFAULT_QP);
-            let (bitstream, reconstruction) =
+            let (bitstream, reconstruction) = if options.predictive {
+                let order_hint = av2_order_hint_for_frame(frame_index);
+                if predictive_reference.as_deref() == Some(frame) {
+                    if let Some(reference_reconstruction) = predictive_reconstruction.as_deref() {
+                        av2_lossy_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
+                            reference_reconstruction,
+                            order_hint,
+                        )
+                    } else {
+                        av2_lossy_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+                            geometry,
+                            stream_format,
+                            frame,
+                            qp,
+                            !predictive_started,
+                            order_hint,
+                            rgb_identity,
+                        )
+                    }
+                } else {
+                    if let (Some(reference), Some(reference_reconstruction)) = (
+                        predictive_reference.as_deref(),
+                        predictive_reconstruction.as_deref(),
+                    ) {
+                        av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_frame(
+                            geometry,
+                            stream_format,
+                            frame,
+                            reference,
+                            reference_reconstruction,
+                            order_hint,
+                        )
+                        .unwrap_or_else(|| {
+                            av2_lossy_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+                                geometry,
+                                stream_format,
+                                frame,
+                                qp,
+                                !predictive_started,
+                                order_hint,
+                                rgb_identity,
+                            )
+                        })
+                    } else {
+                        av2_lossy_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+                            geometry,
+                            stream_format,
+                            frame,
+                            qp,
+                            !predictive_started,
+                            order_hint,
+                            rgb_identity,
+                        )
+                    }
+                }
+            } else {
                 av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
                     geometry,
                     stream_format,
                     frame,
                     qp,
                     rgb_identity,
-                );
+                )
+            };
+            if options.predictive {
+                predictive_started = true;
+                predictive_reference = Some(frame.to_vec());
+                predictive_reconstruction = Some(reconstruction.clone());
+            }
             output
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
@@ -846,6 +977,12 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 });
             }
             continue;
+        }
+        if options.predictive {
+            return Err(format!(
+                "AV2 predictive non-lossless encode for {} requires --qp to use the lossy residual path",
+                request.format
+            ));
         }
 
         let frame_mode = Av2Mvp444FrameMode::from_frame(frame, geometry, stream_format.bit_depth)?;
@@ -985,6 +1122,60 @@ fn av2_lossy_subsampled_bitstream_and_reconstruction_for_frame(
             frame,
             &mut reconstruction,
             qp,
+        ),
+    );
+    (out, reconstruction)
+}
+
+fn av2_lossy_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    qp: u8,
+    include_sequence_header: bool,
+    order_hint: u16,
+    rgb_identity: bool,
+) -> (Vec<u8>, Vec<u8>) {
+    assert!(qp > 0, "AV2 lossy QP must be non-zero");
+    let expected_len = Picture::expected_len(
+        geometry.width,
+        geometry.height,
+        stream_format.pixel_format(),
+    );
+    assert_eq!(
+        frame.len(),
+        expected_len,
+        "AV2 predictive planar lossy input length must match geometry"
+    );
+    let mut reconstruction = vec![0; expected_len];
+    let mut out = Vec::new();
+    append_obu(
+        &mut out,
+        Av2ObuType::TemporalDelimiter,
+        &Av2SyntaxPayload::default(),
+    );
+    if include_sequence_header {
+        append_obu(
+            &mut out,
+            Av2ObuType::SequenceHeader,
+            &av2_mvp_predictive_sequence_header_payload(
+                geometry,
+                Av2Black444MvpProfile::current(),
+                stream_format,
+            ),
+        );
+        append_rgb_content_interpretation_if_needed(&mut out, rgb_identity);
+    }
+    append_obu(
+        &mut out,
+        Av2ObuType::ClosedLoopKey,
+        &av2_lossy_subsampled_predictive_closed_loop_key_payload(
+            geometry,
+            stream_format,
+            frame,
+            &mut reconstruction,
+            qp,
+            order_hint,
         ),
     );
     (out, reconstruction)
@@ -1165,6 +1356,149 @@ fn av2_lossless_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
     (out, frame.to_vec())
 }
 
+fn av2_lossy_subsampled_regular_sef_bitstream_and_reconstruction_for_frame(
+    reference_reconstruction: &[u8],
+    order_hint: u16,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut out = Vec::new();
+    append_obu(
+        &mut out,
+        Av2ObuType::TemporalDelimiter,
+        &Av2SyntaxPayload::default(),
+    );
+    append_obu(
+        &mut out,
+        Av2ObuType::RegularSef,
+        &av2_regular_sef_payload(order_hint),
+    );
+    (out, reference_reconstruction.to_vec())
+}
+
+fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_frame(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    reference_source: &[u8],
+    reference_reconstruction: &[u8],
+    order_hint: u16,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let expected_len = Picture::expected_len(
+        geometry.width,
+        geometry.height,
+        stream_format.pixel_format(),
+    );
+    if frame.len() != expected_len
+        || reference_source.len() != expected_len
+        || reference_reconstruction.len() != expected_len
+    {
+        return None;
+    }
+    let layout = planar::Av2PlanarYuvLayout::new(
+        geometry,
+        stream_format.chroma_format,
+        stream_format.bit_depth,
+    )
+    .ok()?;
+    let tile_layout = Av2TileLayout::lossy_subsampled_for_geometry(geometry);
+    if tile_layout.is_single_tile() {
+        return None;
+    }
+
+    let mut has_zero_mv_tile = false;
+    let mut has_intra_tile = false;
+    let tile_modes: Vec<_> = tile_layout
+        .regions
+        .iter()
+        .map(|region| {
+            if layout.regions_equal_between(
+                frame,
+                region.origin_x,
+                region.origin_y,
+                reference_source,
+                region.origin_x,
+                region.origin_y,
+                region.width,
+                region.height,
+            ) {
+                has_zero_mv_tile = true;
+                Av2PredictiveTileMode::ZeroMv
+            } else {
+                has_intra_tile = true;
+                Av2PredictiveTileMode::Intra
+            }
+        })
+        .collect();
+    if !has_zero_mv_tile || !has_intra_tile {
+        return None;
+    }
+
+    let profile = Av2Black444MvpProfile::current();
+    let palette = palette::build_luma_palette_lossless(
+        frame,
+        geometry,
+        stream_format.chroma_format,
+        stream_format.bit_depth,
+    )
+    .ok();
+    let palette_ref = palette.as_ref();
+    let mut reconstruction = vec![0; expected_len];
+    let mut tile_payloads = Vec::with_capacity(tile_layout.tile_count());
+    for (&region, tile_mode) in tile_layout.regions.iter().zip(tile_modes.iter()) {
+        let reference = if matches!(tile_mode, Av2PredictiveTileMode::ZeroMv) {
+            reference_reconstruction
+        } else {
+            frame
+        };
+        if !layout.copy_region_between(
+            &mut reconstruction,
+            region.origin_x,
+            region.origin_y,
+            reference,
+            region.origin_x,
+            region.origin_y,
+            region.width,
+            region.height,
+        ) {
+            return None;
+        }
+        tile_payloads.push(av2_lossless_predictive_tile_payload_for_mode(
+            region,
+            tile_mode,
+            profile,
+            geometry,
+            stream_format,
+            frame,
+            reference_source,
+            palette_ref,
+        ));
+    }
+
+    let mut payload = av2_mvp_regular_inter_header_payload(
+        &tile_layout,
+        stream_format,
+        Av2QuantizationParams::lossless(),
+        order_hint,
+    );
+    let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
+    let bit_offset = payload.bytes.len() * 8;
+    payload.fields.push(syntax::Av2SyntaxField {
+        name: "tile_group.tile_entropy_payload",
+        code: syntax::Av2SyntaxCode::TileEntropyPayload,
+        bit_offset,
+        bit_count: tile_payload.len() * 8,
+    });
+    payload.bytes.extend_from_slice(&tile_payload);
+
+    let mut out = Vec::new();
+    append_obu(
+        &mut out,
+        Av2ObuType::TemporalDelimiter,
+        &Av2SyntaxPayload::default(),
+    );
+    append_obu(&mut out, Av2ObuType::RegularTileGroup, &payload);
+    Some((out, reconstruction))
+}
+
 fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_frame(
     geometry: Av2VideoGeometry,
     stream_format: Av2StreamFormat,
@@ -1327,7 +1661,12 @@ fn av2_lossless_subsampled_regular_inter_tiles_bitstream_and_reconstruction_for_
             .collect()
     };
 
-    let mut payload = av2_mvp_regular_inter_header_payload(&tile_layout, order_hint);
+    let mut payload = av2_mvp_regular_inter_header_payload(
+        &tile_layout,
+        stream_format,
+        Av2QuantizationParams::lossless(),
+        order_hint,
+    );
     let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
     let bit_offset = payload.bytes.len() * 8;
     payload.fields.push(syntax::Av2SyntaxField {
@@ -1647,7 +1986,7 @@ fn av2_mvp_444_bitstream_for_mode(
     append_obu(
         &mut out,
         Av2ObuType::ClosedLoopKey,
-        &av2_mvp_444_closed_loop_key_payload(geometry, frame_mode),
+        &av2_mvp_444_closed_loop_key_payload(geometry, bit_depth, frame_mode),
     );
     out
 }
@@ -1785,6 +2124,11 @@ fn av2_mvp_444_trace_jsonl_for_mode(
         frame_mode.allow_screen_content_tools(),
         frame_mode.allow_intrabc(),
         &tile_layout,
+        Av2StreamFormat {
+            chroma_format: Av2ChromaFormat::Yuv444,
+            bit_depth,
+        },
+        Av2QuantizationParams::lossless(),
     );
     let entropy = av2_tile_entropy_payloads_for_mode(&tile_layout, frame_mode, true);
     let mut lines = String::new();
@@ -1844,7 +2188,13 @@ fn av2_black_trace_jsonl_for_format(
     let tile_layout = Av2TileLayout::for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
     let sequence = av2_mvp_sequence_header_payload(geometry, profile, stream_format);
-    let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
+    let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(
+        false,
+        false,
+        &tile_layout,
+        stream_format,
+        Av2QuantizationParams::lossless(),
+    );
     let entropy: Vec<_> = tile_layout
         .regions
         .iter()
@@ -1923,7 +2273,13 @@ fn av2_lossy_subsampled_trace_jsonl_for_frame(
     let tile_layout = Av2TileLayout::lossy_subsampled_for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
     let sequence = av2_mvp_sequence_header_payload(geometry, profile, stream_format);
-    let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
+    let closed_loop_header = av2_mvp_444_closed_loop_key_header_payload(
+        false,
+        false,
+        &tile_layout,
+        stream_format,
+        Av2QuantizationParams::regular_qp(qp, stream_format.bit_depth),
+    );
     let mut reconstruction = vec![0; expected_len];
     let entropy: Vec<_> = tile_layout
         .regions
@@ -1938,6 +2294,7 @@ fn av2_lossy_subsampled_trace_jsonl_for_frame(
                 frame,
                 &mut reconstruction,
                 qp,
+                Av2QuantizationParams::regular_qp(qp, stream_format.bit_depth).base_qindex,
             )
         })
         .collect();
@@ -2425,6 +2782,8 @@ fn av2_black_444_closed_loop_key_header_payload() -> Av2SyntaxPayload {
             width: 64,
             height: 64,
         }),
+        Av2StreamFormat::yuv444_8(),
+        Av2QuantizationParams::lossless(),
     )
 }
 
@@ -2432,11 +2791,15 @@ fn av2_mvp_444_closed_loop_key_header_payload(
     allow_screen_content_tools: bool,
     allow_intrabc: bool,
     tile_layout: &Av2TileLayout,
+    stream_format: Av2StreamFormat,
+    quantization: Av2QuantizationParams,
 ) -> Av2SyntaxPayload {
     av2_mvp_444_closed_loop_key_header_payload_with_mode(
         allow_screen_content_tools,
         allow_intrabc,
         tile_layout,
+        stream_format,
+        quantization,
         true,
         0,
     )
@@ -2446,12 +2809,16 @@ fn av2_mvp_444_predictive_closed_loop_key_header_payload(
     allow_screen_content_tools: bool,
     allow_intrabc: bool,
     tile_layout: &Av2TileLayout,
+    stream_format: Av2StreamFormat,
+    quantization: Av2QuantizationParams,
     order_hint: u16,
 ) -> Av2SyntaxPayload {
     av2_mvp_444_closed_loop_key_header_payload_with_mode(
         allow_screen_content_tools,
         allow_intrabc,
         tile_layout,
+        stream_format,
+        quantization,
         false,
         order_hint,
     )
@@ -2461,6 +2828,8 @@ fn av2_mvp_444_closed_loop_key_header_payload_with_mode(
     allow_screen_content_tools: bool,
     allow_intrabc: bool,
     tile_layout: &Av2TileLayout,
+    stream_format: Av2StreamFormat,
+    quantization: Av2QuantizationParams,
     single_picture_header: bool,
     order_hint: u16,
 ) -> Av2SyntaxPayload {
@@ -2512,10 +2881,11 @@ fn av2_mvp_444_closed_loop_key_header_payload_with_mode(
         profile.disable_cdf_update,
     );
     write_mvp_tile_info(&mut writer, tile_layout);
-    writer.write_literal("quantization.base_qindex", 0, 8);
+    write_av2_quantization_params(&mut writer, stream_format, quantization);
     writer.write_flag("segmentation.enabled", false);
-    writer.write_flag("quantization_matrix.using_qmatrix", false);
-    writer.write_literal("uncompressed_header.reduced_tx_set_used", 0, 2);
+    write_av2_quantization_matrix_params(&mut writer, quantization);
+    write_av2_delta_q_params(&mut writer, quantization);
+    write_av2_post_quantization_frame_tools(&mut writer, quantization);
     if !tile_layout.is_single_tile() {
         // AV2 v1.0.0 tile_group_obu(): a single tile group covering all tiles
         // still emits tile_start_and_end_present_flag when tiles_log2 > 0.
@@ -2527,6 +2897,67 @@ fn av2_mvp_444_closed_loop_key_header_payload_with_mode(
     writer.byte_align_zero("tile_group.header_byte_alignment");
 
     writer.finish()
+}
+
+fn write_av2_quantization_params(
+    writer: &mut Av2SyntaxWriter,
+    stream_format: Av2StreamFormat,
+    quantization: Av2QuantizationParams,
+) {
+    debug_assert!(quantization.base_qindex <= av2_max_qindex(stream_format.bit_depth));
+    writer.write_literal(
+        "quantization.base_qindex",
+        u64::from(quantization.base_qindex),
+        av2_qindex_bits(stream_format.bit_depth),
+    );
+}
+
+fn write_av2_quantization_matrix_params(
+    writer: &mut Av2SyntaxWriter,
+    quantization: Av2QuantizationParams,
+) {
+    writer.write_flag(
+        "quantization_matrix.using_qmatrix",
+        quantization.using_qmatrix,
+    );
+}
+
+fn write_av2_delta_q_params(writer: &mut Av2SyntaxWriter, quantization: Av2QuantizationParams) {
+    if quantization.base_qindex == 0 {
+        debug_assert!(!quantization.delta_q.present);
+        return;
+    }
+    writer.write_flag("delta_q.present", quantization.delta_q.present);
+    if quantization.delta_q.present {
+        // TODO(av2-lossy): enable this after regular lossy coefficient coding
+        // tracks and emits per-SB qindex changes.
+        debug_assert!(quantization.delta_q.resolution_log2 <= 2);
+        writer.write_literal(
+            "delta_q.resolution_log2",
+            u64::from(quantization.delta_q.resolution_log2),
+            2,
+        );
+    }
+}
+
+fn write_av2_post_quantization_frame_tools(
+    writer: &mut Av2SyntaxWriter,
+    quantization: Av2QuantizationParams,
+) {
+    if !quantization.is_coded_lossless() {
+        writer.write_flag("loop_filter.apply_deblocking_filter_y_vertical", false);
+        writer.write_flag("loop_filter.apply_deblocking_filter_y_horizontal", false);
+        writer.write_flag("uncompressed_header.tx_mode_select", true);
+    }
+    writer.write_literal(
+        "uncompressed_header.reduced_tx_set_used",
+        if quantization.is_coded_lossless() {
+            0
+        } else {
+            2
+        },
+        2,
+    );
 }
 
 fn write_mvp_tile_info(writer: &mut Av2SyntaxWriter, tile_layout: &Av2TileLayout) {
@@ -2576,7 +3007,11 @@ fn write_uniform_tile_log2(
 
 #[cfg(test)]
 fn av2_black_444_closed_loop_key_payload(geometry: Av2VideoGeometry) -> Av2SyntaxPayload {
-    av2_mvp_444_closed_loop_key_payload(geometry, &Av2Mvp444FrameMode::Black)
+    av2_mvp_444_closed_loop_key_payload(
+        geometry,
+        SampleBitDepth::new(8).expect("8-bit depth is supported"),
+        &Av2Mvp444FrameMode::Black,
+    )
 }
 
 #[cfg(test)]
@@ -2592,6 +3027,11 @@ fn av2_black_closed_loop_key_payload(
         allow_screen_content_tools,
         allow_intrabc,
         &tile_layout,
+        Av2StreamFormat {
+            chroma_format,
+            bit_depth: SampleBitDepth::new(8).expect("8-bit depth is supported"),
+        },
+        Av2QuantizationParams::lossless(),
     );
     let tile_payloads: Vec<_> = tile_layout
         .regions
@@ -2630,9 +3070,66 @@ fn av2_lossy_subsampled_closed_loop_key_payload(
     reconstruction: &mut [u8],
     qp: u8,
 ) -> Av2SyntaxPayload {
+    av2_lossy_subsampled_closed_loop_key_payload_with_mode(
+        geometry,
+        stream_format,
+        frame,
+        reconstruction,
+        qp,
+        true,
+        0,
+    )
+}
+
+fn av2_lossy_subsampled_predictive_closed_loop_key_payload(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    reconstruction: &mut [u8],
+    qp: u8,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
+    av2_lossy_subsampled_closed_loop_key_payload_with_mode(
+        geometry,
+        stream_format,
+        frame,
+        reconstruction,
+        qp,
+        false,
+        order_hint,
+    )
+}
+
+fn av2_lossy_subsampled_closed_loop_key_payload_with_mode(
+    geometry: Av2VideoGeometry,
+    stream_format: Av2StreamFormat,
+    frame: &[u8],
+    reconstruction: &mut [u8],
+    qp: u8,
+    single_picture_header: bool,
+    order_hint: u16,
+) -> Av2SyntaxPayload {
     let tile_layout = Av2TileLayout::lossy_subsampled_for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
-    let mut payload = av2_mvp_444_closed_loop_key_header_payload(false, false, &tile_layout);
+    let quantization = Av2QuantizationParams::regular_qp(qp, stream_format.bit_depth);
+    let mut payload = if single_picture_header {
+        av2_mvp_444_closed_loop_key_header_payload(
+            false,
+            false,
+            &tile_layout,
+            stream_format,
+            quantization,
+        )
+    } else {
+        av2_mvp_444_predictive_closed_loop_key_header_payload(
+            false,
+            false,
+            &tile_layout,
+            stream_format,
+            quantization,
+            order_hint,
+        )
+    };
     let tile_payloads: Vec<_> = tile_layout
         .regions
         .iter()
@@ -2646,6 +3143,7 @@ fn av2_lossy_subsampled_closed_loop_key_payload(
                 frame,
                 reconstruction,
                 qp,
+                quantization.base_qindex,
                 false,
             )
         })
@@ -2682,6 +3180,8 @@ fn av2_lossless_subsampled_closed_loop_key_payload(
         allow_screen_content_tools,
         allow_intrabc,
         &tile_layout,
+        stream_format,
+        Av2QuantizationParams::lossless(),
     );
     let tile_payloads: Vec<_> = if ibc.is_none() && tile_layout.tile_count() > 1 {
         std::thread::scope(|scope| {
@@ -2764,6 +3264,8 @@ fn av2_lossless_subsampled_predictive_closed_loop_key_payload(
         allow_screen_content_tools,
         allow_intrabc,
         &tile_layout,
+        stream_format,
+        Av2QuantizationParams::lossless(),
         order_hint,
     );
     let tile_payloads: Vec<_> = if ibc.is_none() && tile_layout.tile_count() > 1 {
@@ -2849,7 +3351,12 @@ fn av2_lossless_zero_mv_regular_inter_payload(
 ) -> Av2SyntaxPayload {
     let tile_layout = Av2TileLayout::lossless_subsampled_fast_for_geometry(geometry);
     let profile = Av2Black444MvpProfile::current();
-    let mut payload = av2_mvp_regular_inter_header_payload(&tile_layout, order_hint);
+    let mut payload = av2_mvp_regular_inter_header_payload(
+        &tile_layout,
+        stream_format,
+        Av2QuantizationParams::lossless(),
+        order_hint,
+    );
     let tile_payloads: Vec<_> = tile_layout
         .regions
         .iter()
@@ -2876,6 +3383,8 @@ fn av2_lossless_zero_mv_regular_inter_payload(
 
 fn av2_mvp_regular_inter_header_payload(
     tile_layout: &Av2TileLayout,
+    stream_format: Av2StreamFormat,
+    quantization: Av2QuantizationParams,
     order_hint: u16,
 ) -> Av2SyntaxPayload {
     let profile = Av2Black444MvpProfile::current();
@@ -2905,12 +3414,26 @@ fn av2_mvp_regular_inter_header_payload(
         profile.disable_cdf_update,
     );
     write_mvp_tile_info(&mut writer, tile_layout);
-    writer.write_literal("quantization.base_qindex", 0, 8);
+    write_av2_quantization_params(&mut writer, stream_format, quantization);
     writer.write_flag("segmentation.enabled", false);
-    writer.write_flag("quantization_matrix.using_qmatrix", false);
+    write_av2_quantization_matrix_params(&mut writer, quantization);
+    write_av2_delta_q_params(&mut writer, quantization);
+    if !quantization.is_coded_lossless() {
+        writer.write_flag("loop_filter.apply_deblocking_filter_y_vertical", false);
+        writer.write_flag("loop_filter.apply_deblocking_filter_y_horizontal", false);
+        writer.write_flag("uncompressed_header.tx_mode_select", true);
+    }
     writer.write_flag("uncompressed_header.reference_mode_select", false);
     writer.write_flag("uncompressed_header.skip_mode_flag", false);
-    writer.write_literal("uncompressed_header.reduced_tx_set_used", 0, 2);
+    writer.write_literal(
+        "uncompressed_header.reduced_tx_set_used",
+        if quantization.is_coded_lossless() {
+            0
+        } else {
+            2
+        },
+        2,
+    );
     if !tile_layout.is_single_tile() {
         writer.write_flag("tile_group.tile_start_and_end_present_flag", false);
     }
@@ -2921,6 +3444,7 @@ fn av2_mvp_regular_inter_header_payload(
 
 fn av2_mvp_444_closed_loop_key_payload(
     geometry: Av2VideoGeometry,
+    bit_depth: SampleBitDepth,
     frame_mode: &Av2Mvp444FrameMode,
 ) -> Av2SyntaxPayload {
     let tile_layout = av2_tile_layout_for_frame_mode(geometry, frame_mode);
@@ -2928,6 +3452,11 @@ fn av2_mvp_444_closed_loop_key_payload(
         frame_mode.allow_screen_content_tools(),
         frame_mode.allow_intrabc(),
         &tile_layout,
+        Av2StreamFormat {
+            chroma_format: Av2ChromaFormat::Yuv444,
+            bit_depth,
+        },
+        Av2QuantizationParams::lossless(),
     );
     let tile_payload = tile_group_payload_from_entropy(&av2_tile_entropy_payloads_for_mode(
         &tile_layout,
@@ -3458,6 +3987,164 @@ mod tests {
     }
 
     #[test]
+    fn av2_lossy_predictive_reuses_repeated_frames_as_sef() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 3 },
+            geometry,
+            format: PixelFormat::Yuv420p8,
+        };
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+        let frame: Vec<u8> = (0..frame_len)
+            .map(|index| ((index * 17 + 23) & 0xff) as u8)
+            .collect();
+        let mut input = Vec::with_capacity(frame_len * request.params.frames);
+        for _ in 0..request.params.frames {
+            input.extend_from_slice(&frame);
+        }
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+        let mut frame_sizes = Vec::new();
+        let mut metrics = |metrics: Av2EncodeFrameMetrics<'_>| {
+            frame_sizes.push(metrics.bitstream_bytes);
+        };
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: false,
+                qp: Some(24),
+                predictive: true,
+            },
+            Some(&mut metrics),
+        )
+        .expect("AV2 lossy predictive repeated-frame encode should succeed");
+
+        assert_eq!(recon.len(), input.len());
+        assert_eq!(frame_sizes.len(), 3);
+        assert!(frame_sizes[0] > frame_sizes[1]);
+        assert_eq!(frame_sizes[1], 6);
+        assert_eq!(frame_sizes[2], 6);
+        assert_eq!(&recon[..frame_len], &recon[frame_len..frame_len * 2]);
+        assert_eq!(
+            &recon[frame_len..frame_len * 2],
+            &recon[frame_len * 2..frame_len * 3]
+        );
+    }
+
+    #[test]
+    fn av2_lossy_predictive_zero_mv_tiles_reuse_previous_reconstruction() {
+        let geometry = Av2VideoGeometry {
+            width: 1024,
+            height: 64,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let stream_format =
+            Av2StreamFormat::from_pixel_format(format).expect("yuv420p8 is an AV2 stream format");
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
+        let first: Vec<u8> = (0..frame_len)
+            .map(|index| ((index * 13 + 19) & 0xff) as u8)
+            .collect();
+        let mut second = first.clone();
+        for y in 0..geometry.height {
+            let row = y * geometry.width;
+            for x in 512..geometry.width {
+                second[row + x] = second[row + x].wrapping_add(17);
+            }
+        }
+
+        let (_, first_recon) =
+            av2_lossy_subsampled_predictive_key_bitstream_and_reconstruction_for_frame(
+                geometry,
+                stream_format,
+                &first,
+                24,
+                true,
+                0,
+                false,
+            );
+        let (_, inter_recon) =
+            av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_frame(
+                geometry,
+                stream_format,
+                &second,
+                &first,
+                &first_recon,
+                1,
+            )
+            .expect("unchanged left tile should use a zero-MV inter frame");
+        let layout = planar::Av2PlanarYuvLayout::new(
+            geometry,
+            stream_format.chroma_format,
+            stream_format.bit_depth,
+        )
+        .expect("valid planar layout");
+
+        assert!(layout.regions_equal_between(
+            &inter_recon,
+            0,
+            0,
+            &first_recon,
+            0,
+            0,
+            512,
+            geometry.height
+        ));
+        assert!(layout.regions_equal_between(
+            &inter_recon,
+            512,
+            0,
+            &second,
+            512,
+            0,
+            512,
+            geometry.height
+        ));
+    }
+
+    #[test]
+    fn av2_lossy_predictive_requires_qp_for_legacy_444_path() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let format = PixelFormat::Yuv444p8;
+        let input = vec![0; Picture::expected_len(geometry.width, geometry.height, format)];
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+
+        let err = av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            None,
+            Av2EncodeRequest {
+                params: Av2EncodeParams { frames: 1 },
+                geometry,
+                format,
+            },
+            Av2EncodeOptions {
+                lossless: false,
+                qp: None,
+                predictive: true,
+            },
+            None,
+        )
+        .expect_err("predictive non-lossless 4:4:4 should require the QP residual path");
+
+        assert!(
+            err.contains("requires --qp"),
+            "unexpected predictive fallback error: {err}"
+        );
+    }
+
+    #[test]
     fn av2_lossless_predictive_uses_zero_mv_inter_for_unchanged_tiles() {
         let geometry = Av2VideoGeometry {
             width: 1024,
@@ -3967,6 +4654,63 @@ mod tests {
     }
 
     #[test]
+    fn av2_regular_qp_intra_modes_skip_lossless_bdpcm_flags() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let bit_depth = SampleBitDepth::new(8).expect("8-bit depth is supported");
+        let mut source = vec![0; Picture::expected_len(geometry.width, geometry.height, format)];
+        for (index, sample) in source.iter_mut().enumerate() {
+            *sample = (23 + index * 7) as u8;
+        }
+        let mut recon = vec![0; source.len()];
+        let qp = 24;
+        let payload = av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields(
+            Av2TileRegion::root(geometry),
+            Av2Black444MvpProfile::current(),
+            geometry,
+            Av2ChromaFormat::Yuv420,
+            bit_depth,
+            &source,
+            &mut recon,
+            qp,
+            Av2QuantizationParams::regular_qp(qp, bit_depth).base_qindex,
+            true,
+        );
+
+        assert!(
+            payload
+                .fields
+                .iter()
+                .any(|field| field.name == "tile.intra.y_mode_set_index"),
+            "regular-q lossy luma should start at read_intra_luma_mode syntax"
+        );
+        assert!(
+            payload
+                .fields
+                .iter()
+                .any(|field| field.name.starts_with("tile.intra.uv_mode_idx")),
+            "regular-q lossy chroma should start at read_intra_uv_mode syntax"
+        );
+        assert!(
+            payload
+                .fields
+                .iter()
+                .all(|field| field.name != "tile.intra.use_dpcm_y"),
+            "regular-q lossy luma must not emit lossless BDPCM syntax"
+        );
+        assert!(
+            payload
+                .fields
+                .iter()
+                .all(|field| field.name != "tile.intra.use_dpcm_uv"),
+            "regular-q lossy chroma must not emit lossless BDPCM syntax"
+        );
+    }
+
+    #[test]
     fn av2_qp_path_can_keep_yuv420_blocks_lossless() {
         let geometry = Av2VideoGeometry {
             width: 8,
@@ -4255,7 +4999,7 @@ mod tests {
 
         assert_eq!(
             payload.bytes,
-            vec![0x92, 0x06, 0x95, 0x7f, 0xfc, 0x00, 0x01, 0x10, 0x0d, 0xc0, 0x44,]
+            vec![0x92, 0x06, 0x95, 0x7f, 0xfc, 0x00, 0x01, 0x12, 0x0d, 0xc0, 0x44,]
         );
         assert_has_field(
             &payload,
@@ -4270,6 +5014,13 @@ mod tests {
             Av2SyntaxCode::Literal,
             26,
             6,
+        );
+        assert_has_field(
+            &payload,
+            "sequence_transform.enable_chroma_dctonly",
+            Av2SyntaxCode::Flag,
+            62,
+            1,
         );
         assert_has_field(
             &payload,
@@ -4306,6 +5057,79 @@ mod tests {
             7,
             8,
         );
+    }
+
+    #[test]
+    fn av2_lossless_header_stays_coded_lossless_compatible() {
+        let tile_layout = Av2TileLayout::for_geometry(Av2VideoGeometry {
+            width: 64,
+            height: 64,
+        });
+        let payload = av2_mvp_444_closed_loop_key_header_payload(
+            false,
+            false,
+            &tile_layout,
+            Av2StreamFormat::yuv420_8(),
+            Av2QuantizationParams::lossless(),
+        );
+
+        assert_has_field_with_bit_count(
+            &payload,
+            "quantization.base_qindex",
+            Av2SyntaxCode::Literal,
+            8,
+        );
+        assert_no_field(&payload, "delta_q.present");
+        assert_no_field(&payload, "loop_filter.apply_deblocking_filter_y_vertical");
+        assert_no_field(&payload, "uncompressed_header.tx_mode_select");
+    }
+
+    #[test]
+    fn av2_regular_qp_header_can_signal_qindex_and_disabled_delta_q() {
+        let tile_layout = Av2TileLayout::for_geometry(Av2VideoGeometry {
+            width: 64,
+            height: 64,
+        });
+        let bit_depth = SampleBitDepth::new(10).expect("10-bit depth is supported");
+        let quantization = Av2QuantizationParams::regular_qp(24, bit_depth);
+        assert_eq!(quantization.base_qindex, 80);
+        let payload = av2_mvp_444_closed_loop_key_header_payload(
+            false,
+            false,
+            &tile_layout,
+            Av2StreamFormat {
+                chroma_format: Av2ChromaFormat::Yuv420,
+                bit_depth,
+            },
+            quantization,
+        );
+
+        assert_has_field_with_bit_count(
+            &payload,
+            "quantization.base_qindex",
+            Av2SyntaxCode::Literal,
+            9,
+        );
+        assert_has_field_with_bit_count(&payload, "delta_q.present", Av2SyntaxCode::Flag, 1);
+        assert_has_field_with_bit_count(
+            &payload,
+            "loop_filter.apply_deblocking_filter_y_vertical",
+            Av2SyntaxCode::Flag,
+            1,
+        );
+        assert_has_field_with_bit_count(
+            &payload,
+            "loop_filter.apply_deblocking_filter_y_horizontal",
+            Av2SyntaxCode::Flag,
+            1,
+        );
+        assert_has_field_with_bit_count(
+            &payload,
+            "uncompressed_header.tx_mode_select",
+            Av2SyntaxCode::Flag,
+            1,
+        );
+        assert_no_field(&payload, "delta_q.resolution_log2");
     }
 
     #[test]
@@ -4561,6 +5385,13 @@ mod tests {
                 field.name == name && field.code == code && field.bit_count == bit_count
             }),
             "missing AV2 syntax field {name} with {bit_count} bit(s)"
+        );
+    }
+
+    fn assert_no_field(payload: &Av2SyntaxPayload, name: &'static str) {
+        assert!(
+            payload.fields.iter().all(|field| field.name != name),
+            "unexpected AV2 syntax field {name}"
         );
     }
 

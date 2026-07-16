@@ -153,6 +153,198 @@ fn av2_iwht4x4(coefficients: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
     output
 }
 
+const AV2_QUANT_TABLE_BITS: u8 = 3;
+const AV2_QUANT_FP_BITS: u8 = 4;
+const AV2_DCT_CONST_BITS: u8 = 14;
+const AV2_COSPI_8_64: i32 = 15137;
+const AV2_COSPI_16_64: i32 = 11585;
+const AV2_COSPI_24_64: i32 = 6270;
+const AV2_DCT4_KERNEL: [[i32; TX4X4_SIZE]; TX4X4_SIZE] = [
+    [64, 64, 64, 64],
+    [83, 35, -35, -83],
+    [64, -64, -64, 64],
+    [35, -83, 83, -35],
+];
+const AV2_QLOOKUP_QTX: [i32; 25] = [
+    64, 40, 41, 43, 44, 45, 47, 48, 49, 51, 52, 54, 55, 57, 59, 60, 62, 64, 66,
+    68, 70, 72, 74, 76, 78,
+];
+
+fn av2_qlookup_qtx(qindex: u16, bit_depth: SampleBitDepth) -> i32 {
+    let max_qindex = match bit_depth.bits() {
+        8 => 255,
+        10 => 303,
+        12 => 351,
+        bits => unreachable!("unsupported AV2 bit depth {bits}"),
+    };
+    let qindex = i32::from(qindex).clamp(1, max_qindex);
+    if qindex < 25 {
+        AV2_QLOOKUP_QTX[qindex as usize]
+    } else {
+        AV2_QLOOKUP_QTX[((qindex - 1) % 24 + 1) as usize] << ((qindex - 1) / 24)
+    }
+}
+
+fn av2_regular_dequant_qtx(qindex: u16, bit_depth: SampleBitDepth) -> [i32; 2] {
+    let q = av2_qlookup_qtx(qindex, bit_depth);
+    [q, q]
+}
+
+fn av2_regular_quantize_dct4x4(
+    coefficients: &[i32; TX4X4_SAMPLES],
+    qindex: u16,
+    bit_depth: SampleBitDepth,
+) -> ([i32; TX4X4_SAMPLES], [i32; TX4X4_SAMPLES]) {
+    let dequant = av2_regular_dequant_qtx(qindex, bit_depth);
+    let quant_fp = [
+        (1i64 << (16 + AV2_QUANT_FP_BITS + AV2_QUANT_TABLE_BITS)) / i64::from(dequant[0]),
+        (1i64 << (16 + AV2_QUANT_FP_BITS + AV2_QUANT_TABLE_BITS)) / i64::from(dequant[1]),
+    ];
+    let round_fp = [
+        (64 * dequant[0]) >> (7 + AV2_QUANT_TABLE_BITS),
+        (64 * dequant[1]) >> (7 + AV2_QUANT_TABLE_BITS),
+    ];
+    let shift = 16 + AV2_QUANT_FP_BITS;
+    let mut qcoeff = [0i32; TX4X4_SAMPLES];
+    for pos in 0..TX4X4_SAMPLES {
+        let rc01 = usize::from(pos != 0);
+        let coeff = coefficients[pos];
+        let sign = coeff.signum();
+        let abs_coeff = i64::from(coeff.abs());
+        if (abs_coeff << (1 + AV2_QUANT_TABLE_BITS)) >= i64::from(dequant[rc01]) {
+            let abs_qcoeff =
+                ((abs_coeff + i64::from(round_fp[rc01])) * quant_fp[rc01]) >> shift;
+            qcoeff[pos] = (abs_qcoeff as i32) * sign;
+        }
+    }
+    let dqcoeff = av2_regular_dequantize_dct4x4(&qcoeff, qindex, bit_depth);
+    (qcoeff, dqcoeff)
+}
+
+fn av2_regular_dequantize_dct4x4(
+    qcoeff: &[i32; TX4X4_SAMPLES],
+    qindex: u16,
+    bit_depth: SampleBitDepth,
+) -> [i32; TX4X4_SAMPLES] {
+    let dequant = av2_regular_dequant_qtx(qindex, bit_depth);
+    let mut dqcoeff = [0i32; TX4X4_SAMPLES];
+    for (pos, (&level, dst)) in qcoeff.iter().zip(dqcoeff.iter_mut()).enumerate() {
+        let rc01 = usize::from(pos != 0);
+        *dst = round_power_of_two_i64(
+            i64::from(level) * i64::from(dequant[rc01]),
+            AV2_QUANT_TABLE_BITS,
+        ) as i32;
+    }
+    dqcoeff
+}
+
+fn av2_regular_quantized_level_coefficients(
+    qcoeff: &[i32; TX4X4_SAMPLES],
+) -> [i32; TX4X4_SAMPLES] {
+    let mut coefficients = [0i32; TX4X4_SAMPLES];
+    for (dst, &level) in coefficients.iter_mut().zip(qcoeff.iter()) {
+        *dst = level * 8;
+    }
+    coefficients
+}
+
+fn av2_fdct4x4(input: &[i32; TX4X4_SAMPLES]) -> [i32; TX4X4_SAMPLES] {
+    let mut intermediate = [0i32; TX4X4_SAMPLES];
+    for col in 0..TX4X4_SIZE {
+        let mut in_high = [
+            input[col] * 16,
+            input[TX4X4_SIZE + col] * 16,
+            input[2 * TX4X4_SIZE + col] * 16,
+            input[3 * TX4X4_SIZE + col] * 16,
+        ];
+        if col == 0 && in_high[0] != 0 {
+            in_high[0] += 1;
+        }
+        fdct4x4_pass(&in_high, &mut intermediate[col * TX4X4_SIZE..][..TX4X4_SIZE]);
+    }
+
+    let mut output = [0i32; TX4X4_SAMPLES];
+    for col in 0..TX4X4_SIZE {
+        let in_high = [
+            intermediate[col],
+            intermediate[TX4X4_SIZE + col],
+            intermediate[2 * TX4X4_SIZE + col],
+            intermediate[3 * TX4X4_SIZE + col],
+        ];
+        fdct4x4_pass(&in_high, &mut output[col * TX4X4_SIZE..][..TX4X4_SIZE]);
+    }
+
+    for coefficient in &mut output {
+        *coefficient = (*coefficient + 1) >> 2;
+    }
+    output
+}
+
+fn fdct4x4_pass(input: &[i32; TX4X4_SIZE], output: &mut [i32]) {
+    let step0 = input[0] + input[3];
+    let step1 = input[1] + input[2];
+    let step2 = input[1] - input[2];
+    let step3 = input[0] - input[3];
+
+    output[0] = fdct_round_shift(i64::from(step0 + step1) * i64::from(AV2_COSPI_16_64));
+    output[2] = fdct_round_shift(i64::from(step0 - step1) * i64::from(AV2_COSPI_16_64));
+    output[1] = fdct_round_shift(
+        i64::from(step2) * i64::from(AV2_COSPI_24_64)
+            + i64::from(step3) * i64::from(AV2_COSPI_8_64),
+    );
+    output[3] = fdct_round_shift(
+        -i64::from(step2) * i64::from(AV2_COSPI_8_64)
+            + i64::from(step3) * i64::from(AV2_COSPI_24_64),
+    );
+}
+
+fn fdct_round_shift(value: i64) -> i32 {
+    round_power_of_two_i64(value, AV2_DCT_CONST_BITS) as i32
+}
+
+fn av2_idct4x4(input: &[i32; TX4X4_SAMPLES], bit_depth: SampleBitDepth) -> [i32; TX4X4_SAMPLES] {
+    let intermediate_bitdepth = i32::from(bit_depth.bits()) + 8;
+    let rng_min = -(1 << (intermediate_bitdepth - 1));
+    let rng_max = (1 << (intermediate_bitdepth - 1)) - 1;
+    let col_rng_min = -(1 << bit_depth.bits());
+    let col_rng_max = (1 << bit_depth.bits()) - 1;
+
+    let mut block = *input;
+    for coeff in &mut block {
+        *coeff = (*coeff).clamp(rng_min, rng_max);
+    }
+
+    let tmp = inv_dct4_pass(&block, 7, rng_min, rng_max);
+    let block = inv_dct4_pass(&tmp, 10, col_rng_min, col_rng_max);
+    block
+}
+
+fn inv_dct4_pass(input: &[i32; TX4X4_SAMPLES], shift: u8, min: i32, max: i32) -> [i32; TX4X4_SAMPLES] {
+    let mut output = [0i32; TX4X4_SAMPLES];
+    let add = 1 << (shift - 1);
+    for j in 0..TX4X4_SIZE {
+        let src = j * TX4X4_SIZE;
+        let b0 = AV2_DCT4_KERNEL[1][0] * input[src + 1]
+            + AV2_DCT4_KERNEL[3][0] * input[src + 3];
+        let b1 = AV2_DCT4_KERNEL[1][1] * input[src + 1]
+            + AV2_DCT4_KERNEL[3][1] * input[src + 3];
+        let a0 = AV2_DCT4_KERNEL[0][0] * input[src]
+            + AV2_DCT4_KERNEL[2][0] * input[src + 2];
+        let a1 = AV2_DCT4_KERNEL[0][1] * input[src]
+            + AV2_DCT4_KERNEL[2][1] * input[src + 2];
+        output[j] = ((a0 + b0 + add) >> shift).clamp(min, max);
+        output[TX4X4_SIZE + j] = ((a1 + b1 + add) >> shift).clamp(min, max);
+        output[2 * TX4X4_SIZE + j] = ((a1 - b1 + add) >> shift).clamp(min, max);
+        output[3 * TX4X4_SIZE + j] = ((a0 - b0 + add) >> shift).clamp(min, max);
+    }
+    output
+}
+
+fn round_power_of_two_i64(value: i64, bits: u8) -> i64 {
+    debug_assert!(bits > 0);
+    (value + (1i64 << (bits - 1))) >> bits
+}
+
 fn write_luma_palette_residual_txb(
     writer: &mut Av2EntropyWriter,
     skip_ctx: u8,

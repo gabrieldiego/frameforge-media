@@ -2,7 +2,7 @@ const CDF_PROB_TOP: u32 = 1 << 15;
 const EC_PROB_SHIFT: u32 = 7;
 const AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE: usize = 512;
 const AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE: usize = 256;
-const AV2_STATIC_CDF_LOOKUP_SIZE: usize = 512;
+const AV2_STATIC_CDF_LOOKUP_SIZE: usize = 520;
 // The forward AV2 pre-carry finalizer delays output while a future carry could
 // still change pending bytes. Each pending word is a 9-bit byte-plus-carry
 // value, so 32 words map to a small 288-bit RTL queue. This is intentionally
@@ -154,6 +154,12 @@ impl Av2EntropyWriter {
             adaptive_static_cdf_indices: [None; AV2_STATIC_CDF_LOOKUP_SIZE],
             record_fields,
         }
+    }
+
+    #[cfg(feature = "av2-sb-bit-profile")]
+    #[inline(always)]
+    pub(crate) fn symbol_bits(&self) -> usize {
+        self.symbol_bits
     }
 
     pub fn write_literal(&mut self, name: &'static str, mut value: u32, mut bits: u8) {

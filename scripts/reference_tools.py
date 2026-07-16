@@ -167,7 +167,7 @@ def resolve_tool(manifest: ReferenceManifest, kind: str, no_build: bool) -> str:
         raise SystemExit(f"{manifest.codec} manifest does not declare {kind} tools")
 
     root = reference_root(manifest)
-    found = find_tool(root, names)
+    found = find_declared_tool(manifest, root, names)
     if found is not None:
         return str(found)
 
@@ -183,7 +183,7 @@ def resolve_tool(manifest: ReferenceManifest, kind: str, no_build: bool) -> str:
         raise SystemExit(2)
 
     setup_reference(manifest)
-    found = find_tool(root, names)
+    found = find_declared_tool(manifest, root, names)
     if found is None:
         raise SystemExit(
             f"{manifest.label} build completed but no {kind} executable was found under {root}"
@@ -213,6 +213,23 @@ def tool_env_names(manifest: ReferenceManifest, kind: str) -> tuple[str, ...]:
     return manifest.decoder_env if kind == "decoder" else manifest.encoder_env
 
 
+def find_declared_tool(
+    manifest: ReferenceManifest, root: Path, names: tuple[str, ...]
+) -> Path | None:
+    roots = [root]
+    if manifest.build_system == "cmake":
+        build_dir = build_dir_for(manifest, root)
+        roots.insert(0, build_dir)
+    seen: set[Path] = set()
+    for search_root in roots:
+        if search_root in seen:
+            continue
+        seen.add(search_root)
+        if found := find_tool(search_root, names):
+            return found
+    return None
+
+
 def reference_root(manifest: ReferenceManifest) -> Path:
     for env_name in manifest.root_env:
         if value := os.environ.get(env_name):
@@ -227,9 +244,18 @@ def setup_reference(manifest: ReferenceManifest) -> None:
     root = reference_root(manifest)
     if not root.exists():
         clone_reference(manifest, root)
+    apply_reference_patches(manifest, root)
     build_reference(manifest, root)
-    decoder = find_tool(root, manifest.decoder_names) if manifest.decoder_names else None
-    encoder = find_tool(root, manifest.encoder_names) if manifest.encoder_names else None
+    decoder = (
+        find_declared_tool(manifest, root, manifest.decoder_names)
+        if manifest.decoder_names
+        else None
+    )
+    encoder = (
+        find_declared_tool(manifest, root, manifest.encoder_names)
+        if manifest.encoder_names
+        else None
+    )
     if manifest.decoder_names and decoder is None:
         raise SystemExit(f"{manifest.label} build produced no declared decoder under {root}")
     if manifest.encoder_names and encoder is None:
@@ -260,6 +286,32 @@ def build_reference(manifest: ReferenceManifest, root: Path) -> None:
         build_cargo_reference(manifest, root)
         return
     raise SystemExit(f"unsupported build_system '{manifest.build_system}' for {manifest.label}")
+
+
+def apply_reference_patches(manifest: ReferenceManifest, root: Path) -> None:
+    if manifest.codec != "libaom" or not truthy_env("FRAMEFORGE_LIBAOM_SB_BITS_BUILD"):
+        return
+    patch = REPO_ROOT / "tools" / "libaom-sb-bits.patch"
+    if not patch.exists():
+        raise SystemExit(f"missing libaom superblock bit patch: {patch}")
+    reverse_check = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(patch)],
+        check=False,
+        cwd=root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if reverse_check.returncode == 0:
+        return
+    forward_check = subprocess.run(
+        ["git", "apply", "--check", str(patch)],
+        check=False,
+        cwd=root,
+    )
+    if forward_check.returncode != 0:
+        raise SystemExit(f"cannot apply libaom superblock bit patch to {root}")
+    print(f"applying libaom superblock bit patch: {patch}", file=sys.stderr)
+    run(["git", "apply", str(patch)], cwd=root)
 
 
 def build_cmake_reference(manifest: ReferenceManifest, root: Path) -> None:
@@ -308,11 +360,18 @@ def build_dir_for(manifest: ReferenceManifest, root: Path) -> Path:
 
 
 def cmake_args(manifest: ReferenceManifest) -> list[str]:
+    args: list[str] = []
     if value := first_env(manifest.cmake_args_env):
-        return shlex.split(value)
-    if manifest.codec == "av2" and not shutil.which("yasm") and not shutil.which("nasm"):
-        return ["-DAVM_TARGET_CPU=generic"]
-    return []
+        args.extend(shlex.split(value))
+    elif manifest.codec == "av2" and not shutil.which("yasm") and not shutil.which("nasm"):
+        args.append("-DAVM_TARGET_CPU=generic")
+    elif manifest.codec == "libaom":
+        args.extend(["-DENABLE_TESTS=0"])
+        if not shutil.which("yasm") and not shutil.which("nasm"):
+            args.append("-DAOM_TARGET_CPU=generic")
+    if manifest.codec == "libaom" and truthy_env("FRAMEFORGE_LIBAOM_SB_BITS_BUILD"):
+        args.append("-DCMAKE_C_FLAGS=-DFRAMEFORGE_LIBAOM_SB_BITS=1")
+    return args
 
 
 def cargo_args(manifest: ReferenceManifest) -> list[str]:
@@ -328,6 +387,11 @@ def first_env(names: tuple[str, ...]) -> str | None:
         if value := os.environ.get(name):
             return value
     return None
+
+
+def truthy_env(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def find_tool(root: Path, names: tuple[str, ...]) -> Path | None:

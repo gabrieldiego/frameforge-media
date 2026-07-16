@@ -1,3 +1,5 @@
+#[cfg(feature = "av2-sb-bit-profile")]
+use super::sb_bits::{Av2SbBitCategory, Av2SbBitCollector};
 use super::{
     av2_lossless_dc_predictor, av2_lossless_h_pred_left_edge, av2_lossless_v_pred_above_edge,
     Av2Black444MvpProfile, Av2ChromaFormat, Av2Sample, Av2VideoGeometry,

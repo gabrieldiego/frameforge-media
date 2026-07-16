@@ -734,18 +734,35 @@ fn print_frame_metrics(
 ) {
     let bits = bitstream_bytes * 8;
     match frame_psnr(job, source, reconstruction) {
-        Some(psnr) => eprintln!(
-            "frame: codec={} index={}/{} bits={} bytes={} psnr_y={} psnr_u={} psnr_v={} psnr_all={}",
-            codec,
-            frame_idx + 1,
-            frame_count,
-            bits,
-            bitstream_bytes,
-            format_psnr(psnr.y),
-            format_psnr(psnr.u),
-            format_psnr(psnr.v),
-            format_psnr(psnr.all),
-        ),
+        Some(psnr) => {
+            if job.format == PixelFormat::Rgb24 {
+                eprintln!(
+                    "frame: codec={} index={}/{} bits={} bytes={} psnr_r={} psnr_g={} psnr_b={} psnr_all={}",
+                    codec,
+                    frame_idx + 1,
+                    frame_count,
+                    bits,
+                    bitstream_bytes,
+                    format_psnr(psnr.y),
+                    format_psnr(psnr.u),
+                    format_psnr(psnr.v),
+                    format_psnr(psnr.all),
+                );
+            } else {
+                eprintln!(
+                    "frame: codec={} index={}/{} bits={} bytes={} psnr_y={} psnr_u={} psnr_v={} psnr_all={}",
+                    codec,
+                    frame_idx + 1,
+                    frame_count,
+                    bits,
+                    bitstream_bytes,
+                    format_psnr(psnr.y),
+                    format_psnr(psnr.u),
+                    format_psnr(psnr.v),
+                    format_psnr(psnr.all),
+                );
+            }
+        }
         None => eprintln!(
             "frame: codec={} index={}/{} bits={} bytes={} psnr=n/a",
             codec,
@@ -762,6 +779,7 @@ fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<F
     let chroma_len = match job.format {
         PixelFormat::Yuv420p8 => y_len / 4,
         PixelFormat::Yuv444p8 => y_len,
+        PixelFormat::Rgb24 => return rgb24_frame_psnr(y_len, source, reconstruction),
         _ => return None,
     };
     let frame_len = y_len.checked_add(chroma_len.checked_mul(2)?)?;
@@ -794,6 +812,40 @@ fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<F
         u: psnr_from_sse(u_sse, chroma_len),
         v: psnr_from_sse(v_sse, chroma_len),
         all: psnr_from_sse(y_sse + u_sse + v_sse, frame_len),
+    })
+}
+
+fn rgb24_frame_psnr(pixels: usize, source: &[u8], reconstruction: &[u8]) -> Option<FramePsnr> {
+    let frame_len = pixels.checked_mul(3)?;
+    if source.len() != frame_len || reconstruction.len() != frame_len {
+        return None;
+    }
+    if source == reconstruction {
+        return Some(FramePsnr {
+            y: f64::INFINITY,
+            u: f64::INFINITY,
+            v: f64::INFINITY,
+            all: f64::INFINITY,
+        });
+    }
+
+    let mut r_sse = 0u64;
+    let mut g_sse = 0u64;
+    let mut b_sse = 0u64;
+    for (src, rec) in source.chunks_exact(3).zip(reconstruction.chunks_exact(3)) {
+        let r_diff = src[0] as i32 - rec[0] as i32;
+        let g_diff = src[1] as i32 - rec[1] as i32;
+        let b_diff = src[2] as i32 - rec[2] as i32;
+        r_sse += (r_diff * r_diff) as u64;
+        g_sse += (g_diff * g_diff) as u64;
+        b_sse += (b_diff * b_diff) as u64;
+    }
+
+    Some(FramePsnr {
+        y: psnr_from_sse(r_sse, pixels),
+        u: psnr_from_sse(g_sse, pixels),
+        v: psnr_from_sse(b_sse, pixels),
+        all: psnr_from_sse(r_sse + g_sse + b_sse, frame_len),
     })
 }
 

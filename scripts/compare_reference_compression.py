@@ -30,6 +30,7 @@ VVC_MIN_BIT_DEPTH = 8
 VVC_MAX_BIT_DEPTH = 12
 REFERENCE_BACKEND_NATIVE = "reference"
 REFERENCE_BACKEND_RAV1E = "rav1e"
+REFERENCE_BACKEND_LIBAOM = "libaom"
 REFERENCE_BACKEND_FFMPEG_LIBAOM = "ffmpeg-libaom"
 
 
@@ -85,7 +86,8 @@ def main() -> int:
         default=REFERENCE_BACKEND_NATIVE,
         help=(
             "compression baseline backend: reference for AVM/VTM, rav1e "
-            "for an AV1 rav1e baseline, or ffmpeg-libaom for an AV1 libaom baseline"
+            "for an AV1 rav1e baseline, libaom for direct aomenc, or "
+            "ffmpeg-libaom for an AV1 libaom baseline through ffmpeg"
         ),
     )
     parser.add_argument(
@@ -227,7 +229,9 @@ def normalize_reference_backend(value: str) -> str:
         return REFERENCE_BACKEND_NATIVE
     if normalized in {"rav1e", "av1-rav1e"}:
         return REFERENCE_BACKEND_RAV1E
-    if normalized in {"ffmpeg-libaom", "ffmpeg_libaom", "libaom", "av1-libaom"}:
+    if normalized in {"libaom", "direct-libaom", "aomenc", "av1-libaom"}:
+        return REFERENCE_BACKEND_LIBAOM
+    if normalized in {"ffmpeg-libaom", "ffmpeg_libaom", "ffmpeg-av1-libaom"}:
         return REFERENCE_BACKEND_FFMPEG_LIBAOM
     if normalized == "dav1d":
         raise SystemExit(
@@ -236,7 +240,7 @@ def normalize_reference_backend(value: str) -> str:
         )
     raise SystemExit(
         "unsupported compression reference backend "
-        f"'{value}'; expected reference, rav1e, or ffmpeg-libaom"
+        f"'{value}'; expected reference, rav1e, libaom, or ffmpeg-libaom"
     )
 
 
@@ -599,6 +603,8 @@ def reference_encode_command(
 ) -> list[str]:
     if args.reference_backend == REFERENCE_BACKEND_RAV1E:
         return rav1e_reference_encode_command(vector, vector_path, output, encoder, args)
+    if args.reference_backend == REFERENCE_BACKEND_LIBAOM:
+        return libaom_reference_encode_command(vector, vector_path, output, encoder, args)
     if args.reference_backend == REFERENCE_BACKEND_FFMPEG_LIBAOM:
         return ffmpeg_libaom_reference_encode_command(vector, vector_path, output, encoder, args)
     if args.reference_backend != REFERENCE_BACKEND_NATIVE:
@@ -643,6 +649,88 @@ def rav1e_reference_encode_command(
 
 def rav1e_y4m_path(output: Path) -> Path:
     return output.with_name(f"{output.stem}_input.y4m")
+
+
+def libaom_reference_encode_command(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+    encoder: str,
+    args: argparse.Namespace,
+) -> list[str]:
+    bit_depth, _chroma = av1_pixel_format(vector.fmt)
+    if bit_depth not in {8, 10, 12}:
+        raise SystemExit(f"unsupported libaom reference encode pixel format: {vector.fmt}")
+
+    y4m_input = libaom_input_path(vector, vector_path, output)
+    command = [
+        encoder,
+        "--codec=av1",
+        "--ivf",
+        f"--limit={vector.frames}",
+        f"--threads={reference_thread_count(args.reference_threads)}",
+        "-o",
+        str(output),
+    ]
+    command.extend(libaom_preset_args(vector, args))
+    if args.reference_args:
+        command.extend(shlex.split(args.reference_args))
+    command.append(str(y4m_input))
+    return command
+
+
+def libaom_input_path(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+) -> Path:
+    if vector_path.suffix.lower() == ".y4m":
+        return vector_path
+    y4m_input = output.with_name(f"{output.stem}_input.y4m")
+    ensure_y4m_input(vector, vector_path, y4m_input)
+    return y4m_input
+
+
+def libaom_preset_args(
+    vector: generate_test_vectors.TestVector,
+    args: argparse.Namespace,
+) -> list[str]:
+    threads = reference_thread_count(args.reference_threads)
+    tile_columns = avm_tile_columns(vector, args.avm_tile_columns, threads)
+    tile_rows = avm_tile_rows(vector, args.avm_tile_rows, threads)
+    if args.reference_preset == "lossless":
+        return [
+            "--cpu-used=8",
+            "--row-mt=1",
+            f"--tile-columns={tile_columns}",
+            f"--tile-rows={tile_rows}",
+            "--lag-in-frames=0",
+            "--auto-alt-ref=0",
+            "--lossless=1",
+        ]
+
+    if args.reference_preset not in {"default", "fast", "realtime-screen"}:
+        raise SystemExit(
+            "libaom baseline supports presets default, fast, realtime-screen, and lossless"
+        )
+
+    if args.reference_preset == "default":
+        return []
+
+    return [
+        "--usage=1",
+        "--rt",
+        "--cpu-used=8",
+        "--row-mt=1",
+        f"--tile-columns={tile_columns}",
+        f"--tile-rows={tile_rows}",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--target-bitrate=4000",
+        "--kf-max-dist=300",
+        "--aq-mode=3",
+        "--tune-content=screen",
+    ]
 
 
 def ffmpeg_libaom_reference_encode_command(
@@ -790,12 +878,20 @@ def ffmpeg_libaom_tiles(
     args: argparse.Namespace,
 ) -> str:
     if args.avm_tile_columns is not None:
-        return f"{1 << args.avm_tile_columns}x{1 << (args.avm_tile_rows or 0)}"
-    if vector.width >= 1920:
-        return "8x1"
-    if vector.width >= 1280:
-        return "4x1"
-    return "2x1"
+        requested_cols = 1 << args.avm_tile_columns
+        requested_rows = 1 << (args.avm_tile_rows or 0)
+    elif vector.width >= 1920:
+        requested_cols = 8
+        requested_rows = 1
+    elif vector.width >= 1280:
+        requested_cols = 4
+        requested_rows = 1
+    else:
+        requested_cols = 2
+        requested_rows = 1
+    max_cols = max(1, vector.width // 64)
+    max_rows = max(1, vector.height // 64)
+    return f"{min(requested_cols, max_cols)}x{min(requested_rows, max_rows)}"
 
 
 def ensure_y4m_input(
@@ -1124,7 +1220,11 @@ def codec_extension(codec: str) -> str:
 
 
 def reference_extension_for_args(args: argparse.Namespace) -> str:
-    if args.reference_backend in {REFERENCE_BACKEND_RAV1E, REFERENCE_BACKEND_FFMPEG_LIBAOM}:
+    if args.reference_backend in {
+        REFERENCE_BACKEND_RAV1E,
+        REFERENCE_BACKEND_LIBAOM,
+        REFERENCE_BACKEND_FFMPEG_LIBAOM,
+    }:
         return "ivf"
     return codec_extension(args.codec)
 

@@ -151,6 +151,47 @@ AV1 lossless libaom baseline is needed instead. ffmpeg/libaom outputs are
 cached under a backend-specific directory such as
 `verification/generated/compression_compare/av2/<set>/ffmpeg-libaom/`.
 
+Use `COMPRESSION_REFERENCE_BACKEND=libaom` to run the local `aomenc` binary
+directly instead of going through ffmpeg. This is useful when comparing
+FrameForge against libaom's native command-line behavior and checking whether
+the ffmpeg wrapper is contributing materially different tuning. Build the
+direct backend with:
+
+```sh
+make reference-setup REFERENCE_CODEC=libaom
+make compare-compression CODEC=av2 \
+  COMPRESSION_SET=smoke \
+  COMPRESSION_REFERENCE_BACKEND=libaom \
+  COMPRESSION_REFERENCE_PRESET=realtime-screen
+```
+
+For AV2 superblock bit accounting, compile the encoder with the gated
+`av2-sb-bit-profile` feature through `AV2_SB_BITS=1`, then set
+`FRAMEFORGE_AV2_SB_BITS` to a JSONL output path. The normal build does not
+include this code unless the feature is enabled.
+
+```sh
+make build AV2_SB_BITS=1
+FRAMEFORGE_AV2_SB_BITS=verification/generated/profiling/av2_sb_bits.jsonl \
+  ./ff encode input.yuv --video 1920x1080:yuv420p8 --frames 1 \
+  --encode av2:verification/generated/profiling/frameforge_sb_bits.obu --qp 24
+```
+
+For comparable direct-libaom superblock deltas, build the patched libaom
+instrumentation in its separate build directory and set
+`FRAMEFORGE_LIBAOM_SB_BITS` for the run. The direct libaom output is a total
+arithmetic-coder bit delta per superblock; FrameForge additionally splits its
+symbol bits into syntax categories such as partition, mode, and residual.
+
+```sh
+make reference-setup REFERENCE_CODEC=libaom LIBAOM_SB_BITS=1
+FRAMEFORGE_LIBAOM_SB_BITS=verification/generated/profiling/libaom_sb_bits.jsonl \
+  make compare-compression CODEC=av2 COMPRESSION_SET=smoke \
+  COMPRESSION_REFERENCE_BACKEND=libaom \
+  COMPRESSION_REFERENCE_PRESET=realtime-screen \
+  LIBAOM_SB_BITS=1 COMPRESSION_REFRESH_REFERENCE=1
+```
+
 For local source-file manifests backed by large Y4M inputs, set
 `COMPRESSION_DIRECT_SOURCE_FILES=1` to feed the source path directly and use
 the manifest `frames` value as the total-frame limiter instead of materializing

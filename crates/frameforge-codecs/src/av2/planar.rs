@@ -157,6 +157,74 @@ impl Av2PlanarYuvLayout {
         true
     }
 
+    pub(crate) fn copy_region_between(
+        self,
+        dst: &mut [u8],
+        x0: usize,
+        y0: usize,
+        src: &[u8],
+        ref_x0: usize,
+        ref_y0: usize,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        if dst.len() != self.expected_len || src.len() != self.expected_len {
+            return false;
+        }
+        if !self.luma_region_in_bounds(x0, y0, width, height)
+            || !self.luma_region_in_bounds(ref_x0, ref_y0, width, height)
+        {
+            return false;
+        }
+
+        let sub_x = chroma_subsample_x(self.chroma_format);
+        let sub_y = chroma_subsample_y(self.chroma_format);
+        if width % sub_x != 0
+            || height % sub_y != 0
+            || x0 % sub_x != 0
+            || y0 % sub_y != 0
+            || ref_x0 % sub_x != 0
+            || ref_y0 % sub_y != 0
+        {
+            return false;
+        }
+
+        let (dst_y, dst_u, dst_v) = self.plane_slices_mut(dst);
+        let (src_y, src_u, src_v) = self.plane_slices(src);
+        copy_plane_region_between(
+            dst_y,
+            self.geometry.width,
+            x0,
+            y0,
+            src_y,
+            self.geometry.width,
+            ref_x0,
+            ref_y0,
+            width,
+            height,
+            self.bytes_per_sample,
+        );
+
+        let chroma_width = width / sub_x;
+        let chroma_height = height / sub_y;
+        for (dst_plane, src_plane) in [(dst_u, src_u), (dst_v, src_v)] {
+            copy_plane_region_between(
+                dst_plane,
+                self.chroma_width,
+                x0 / sub_x,
+                y0 / sub_y,
+                src_plane,
+                self.chroma_width,
+                ref_x0 / sub_x,
+                ref_y0 / sub_y,
+                chroma_width,
+                chroma_height,
+                self.bytes_per_sample,
+            );
+        }
+        true
+    }
+
     #[allow(dead_code)]
     pub(crate) fn hash_region(
         self,
@@ -212,6 +280,15 @@ impl Av2PlanarYuvLayout {
         (y, u, v)
     }
 
+    fn plane_slices_mut<'a>(
+        self,
+        frame: &'a mut [u8],
+    ) -> (&'a mut [u8], &'a mut [u8], &'a mut [u8]) {
+        let (y, chroma) = frame.split_at_mut(self.y_bytes);
+        let (u, v) = chroma.split_at_mut(self.c_bytes);
+        (y, u, &mut v[..self.c_bytes])
+    }
+
     fn luma_region_in_bounds(self, x0: usize, y0: usize, width: usize, height: usize) -> bool {
         x0.checked_add(width)
             .is_some_and(|x1| x1 <= self.geometry.width)
@@ -259,6 +336,28 @@ fn plane_regions_equal_between(
         }
     }
     true
+}
+
+fn copy_plane_region_between(
+    dst_plane: &mut [u8],
+    dst_stride: usize,
+    x0: usize,
+    y0: usize,
+    src_plane: &[u8],
+    src_stride: usize,
+    ref_x0: usize,
+    ref_y0: usize,
+    width: usize,
+    height: usize,
+    bytes_per_sample: usize,
+) {
+    let row_bytes = width * bytes_per_sample;
+    for local_y in 0..height {
+        let dst_row_start = ((y0 + local_y) * dst_stride + x0) * bytes_per_sample;
+        let src_row_start = ((ref_y0 + local_y) * src_stride + ref_x0) * bytes_per_sample;
+        dst_plane[dst_row_start..dst_row_start + row_bytes]
+            .copy_from_slice(&src_plane[src_row_start..src_row_start + row_bytes]);
+    }
 }
 
 #[allow(dead_code)]

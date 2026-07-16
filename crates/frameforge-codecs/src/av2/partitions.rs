@@ -684,35 +684,43 @@ fn write_intra_luma_mode(
     mode: Av2LumaIntraMode,
     mode_context: u8,
     mode_index: u8,
+    coded_lossless: bool,
     use_dpcm_y: bool,
     dpcm_horz: bool,
     use_fsc: bool,
     fsc_context: usize,
 ) {
-    let mut dpcm_cdf = DEFAULT_DPCM_CDF;
-    // AV2 v1.0.0 Section 5.20.5.5 read_intra_y_mode(): lossless
-    // intra blocks signal DPCM usage before luma mode. If selected, AVM maps
-    // dpcm_horz=0 to V_PRED and dpcm_horz=1 to H_PRED and skips y_mode_idx.
-    writer.write_symbol(
-        "tile.intra.use_dpcm_y",
-        usize::from(use_dpcm_y),
-        &mut dpcm_cdf,
-        2,
-        false,
-    );
-    if use_dpcm_y {
-        let mut dpcm_direction_cdf = DEFAULT_DPCM_CDF;
+    if coded_lossless {
+        let mut dpcm_cdf = DEFAULT_DPCM_CDF;
+        // AV2 v1.0.0 Section 5.20.5.5 read_intra_y_mode(): lossless
+        // intra blocks signal DPCM usage before luma mode. If selected, AVM maps
+        // dpcm_horz=0 to V_PRED and dpcm_horz=1 to H_PRED and skips y_mode_idx.
         writer.write_symbol(
-            "tile.intra.dpcm_y_horz",
-            usize::from(dpcm_horz),
-            &mut dpcm_direction_cdf,
+            "tile.intra.use_dpcm_y",
+            usize::from(use_dpcm_y),
+            &mut dpcm_cdf,
             2,
             false,
         );
-        if let Some(size_group) = decision.block_size.fsc_size_group() {
-            write_fsc_mode(writer, fsc_context, size_group, use_fsc);
+        if use_dpcm_y {
+            let mut dpcm_direction_cdf = DEFAULT_DPCM_CDF;
+            writer.write_symbol(
+                "tile.intra.dpcm_y_horz",
+                usize::from(dpcm_horz),
+                &mut dpcm_direction_cdf,
+                2,
+                false,
+            );
+            if let Some(size_group) = decision.block_size.fsc_size_group() {
+                write_fsc_mode(writer, fsc_context, size_group, use_fsc);
+            }
+            return;
         }
-        return;
+    } else {
+        debug_assert!(
+            !use_dpcm_y,
+            "AV2 BDPCM luma syntax is only coded for lossless segments"
+        );
     }
 
     // AV2 v1.0.0 write_intra_luma_mode()/read_intra_luma_mode() calls
@@ -796,33 +804,39 @@ fn write_fsc_mode(
 fn write_intra_chroma_mode(
     writer: &mut Av2EntropyWriter,
     _decision: Av2TileDecision,
+    coded_lossless: bool,
     use_bdpcm_uv: bool,
     luma_mode: Av2LumaIntraMode,
     chroma_intra_mode: Av2ChromaIntraMode,
 ) {
-    let mut dpcm_uv_cdf = DEFAULT_DPCM_CDF;
-    // AV2 v1.0.0 Section 5.20.5.6 read_intra_uv_mode() signals chroma DPCM
-    // in lossless shared tree blocks. When DPCM is disabled, the same
-    // direction flag selects the normal H/V chroma intra mode used by the
-    // matching residual predictor.
-    writer.write_symbol(
-        "tile.intra.use_dpcm_uv",
-        usize::from(use_bdpcm_uv),
-        &mut dpcm_uv_cdf,
-        2,
-        false,
-    );
-
-    if use_bdpcm_uv {
-        let mut dpcm_uv_direction_cdf = DEFAULT_DPCM_CDF;
+    if coded_lossless {
+        let mut dpcm_uv_cdf = DEFAULT_DPCM_CDF;
+        // AV2 v1.0.0 Section 5.20.5.6 read_intra_uv_mode() signals chroma
+        // DPCM only in lossless shared tree blocks.
         writer.write_symbol(
-            "tile.intra.dpcm_uv_horz",
-            usize::from(chroma_intra_mode.is_horizontal()),
-            &mut dpcm_uv_direction_cdf,
+            "tile.intra.use_dpcm_uv",
+            usize::from(use_bdpcm_uv),
+            &mut dpcm_uv_cdf,
             2,
             false,
         );
-        return;
+
+        if use_bdpcm_uv {
+            let mut dpcm_uv_direction_cdf = DEFAULT_DPCM_CDF;
+            writer.write_symbol(
+                "tile.intra.dpcm_uv_horz",
+                usize::from(chroma_intra_mode.is_horizontal()),
+                &mut dpcm_uv_direction_cdf,
+                2,
+                false,
+            );
+            return;
+        }
+    } else {
+        debug_assert!(
+            !use_bdpcm_uv,
+            "AV2 BDPCM chroma syntax is only coded for lossless segments"
+        );
     }
 
     let uv_mode_context = usize::from(luma_mode_is_directional(luma_mode));

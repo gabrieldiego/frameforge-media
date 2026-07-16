@@ -1,0 +1,17 @@
+{
+  "codec": "libaom",
+  "label": "libaom AV1",
+  "repo": "https://aomedia.googlesource.com/aom",
+  "repo_env": ["FRAMEFORGE_LIBAOM_REPO"],
+  "ref_env": ["FRAMEFORGE_LIBAOM_REF"],
+  "root_env": ["FRAMEFORGE_LIBAOM_ROOT"],
+  "encoder_env": ["FRAMEFORGE_LIBAOM_ENCODER"],
+  "decoder_env": ["FRAMEFORGE_LIBAOM_DECODER"],
+  "build_dir_env": ["FRAMEFORGE_LIBAOM_BUILD_DIR"],
+  "build_type_env": ["FRAMEFORGE_LIBAOM_BUILD_TYPE"],
+  "cmake_args_env": ["FRAMEFORGE_LIBAOM_CMAKE_ARGS"],
+  "default_root": "verification/references/libaom/libaom",
+  "encoder_names": ["aomenc"],
+  "decoder_names": ["aomdec"],
+  "decode_style": "none"
+}

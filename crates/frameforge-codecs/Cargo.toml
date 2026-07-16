@@ -12,6 +12,7 @@ frameforge-core = { path = "../frameforge-core" }
 [features]
 default = []
 av2 = []
+av2-sb-bit-profile = ["av2"]
 vvc = []
 
 [lints]

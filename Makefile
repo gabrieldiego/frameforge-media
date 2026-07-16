@@ -1,7 +1,10 @@
 CARGO ?= cargo
 PYTHON ?= python3
 CARGO_FEATURES ?= all
-CARGO_FLAGS := $(if $(filter all,$(strip $(CARGO_FEATURES))),--all-features,$(if $(strip $(CARGO_FEATURES)),--features "$(CARGO_FEATURES)",))
+AV2_SB_BITS ?= 0
+AV2_SB_BITS_FEATURE := $(if $(filter 1 true yes,$(AV2_SB_BITS)),frameforge-codecs/av2-sb-bit-profile,)
+CARGO_BASE_FLAGS := $(if $(filter all,$(strip $(CARGO_FEATURES))),--all-features,$(if $(strip $(CARGO_FEATURES)),--features "$(CARGO_FEATURES)",))
+CARGO_FLAGS := $(CARGO_BASE_FLAGS) $(if $(strip $(AV2_SB_BITS_FEATURE)),--features "$(AV2_SB_BITS_FEATURE)",)
 PROFILE ?=
 GPROF_RUSTFLAGS ?= -C debuginfo=2 -C force-frame-pointers=yes -C symbol-mangling-version=v0 -C codegen-units=1 -C lto=no -C link-arg=-pg
 GPROF_TARGET_DIR ?= target/gprof
@@ -54,6 +57,10 @@ COMPRESSION_AVM_TILE_COLUMNS ?= auto
 COMPRESSION_AVM_TILE_ROWS ?= 0
 COMPRESSION_REFRESH_REFERENCE ?= 0
 COMPRESSION_DIRECT_SOURCE_FILES ?= 0
+LIBAOM_SB_BITS ?= 0
+LIBAOM_SB_BITS_BUILD_DIR ?= verification/references/libaom/libaom/build-sb-bits
+LIBAOM_SB_BITS_ENCODER ?= $(LIBAOM_SB_BITS_BUILD_DIR)/aomenc
+LIBAOM_SB_BITS_REFERENCE_ENV := $(if $(filter 1 true yes,$(LIBAOM_SB_BITS)),FRAMEFORGE_LIBAOM_SB_BITS_BUILD=1 FRAMEFORGE_LIBAOM_BUILD_DIR="$(abspath $(LIBAOM_SB_BITS_BUILD_DIR))" FRAMEFORGE_LIBAOM_ENCODER="$(abspath $(LIBAOM_SB_BITS_ENCODER))",)
 REFERENCE_CODEC ?= all
 VALIDATION_STOP_FLAG := $(if $(filter 1 true yes,$(VALIDATION_STOP_ON_FAIL)),--stop-on-fail,)
 VALIDATION_LIMIT_FLAG := $(if $(strip $(VALIDATION_LIMIT)),--limit "$(VALIDATION_LIMIT)",)
@@ -82,6 +89,7 @@ help:
 		'  make check            Type-check the Rust workspace' \
 		'  make test             Run Rust tests' \
 		'  make build            Build release CLI and copy it to ./ff' \
+		'                         Set AV2_SB_BITS=1 to compile AV2 per-superblock bit JSONL support' \
 		'  make build PROFILE=gprof' \
 		'                         Build gprof sampling-friendly ./ff-gprof under target/gprof' \
 		'  make profile-av2-i-lossless' \
@@ -107,6 +115,8 @@ help:
 		'                         Set COMPRESSION_REFERENCE_PRESET=default for legacy args' \
 		'                         Pass FrameForge --set values with COMPRESSION_SETTINGS="key ..."' \
 		'                         Set COMPRESSION_QP=24 for AV2 lossy QP comparisons' \
+		'                         Set COMPRESSION_REFERENCE_BACKEND=libaom for direct aomenc' \
+		'                         Set LIBAOM_SB_BITS=1 for instrumented direct libaom builds' \
 		'                         Set COMPRESSION_DIRECT_SOURCE_FILES=1 to feed source_file inputs directly' \
 		'                         Set COMPRESSION_REFRESH_REFERENCE=1 to ignore cache' \
 		'  make regression       Run smoke validation for AV2 and VVC' \
@@ -146,7 +156,7 @@ reference-list:
 	$(PYTHON) scripts/reference_tools.py list --codec "$(REFERENCE_CODEC)"
 
 reference-setup:
-	$(PYTHON) scripts/reference_tools.py setup --codec "$(REFERENCE_CODEC)"
+	$(LIBAOM_SB_BITS_REFERENCE_ENV) $(PYTHON) scripts/reference_tools.py setup --codec "$(REFERENCE_CODEC)"
 
 test-vector-sets:
 	$(PYTHON) scripts/generate_test_vectors.py --set-dir "$(VALIDATION_SET_DIR)" --list-sets
@@ -158,7 +168,7 @@ validate-set: build
 	$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(VALIDATION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(VALIDATION_REFERENCE_MODE)" $(VALIDATION_SOURCE_FLAG) $(VALIDATION_STOP_FLAG) $(VALIDATION_LIMIT_FLAG) $(VALIDATION_SETTINGS_FLAG)
 
 compare-compression: build
-	$(PYTHON) scripts/compare_reference_compression.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
+	$(LIBAOM_SB_BITS_REFERENCE_ENV) $(PYTHON) scripts/compare_reference_compression.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
 
 profile-av2-i-lossless:
 	$(MAKE) build PROFILE=gprof

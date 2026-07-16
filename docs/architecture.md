@@ -91,8 +91,10 @@ Codec-specific setting catalogs carry codec-local controls such as AV2's
 experimental `--set predictive` lossless mode. Unknown options should still
 fail early instead of silently becoming unused metadata.
 
-AV2's QP path keeps frame-level quantization syntax at the lossless qindex and
-uses a software residual quantizer inside the encoder. Each transform block is
-modeled independently with a rate/distortion estimate, so a lossy encode may
-still emit exact residual coefficients for blocks where exact reconstruction is
-cheaper than quantized DC residual coding.
+AV2's QP path maps `--qp` to a nonzero frame `base_qindex` and emits regular
+transform-quantized 4x4 residuals for the current lossy intra path. The current
+mapping treats `--qp` as an encoder quality knob rather than the literal AV2
+qindex; for example, `--qp 24` signals `base_qindex=80`. Lossless mode remains
+coded-lossless with `base_qindex=0`. Delta-q syntax is wired into the header
+model but remains disabled until the encoder tracks and emits per-superblock
+qindex adjustments.
