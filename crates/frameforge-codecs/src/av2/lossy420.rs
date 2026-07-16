@@ -325,40 +325,71 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 | Av2ChromaIntraMode::SmoothHorizontal
         )
         .then(|| self.smooth_edges(plane, x0, y0, context));
+        let luma_directional_angle = (plane == Av2LossyPlane::Y)
+            .then(|| lossy_luma_idif_angle(mode.luma_intra_mode))
+            .flatten();
+        let luma_directional_predictor_state = luma_directional_angle.map(|angle| {
+            let edge_sample = |plane, x, y| self.recon_sample(plane, x, y);
+            let (constant, edges) =
+                self.luma_directional_idif_predictor_state_with(
+                    plane,
+                    x0,
+                    y0,
+                    angle,
+                    context,
+                    &edge_sample,
+                );
+            (angle, constant, edges)
+        });
         for local_y in 0..TX4X4_SIZE {
             for local_x in 0..TX4X4_SIZE {
                 let index = local_y * TX4X4_SIZE + local_x;
-                let predictor_sample = match predictor_mode {
-                    Av2ChromaIntraMode::Dc => dc_pred,
-                    Av2ChromaIntraMode::Horizontal => h_pred[local_y],
-                    Av2ChromaIntraMode::Vertical => v_pred[local_x],
-                    Av2ChromaIntraMode::Paeth => {
-                        paeth_predictor(h_pred[local_y], v_pred[local_x], above_left)
-                    }
-                    Av2ChromaIntraMode::Smooth
-                    | Av2ChromaIntraMode::SmoothVertical
-                    | Av2ChromaIntraMode::SmoothHorizontal => {
-                        let (above, left) =
-                            smooth_edges.expect("smooth edges are precomputed");
-                        let (smooth, smooth_v, smooth_h) =
-                            av2_highbd_smooth_intra_predictor_set(
-                                above,
-                                left,
+                let predictor_sample =
+                    if let Some((angle, constant, edges)) = luma_directional_predictor_state {
+                        constant.unwrap_or_else(|| {
+                            luma_directional_idif_predictor(
+                                angle,
+                                edges.expect("IDIF edges are precomputed"),
                                 local_x,
                                 local_y,
                                 self.bit_depth,
-                            );
+                            )
+                        })
+                    } else {
                         match predictor_mode {
-                            Av2ChromaIntraMode::Smooth => smooth,
-                            Av2ChromaIntraMode::SmoothVertical => smooth_v,
-                            Av2ChromaIntraMode::SmoothHorizontal => smooth_h,
-                            _ => unreachable!("smooth predictor branch only handles smooth modes"),
+                            Av2ChromaIntraMode::Dc => dc_pred,
+                            Av2ChromaIntraMode::Horizontal => h_pred[local_y],
+                            Av2ChromaIntraMode::Vertical => v_pred[local_x],
+                            Av2ChromaIntraMode::Paeth => {
+                                paeth_predictor(h_pred[local_y], v_pred[local_x], above_left)
+                            }
+                            Av2ChromaIntraMode::Smooth
+                            | Av2ChromaIntraMode::SmoothVertical
+                            | Av2ChromaIntraMode::SmoothHorizontal => {
+                                let (above, left) =
+                                    smooth_edges.expect("smooth edges are precomputed");
+                                let (smooth, smooth_v, smooth_h) =
+                                    av2_highbd_smooth_intra_predictor_set(
+                                        above,
+                                        left,
+                                        local_x,
+                                        local_y,
+                                        self.bit_depth,
+                                    );
+                                match predictor_mode {
+                                    Av2ChromaIntraMode::Smooth => smooth,
+                                    Av2ChromaIntraMode::SmoothVertical => smooth_v,
+                                    Av2ChromaIntraMode::SmoothHorizontal => smooth_h,
+                                    _ => {
+                                        unreachable!("smooth predictor branch only handles smooth modes")
+                                    }
+                                }
+                            }
+                            _ => unreachable!(
+                                "AV2 lossy mode search selects DC, H, V, Paeth, smooth, or luma IDIF"
+                            ),
                         }
-                    }
-                    _ => unreachable!(
-                        "AV2 lossy mode search selects DC, H, V, Paeth, or smooth"
-                    ),
-                };
+                    };
                 let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
                 let diff = i32::from(source_sample) - i32::from(predictor_sample);
                 source[index] = source_sample;
@@ -818,6 +849,53 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 }
                 smooth_scores.scaled_to_txb_count(txb_width * txb_height, sampled_txbs)
             });
+        let luma_directional_scores =
+            lossy_luma_directional_search_allowed(
+                luma_scores,
+                txb_width * txb_height,
+                self.chroma_format,
+                self.bit_depth,
+            )
+            .then(|| {
+                let mut directional_scores = [
+                    (Av2LumaIntraMode::Directional45, 0usize),
+                    (Av2LumaIntraMode::Directional67, 0usize),
+                    (Av2LumaIntraMode::Directional113, 0usize),
+                    (Av2LumaIntraMode::Directional135, 0usize),
+                    (Av2LumaIntraMode::Directional157, 0usize),
+                    (Av2LumaIntraMode::Directional203, 0usize),
+                ];
+                let mut sampled_txbs = 0usize;
+                for row in 0..txb_height {
+                    for col in 0..txb_width {
+                        if !lossy_mode_search_samples_txb(row, col, txb_width, txb_height) {
+                            continue;
+                        }
+                        let (x0, y0) = self.txb_origin(
+                            Av2LossyPlane::Y,
+                            decision.col + col,
+                            decision.row + row,
+                        );
+                        for (luma_intra_mode, score) in directional_scores.iter_mut() {
+                            *score += self.directional_txb_score_for_score(
+                                x0,
+                                y0,
+                                luma_context,
+                                Av2CoefficientProxyKind::LumaTransform,
+                                *luma_intra_mode,
+                            );
+                        }
+                        sampled_txbs += 1;
+                    }
+                }
+                let total_txbs = txb_width * txb_height;
+                if sampled_txbs != 0 && sampled_txbs != total_txbs {
+                    for (_, score) in directional_scores.iter_mut() {
+                        *score = score.saturating_mul(total_txbs) / sampled_txbs;
+                    }
+                }
+                directional_scores
+            });
         let mut best_luma = (mode.luma_intra_mode, mode.luma_bdpcm_horz, usize::MAX);
         for (luma_intra_mode, luma_bdpcm_horz, base_score, syntax_penalty) in [
             (
@@ -863,6 +941,15 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 ),
             ] {
                 let score = score + 192usize;
+                if score < best_luma.2 {
+                    best_luma = (luma_intra_mode, None, score);
+                }
+            }
+        }
+        if let Some(directional_scores) = luma_directional_scores {
+            for (luma_intra_mode, score) in directional_scores {
+                let score =
+                    score + lossy_luma_mode_syntax_penalty(luma_intra_mode, luma_mode_syntax);
                 if score < best_luma.2 {
                     best_luma = (luma_intra_mode, None, score);
                 }
@@ -1507,6 +1594,273 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         lossy_txb_score(score, sse, 0, self.quant_step())
     }
 
+    fn directional_txb_score_for_score(
+        &self,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+        kind: Av2CoefficientProxyKind,
+        luma_intra_mode: Av2LumaIntraMode,
+    ) -> usize {
+        let angle = lossy_luma_idif_angle(luma_intra_mode)
+            .expect("directional score is only requested for non-cardinal luma IDIF modes");
+        let edge_sample =
+            |plane, x, y| self.neighbor_sample_for_score(plane, x, y, context);
+        let (constant, edges) = self.luma_directional_idif_predictor_state_with(
+            Av2LossyPlane::Y,
+            x0,
+            y0,
+            angle,
+            context,
+            &edge_sample,
+        );
+        let mut source = [0; TX4X4_SAMPLES];
+        let mut predictor = [0; TX4X4_SAMPLES];
+        let mut score = 16usize;
+        let mut sum = 0i32;
+        let magnitude_scale = residual_sample_proxy_magnitude_scale(kind);
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let index = local_y * TX4X4_SIZE + local_x;
+                let sample = i32::from(self.source_sample(Av2LossyPlane::Y, x0 + local_x, y0 + local_y));
+                let pred = constant.unwrap_or_else(|| {
+                    luma_directional_idif_predictor(
+                        angle,
+                        edges.expect("IDIF edges are precomputed"),
+                        local_x,
+                        local_y,
+                        self.bit_depth,
+                    )
+                });
+                let diff = sample - i32::from(pred);
+                source[index] = sample as Av2Sample;
+                predictor[index] = pred;
+                sum += diff;
+                add_residual_sample_proxy_score(&mut score, diff, magnitude_scale);
+            }
+        }
+
+        let max_delta = i32::from(self.bit_depth.max_sample());
+        let delta = quantize_i32_to_step(
+            round_div_i32(sum, TX4X4_SAMPLES as i32),
+            lossy_dc_delta_quant_step(self.quant_step()),
+        )
+        .clamp(-max_delta, max_delta);
+
+        let mut sse = 0usize;
+        let max_sample = i32::from(self.bit_depth.max_sample());
+        for index in 0..TX4X4_SAMPLES {
+            let recon = (i32::from(predictor[index]) + delta).clamp(0, max_sample);
+            let diff = i32::from(source[index]) - recon;
+            sse += (diff * diff) as usize;
+        }
+
+        lossy_txb_score(score, sse, 0, self.quant_step())
+    }
+
+    fn luma_directional_idif_predictor_state_with<EdgeSample>(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        angle: i16,
+        context: Av2LossyLeafPredictorContext<'_>,
+        edge_sample: &EdgeSample,
+    ) -> (Option<Av2Sample>, Option<DirectionalIdifEdges>)
+    where
+        EdgeSample: Fn(Av2LossyPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let base = av2_lossless_dc_predictor(self.bit_depth);
+
+        let constant_predictor = match angle {
+            1..=89 if !have_top => Some(if have_left {
+                edge_sample(plane, x0 - 1, y0)
+            } else {
+                base.saturating_sub(1)
+            }),
+            181..=269 if !have_left => Some(if have_top {
+                edge_sample(plane, x0, y0 - 1)
+            } else {
+                base.saturating_add(1)
+            }),
+            _ => None,
+        };
+
+        let edges = constant_predictor
+            .is_none()
+            .then(|| self.luma_directional_idif_edges_with(plane, x0, y0, angle, context, edge_sample));
+
+        (constant_predictor, edges)
+    }
+
+    fn luma_directional_idif_edges_with<EdgeSample>(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        angle: i16,
+        context: Av2LossyLeafPredictorContext<'_>,
+        edge_sample: &EdgeSample,
+    ) -> DirectionalIdifEdges
+    where
+        EdgeSample: Fn(Av2LossyPlane, usize, usize) -> Av2Sample,
+    {
+        let above_core = self.directional_above_edge_with(plane, x0, y0, context, edge_sample);
+        let left_core = self.directional_left_edge_with(plane, x0, y0, context, edge_sample);
+        let above_left = self.above_left_predictor_with(plane, x0, y0, edge_sample);
+        let mut edges = DirectionalIdifEdges::new(self.bit_depth);
+        edges.set_above(-2, above_left);
+        edges.set_above(-1, above_left);
+        edges.set_left(-2, above_left);
+        edges.set_left(-1, above_left);
+        for index in 0..8 {
+            edges.set_above(index as i32, above_core[index]);
+            edges.set_left(index as i32, left_core[index]);
+        }
+        if angle > 90 && angle < 180 {
+            for index in TX4X4_SIZE..8 {
+                edges.set_above(index as i32, above_core[TX4X4_SIZE - 1]);
+                edges.set_left(index as i32, left_core[TX4X4_SIZE - 1]);
+            }
+        }
+        edges.set_above(8, edges.above(7));
+        edges.set_above(9, edges.above(7));
+        edges.set_left(8, edges.left(7));
+        edges.set_left(9, edges.left(7));
+        edges
+    }
+
+    fn above_left_predictor_with<EdgeSample>(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        edge_sample: &EdgeSample,
+    ) -> Av2Sample
+    where
+        EdgeSample: Fn(Av2LossyPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let have_left = x0 > tile_origin_x;
+        let have_top = y0 > tile_origin_y;
+        if have_left && have_top {
+            edge_sample(plane, x0 - 1, y0 - 1)
+        } else if have_top {
+            edge_sample(plane, x0, y0 - 1)
+        } else if have_left {
+            edge_sample(plane, x0 - 1, y0)
+        } else {
+            av2_lossless_dc_predictor(self.bit_depth)
+        }
+    }
+
+    fn directional_above_edge_with<EdgeSample>(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+        edge_sample: &EdgeSample,
+    ) -> [Av2Sample; 8]
+    where
+        EdgeSample: Fn(Av2LossyPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (plane_width, _) = self.plane_geometry(plane);
+        let (plane_region_right, _) = self.plane_region_limit(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut above = [av2_lossless_v_pred_above_edge(self.bit_depth); 8];
+        if have_top {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_x = (x0 / plane_sb_width) * plane_sb_width;
+            let sb_right = (sb_origin_x + plane_sb_width)
+                .min(plane_width)
+                .min(plane_region_right);
+            let superblock_top_row = y0 % plane_sb_height == 0;
+            for index in 0..above.len() {
+                let x = x0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_top_right_coded =
+                    overhang && y0 == context.leaf_y0 && x < plane_region_right && {
+                        let (row_mi, col_mi) =
+                            self.coded_mi_for_plane_sample(plane, x, y0 - 1);
+                        superblock_top_row
+                            || (x < sb_right && context.coded_mi_context.is_coded(row_mi, col_mi))
+                    };
+                if x < plane_region_right
+                    && (!overhang
+                        || x < context.leaf_x0 + context.leaf_width
+                        || external_top_right_coded)
+                {
+                    above[index] = edge_sample(plane, x, y0 - 1);
+                } else if index > 0 {
+                    above[index] = above[index - 1];
+                }
+            }
+        } else if have_left {
+            above.fill(edge_sample(plane, x0 - 1, y0));
+        }
+        above
+    }
+
+    fn directional_left_edge_with<EdgeSample>(
+        &self,
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+        edge_sample: &EdgeSample,
+    ) -> [Av2Sample; 8]
+    where
+        EdgeSample: Fn(Av2LossyPlane, usize, usize) -> Av2Sample,
+    {
+        let (tile_origin_x, tile_origin_y) = self.plane_origin(plane);
+        let (_, plane_height) = self.plane_geometry(plane);
+        let (_, plane_region_bottom) = self.plane_region_limit(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let have_top = y0 > tile_origin_y;
+        let have_left = x0 > tile_origin_x;
+        let mut left = [av2_lossless_h_pred_left_edge(self.bit_depth); 8];
+        if have_left {
+            let plane_sb_width = MVP_SUPERBLOCK_SIZE / sub_x;
+            let plane_sb_height = MVP_SUPERBLOCK_SIZE / sub_y;
+            let sb_origin_y = (y0 / plane_sb_height) * plane_sb_height;
+            let sb_bottom = (sb_origin_y + plane_sb_height)
+                .min(plane_height)
+                .min(plane_region_bottom);
+            let superblock_left_col = x0 % plane_sb_width == 0;
+            for index in 0..left.len() {
+                let y = y0 + index;
+                let overhang = index >= TX4X4_SIZE;
+                let external_bottom_left_coded =
+                    overhang && x0 == context.leaf_x0 && y < sb_bottom && {
+                        let (row_mi, col_mi) =
+                            self.coded_mi_for_plane_sample(plane, x0 - 1, y);
+                        superblock_left_col || context.coded_mi_context.is_coded(row_mi, col_mi)
+                    };
+                if y < plane_region_bottom
+                    && (!overhang
+                        || (x0 == context.leaf_x0
+                            && (y < context.leaf_y0 + context.leaf_height
+                                || external_bottom_left_coded)))
+                {
+                    left[index] = edge_sample(plane, x0 - 1, y);
+                } else if index > 0 {
+                    left[index] = left[index - 1];
+                }
+            }
+        } else if have_top {
+            left.fill(edge_sample(plane, x0, y0 - 1));
+        }
+        left
+    }
+
     fn dc_predictor_for_score(
         &self,
         plane: Av2LossyPlane,
@@ -2074,11 +2428,39 @@ fn lossy_luma_smooth_search_allowed(scores: Av2LossyIntraTxbScores, total_txbs: 
     axis_gap <= (best_axis / 3).max(txb_count * 128)
 }
 
+fn lossy_luma_directional_search_allowed(
+    scores: Av2LossyIntraTxbScores,
+    total_txbs: usize,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+) -> bool {
+    // The current 4x4 directional search helps YUV screen-content edges but
+    // regresses the RGB screen-capture row. Keep 8-bit 4:4:4 on the cheaper
+    // DC/H/V/Paeth/smooth set until palette or larger-transform decisions can
+    // model RGB screen content directly.
+    if chroma_format == Av2ChromaFormat::Yuv444 && bit_depth.bits() <= 8 {
+        return false;
+    }
+
+    let txb_count = total_txbs.max(1);
+    let best_axis = scores.horizontal.min(scores.vertical);
+    let worst_axis = scores.horizontal.max(scores.vertical);
+    let best_simple = scores.dc.min(best_axis).min(scores.paeth);
+    let per_txb_residual = best_simple / txb_count;
+    let bit_depth_scale = 1usize << usize::from(bit_depth.bits() - 8);
+    if per_txb_residual < 1024 * bit_depth_scale {
+        return false;
+    }
+
+    let axis_gap = worst_axis.saturating_sub(best_axis);
+    axis_gap <= best_axis.max(txb_count * 256 * bit_depth_scale)
+}
+
 fn lossy_chroma_smooth_search_allowed(
     _scores: Av2LossyIntraTxbScores,
     _total_txbs: usize,
 ) -> bool {
-    // See lossy_luma_smooth_search_allowed.
+    // Chroma smooth remains disabled until a content set shows a measured win.
     false
 }
 
@@ -2112,6 +2494,10 @@ fn lossy_luma_mode_syntax_penalty(
             32 + index.saturating_sub(6) * 128
         }
         Av2LumaIntraMode::Paeth => 128,
+        mode if lossy_luma_idif_angle(mode).is_some() => {
+            let index = usize::from(syntax.index_for(mode));
+            192 + index.saturating_sub(7) * 16
+        }
         _ => unreachable!("AV2 lossy luma syntax penalty handles scored modes"),
     }
 }
@@ -2122,6 +2508,12 @@ fn lossy_chroma_mode_syntax_penalty(
 ) -> usize {
     let index = chroma_uv_mode_index(luma_mode, chroma_mode);
     index.min(7) * 32 + usize::from(index >= 7) * 64
+}
+
+fn lossy_luma_idif_angle(mode: Av2LumaIntraMode) -> Option<i16> {
+    let (base, delta) = mode.directional()?;
+    let angle = base.angle(delta);
+    (angle != 90 && angle != 180).then_some(angle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2253,6 +2645,7 @@ struct Av2LossyModeStats {
     dc: u64,
     horizontal: u64,
     vertical: u64,
+    directional: u64,
     paeth: u64,
     smooth: u64,
     fsc: u64,
@@ -2265,6 +2658,7 @@ impl Av2LossyModeStats {
             Av2LumaIntraMode::Dc => self.dc += 1,
             Av2LumaIntraMode::Horizontal => self.horizontal += 1,
             Av2LumaIntraMode::Vertical => self.vertical += 1,
+            mode if lossy_luma_idif_angle(mode).is_some() => self.directional += 1,
             Av2LumaIntraMode::Paeth => self.paeth += 1,
             Av2LumaIntraMode::Smooth
             | Av2LumaIntraMode::SmoothVertical
@@ -2275,8 +2669,8 @@ impl Av2LossyModeStats {
 
     fn print(&self, label: &str) {
         eprintln!(
-            "av2-lossy-stats {label} dc={} horizontal={} vertical={} paeth={} smooth={} fsc={} other={}",
-            self.dc, self.horizontal, self.vertical, self.paeth, self.smooth, self.fsc, self.other
+            "av2-lossy-stats {label} dc={} horizontal={} vertical={} directional={} paeth={} smooth={} fsc={} other={}",
+            self.dc, self.horizontal, self.vertical, self.directional, self.paeth, self.smooth, self.fsc, self.other
         );
     }
 }

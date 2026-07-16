@@ -1375,3 +1375,64 @@ make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50
 manual six-row first-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction framerates
 manual six-row 50-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction framerates
 ```
+
+### Regular-Q Directional Luma Probe
+
+This checkpoint adds a narrow lossy intra mode search for the six non-cardinal
+AV2 luma directional IDIF modes: D45, D67, D113, D135, D157, and D203. The
+search follows the libaom-style shape already used by FrameForge's regular-Q
+mode decision: a cheap residual proxy first decides whether a block is worth
+searching, then each directional candidate must beat the current DC/H/V/Paeth
+and smooth score after a conservative syntax penalty.
+
+The retained gate scales the residual threshold by bit depth and disables this
+4x4 directional search for 8-bit 4:4:4 content. The broader first probe saved
+slightly more on YUV rows but made the RGB screen-capture row 970 bytes larger
+and slowed the 10-bit rows more than the bitrate win justified.
+
+Retained first-frame QP24 predictive comparison:
+
+| Vector | Format | FF bytes | Delta bytes | FF size | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 184,106 | -652 | 0.176 MiB | 50.061823 | -0.059 |
+| SceneComposition_1_422 | yuv422p8 | 193,091 | -682 | 0.184 MiB | 50.515171 | -0.048 |
+| screen_wayland_activity_rgb | rgb24 | 542,289 | 0 | 0.517 MiB | 49.725866 | -0.000 |
+| MissionControlClip1_420 | yuv420p10le | 455,610 | -1,086 | 0.435 MiB | 48.021548 | -0.029 |
+| MissionControlClip1_422 | yuv422p10le | 491,089 | -1,155 | 0.468 MiB | 48.798738 | -0.024 |
+| MissionControlClip1_444 | yuv444p10le | 542,157 | -1,074 | 0.517 MiB | 49.631986 | -0.020 |
+| total | mixed | 2,408,342 | -4,649 | 2.297 MiB | n/a | n/a |
+
+Retained 50-frame QP24 predictive comparison:
+
+| Vector | Format | FF bytes | Delta bytes | FF size | FF fps | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 10,716,548 | -652 | 10.220 MiB | 11.39 | 56.585436 | -0.030 |
+| SceneComposition_1_422 | yuv422p8 | 12,225,896 | -682 | 11.660 MiB | 10.36 | 56.793668 | -0.029 |
+| screen_wayland_activity_rgb | rgb24 | 11,023,316 | 0 | 10.513 MiB | 4.84 | 53.400617 | +0.000 |
+| MissionControlClip1_420 | yuv420p10le | 28,060,916 | -12,476 | 26.761 MiB | 3.54 | 49.976582 | -0.018 |
+| MissionControlClip1_422 | yuv422p10le | 31,654,914 | -13,091 | 30.188 MiB | 2.85 | 50.867169 | -0.016 |
+| MissionControlClip1_444 | yuv444p10le | 38,080,873 | -12,316 | 36.317 MiB | 2.29 | 51.941656 | -0.014 |
+| total | mixed | 131,762,463 | -39,217 | 125.658 MiB | n/a | n/a | n/a |
+
+Rejected directional probes:
+
+| Probe | Result | Decision |
+|---|---|---|
+| Unscaled directional gate on all formats | First-frame total -11,394 bytes, but RGB +970 bytes; 50-frame total -78,465 bytes with larger high-bit-depth FPS hit | Rejected: RGB bitrate regression and too much search cost |
+| Scaled directional gate, still enabled for 8-bit 4:4:4 | Same RGB regression as above | Rejected: screen RGB needs palette or larger-transform decisions before directional 4x4 search |
+
+Validation:
+
+```text
+cargo fmt
+cargo check -p frameforge-codecs --all-features
+cargo test -p frameforge-codecs --all-features av2_regular_qp -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossy -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossless -- --nocapture
+make build
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+verification/references/av2/avm/build/avmdec --rawvideo -o <reference.yuv> <SceneComposition_1_420_qp24_1f.obu>
+cmp <internal_recon.raw> <reference.yuv>
+manual six-row first-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction framerates
+manual six-row 50-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction framerates
+```
