@@ -1790,6 +1790,7 @@ Probe notes:
 | Whole-block skip for quantized-zero inter leaves | Only -9,087 bytes total, but FF FPS dropped from 3.79 to 3.57 in the measured run | Rejected: not enough bitrate win for the extra analysis pass |
 | Exact NEWMV residuals on all bit depths | 8-bit rows improved, but 10-bit rows regressed by +32,019,137 bytes total and jumped to ~56-57 dB PSNR | Rejected: 10-bit needs an RD threshold before using this predictor |
 | Exact NEWMV residuals gated to 8-bit streams | 8-bit rows improved by 1,533,012 bytes total; 10-bit rows are byte-identical to the previous checkpoint | Retained |
+| Non-4:4:4 8-bit chroma low-variance AC prune | Variance <=512 saved only 5,237 first-frame bytes but dropped Scene 4:2:0 to 49.583 dB; variance <=128 saved only 325 bytes on the 50-frame set | Rejected: not enough bitrate win at the quality floor |
 
 Validation:
 

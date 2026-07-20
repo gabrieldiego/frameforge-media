@@ -3095,6 +3095,12 @@ struct Av2LossyPlaneStats {
     regular_dct_tail_pruned: u64,
     regular_dct_double_tail_pruned: u64,
     regular_dct_dc_only: u64,
+    quantized_zero: u64,
+    quantized_nonzero: u64,
+    eob_1: u64,
+    eob_2_4: u64,
+    eob_5_8: u64,
+    eob_9_16: u64,
     chosen_sse: u128,
     source_variance: u128,
     variance_loss: u128,
@@ -3120,6 +3126,19 @@ impl Av2LossyPlaneStats {
                 self.variance_loss += analysis.dc_variance_loss as u128;
             }
             Av2LossyTxbChoice::QuantizedResidual(candidate) => {
+                let eob = quantized_txb_eob(&candidate.coefficients);
+                if eob == 0 {
+                    self.quantized_zero += 1;
+                } else {
+                    self.quantized_nonzero += 1;
+                }
+                match eob {
+                    0 => {}
+                    1 => self.eob_1 += 1,
+                    2..=4 => self.eob_2_4 += 1,
+                    5..=8 => self.eob_5_8 += 1,
+                    _ => self.eob_9_16 += 1,
+                }
                 match candidate.kind {
                     Av2LossyResidualCandidateKind::Spatial => self.spatial += 1,
                     Av2LossyResidualCandidateKind::RefinedSpatial => {
@@ -3146,7 +3165,7 @@ impl Av2LossyPlaneStats {
     fn print(&self, label: &str) {
         let txbs = u128::from(self.txbs.max(1));
         eprintln!(
-            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_tail_pruned={} regular_dct_double_tail_pruned={} regular_dct_dc_only={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
+            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_tail_pruned={} regular_dct_double_tail_pruned={} regular_dct_dc_only={} quantized_zero={} quantized_nonzero={} eob_1={} eob_2_4={} eob_5_8={} eob_9_16={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
             self.txbs,
             self.exact,
             self.exact_zero,
@@ -3159,6 +3178,12 @@ impl Av2LossyPlaneStats {
             self.regular_dct_tail_pruned,
             self.regular_dct_double_tail_pruned,
             self.regular_dct_dc_only,
+            self.quantized_zero,
+            self.quantized_nonzero,
+            self.eob_1,
+            self.eob_2_4,
+            self.eob_5_8,
+            self.eob_9_16,
             self.chosen_sse / txbs,
             self.source_variance / txbs,
             self.variance_loss / txbs,

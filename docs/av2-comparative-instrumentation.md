@@ -35,6 +35,9 @@ make build AV2_SB_BITS=1 AV2_LOSSY_STATS=1
 per-superblock JSONL only when `FRAMEFORGE_AV2_SB_BITS` is set at runtime.
 `AV2_LOSSY_STATS=1` enables `frameforge-codecs/av2-lossy-stats` and prints
 mode/TXB summaries only when `FRAMEFORGE_AV2_LOSSY_STATS` is set at runtime.
+The TXB summaries include chosen residual kind, quantized zero/nonzero counts,
+and EOB buckets so coefficient-pruning probes can be checked against actual
+selected TXB populations before they are kept.
 
 Reference instrumentation is built into separate reference build directories:
 
