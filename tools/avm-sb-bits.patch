@@ -1,0 +1,94 @@
+diff --git a/av2/encoder/bitstream.c b/av2/encoder/bitstream.c
+index 64502f6..7ae6028 100644
+--- a/av2/encoder/bitstream.c
++++ b/av2/encoder/bitstream.c
+@@ -13,6 +13,7 @@
+ #include <assert.h>
+ #include <limits.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "av2/encoder/ratectrl.h"
+@@ -70,6 +71,60 @@ static void image2yuvconfig_upshift(avm_image_t *hbd_img,
+ 
+ #define ENC_MISMATCH_DEBUG 0
+ 
++#if defined(FRAMEFORGE_AVM_SB_BITS) && FRAMEFORGE_AVM_SB_BITS
++static FILE *frameforge_avm_sb_bits_file(void) {
++  static int initialized = 0;
++  static FILE *file = NULL;
++  if (!initialized) {
++    const char *path = getenv("FRAMEFORGE_AVM_SB_BITS");
++    initialized = 1;
++    if (path != NULL && path[0] != '\0' && strcmp(path, "0") != 0) {
++      if (strcmp(path, "-") == 0) {
++        file = stderr;
++      } else {
++        file = fopen(path, "a");
++        if (file == NULL) {
++          fprintf(stderr, "failed to open FRAMEFORGE_AVM_SB_BITS=%s\n", path);
++        }
++      }
++    }
++  }
++  return file;
++}
++
++static void frameforge_avm_report_sb_bits(const AV2_COMP *const cpi,
++                                          const TileInfo *const tile,
++                                          int tile_row, int tile_col,
++                                          int mi_row, int mi_col,
++                                          int before_bits, int after_bits) {
++  FILE *const file = frameforge_avm_sb_bits_file();
++  if (file == NULL) return;
++
++  const AV2_COMMON *const cm = &cpi->common;
++  const int sb_mi = cm->mib_size;
++  const int visible_mi_w = AVMMIN(sb_mi, cm->mi_params.mi_cols - mi_col);
++  const int visible_mi_h = AVMMIN(sb_mi, cm->mi_params.mi_rows - mi_row);
++  const int x = mi_col * MI_SIZE;
++  const int y = mi_row * MI_SIZE;
++  const int width = visible_mi_w * MI_SIZE;
++  const int height = visible_mi_h * MI_SIZE;
++  const int sb_size = sb_mi * MI_SIZE;
++  const int total_bits = after_bits >= before_bits ? after_bits - before_bits
++                                                   : 0;
++
++  fprintf(file,
++          "{\"codec\":\"av2\",\"source\":\"avm\",\"frame_index\":%u,"
++          "\"tile_row\":%d,\"tile_col\":%d,\"tile_origin_x\":%d,"
++          "\"tile_origin_y\":%d,\"sb_x\":%d,\"sb_y\":%d,\"x\":%d,\"y\":%d,"
++          "\"width\":%d,\"height\":%d,\"superblock_size\":%d,"
++          "\"before_bits\":%d,\"after_bits\":%d,\"total_symbol_bits\":%d}\n",
++          cm->current_frame.frame_number, tile_row, tile_col,
++          tile->mi_col_start * MI_SIZE, tile->mi_row_start * MI_SIZE,
++          x / sb_size, y / sb_size, x, y, width, height, sb_size, before_bits,
++          after_bits, total_bits);
++}
++#endif
++
+ static INLINE void write_uniform(avm_writer *w, int n, int v) {
+   const int l = get_unsigned_bits(n);
+   const int m = (1 << l) - n;
+@@ -3186,12 +3244,20 @@ static AVM_INLINE void write_modes(AV2_COMP *const cpi,
+         av2_reset_ptree_in_sbi(xd->sbi, xd->tree_type);
+         xd->sbi->ptree_root[av2_get_sdp_idx(xd->tree_type)]->partition =
+             PARTITION_NONE;
+       }
++#if defined(FRAMEFORGE_AVM_SB_BITS) && FRAMEFORGE_AVM_SB_BITS
++      const int frameforge_sb_start_bits = avm_od_ec_enc_tell(&w->ec);
++#endif
+       write_modes_sb(cpi, tile, w, &tok, tok_end, &tok_chroma, tok_end_chroma,
+                      xd->sbi->ptree_root[av2_get_sdp_idx(xd->tree_type)],
+                      (intra_sdp_enabled ? xd->sbi->ptree_root[1] : NULL),
+                      mi_row, mi_col, cm->sb_size);
++#if defined(FRAMEFORGE_AVM_SB_BITS) && FRAMEFORGE_AVM_SB_BITS
++      frameforge_avm_report_sb_bits(cpi, tile, tile_row, tile_col, mi_row,
++                                    mi_col, frameforge_sb_start_bits,
++                                    avm_od_ec_enc_tell(&w->ec));
++#endif
+     }
+     assert(tok_chroma == tok_end_chroma);
+     assert(tok == tok_end);
+   }

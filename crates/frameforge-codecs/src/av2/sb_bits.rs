@@ -180,7 +180,7 @@ impl Av2SbBitCost {
 impl Av2SbBitReport {
     fn write_line(&mut self, collector: &Av2SbBitCollector, cost: &Av2SbBitCost) -> io::Result<()> {
         let line = format!(
-            "{{\"codec\":\"av2\",\"source\":\"frameforge\",\"path\":\"{}\",\"frame_index\":{},\"tile_origin_x\":{},\"tile_origin_y\":{},\"tile_width\":{},\"tile_height\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"total_symbol_bits\":{},\"decision_count\":{},\"leaf_count\":{}}}\n",
+            "{{\"codec\":\"av2\",\"source\":\"frameforge\",\"path\":\"{}\",\"frame_index\":{},\"tile_origin_x\":{},\"tile_origin_y\":{},\"tile_width\":{},\"tile_height\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"total_symbol_bits\":{},\"decision_count\":{},\"leaf_count\":{}}}\n",
             collector.path,
             collector.frame_index,
             collector.tile_origin_x,
@@ -193,6 +193,7 @@ impl Av2SbBitReport {
             cost.y,
             cost.width,
             cost.height,
+            AV2_MVP_SUPERBLOCK_SIZE,
             cost.partition_bits,
             cost.luma_mode_bits,
             cost.chroma_mode_bits,

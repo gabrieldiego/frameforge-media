@@ -75,8 +75,10 @@ struct Av2LossySubsampledTileState<'a> {
     c_width: usize,
     c_height: usize,
     c_len: usize,
+    #[cfg(feature = "av2-lossy-stats")]
     qp: u8,
     base_qindex: u16,
+    #[cfg(feature = "av2-lossy-stats")]
     stats: Option<std::cell::RefCell<Av2LossyStats>>,
 }
 
@@ -128,8 +130,10 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             c_width,
             c_height,
             c_len,
+            #[cfg(feature = "av2-lossy-stats")]
             qp,
             base_qindex,
+            #[cfg(feature = "av2-lossy-stats")]
             stats: av2_lossy_stats_enabled()
                 .then(|| std::cell::RefCell::new(Av2LossyStats::default())),
         }
@@ -2085,11 +2089,14 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         chroma_txbs: usize,
         mode: Av2LossySubsampledModeDecision,
     ) {
+        #[cfg(feature = "av2-lossy-stats")]
         if let Some(stats) = &self.stats {
             stats
                 .borrow_mut()
                 .record_leaf(block_size, luma_txbs, chroma_txbs, mode);
         }
+        #[cfg(not(feature = "av2-lossy-stats"))]
+        let _ = (block_size, luma_txbs, chroma_txbs, mode);
     }
 
     fn record_txb_choice(
@@ -2098,11 +2105,14 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         choice: &Av2LossyTxbChoice,
         analysis: &Av2LossyTxbAnalysis,
     ) {
+        #[cfg(feature = "av2-lossy-stats")]
         if let Some(stats) = &self.stats {
             stats
                 .borrow_mut()
                 .record_txb_choice(plane, choice, analysis);
         }
+        #[cfg(not(feature = "av2-lossy-stats"))]
+        let _ = (plane, choice, analysis);
     }
 }
 
@@ -2149,6 +2159,7 @@ fn regular_dct_ac_prune_threshold(
     }
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 impl Drop for Av2LossySubsampledTileState<'_> {
     fn drop(&mut self) {
         if let Some(stats) = &self.stats {
@@ -2157,6 +2168,7 @@ impl Drop for Av2LossySubsampledTileState<'_> {
     }
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 fn av2_lossy_stats_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2551,6 +2563,7 @@ enum Av2LossyResidualCandidateKind {
     RegularDct,
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 #[derive(Debug, Default)]
 struct Av2LossyStats {
     leaves: u64,
@@ -2568,6 +2581,7 @@ struct Av2LossyStats {
     v: Av2LossyPlaneStats,
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 impl Av2LossyStats {
     fn record_leaf(
         &mut self,
@@ -2640,6 +2654,7 @@ impl Av2LossyStats {
     }
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 #[derive(Debug, Default)]
 struct Av2LossyModeStats {
     dc: u64,
@@ -2652,6 +2667,7 @@ struct Av2LossyModeStats {
     other: u64,
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 impl Av2LossyModeStats {
     fn record(&mut self, mode: Av2LumaIntraMode) {
         match mode {
@@ -2675,6 +2691,7 @@ impl Av2LossyModeStats {
     }
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 #[derive(Debug, Default)]
 struct Av2LossyChromaModeStats {
     dc: u64,
@@ -2685,6 +2702,7 @@ struct Av2LossyChromaModeStats {
     other: u64,
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 impl Av2LossyChromaModeStats {
     fn record(&mut self, mode: Av2ChromaIntraMode) {
         match mode {
@@ -2707,6 +2725,7 @@ impl Av2LossyChromaModeStats {
     }
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 #[derive(Debug, Default)]
 struct Av2LossyPlaneStats {
     txbs: u64,
@@ -2723,6 +2742,7 @@ struct Av2LossyPlaneStats {
     variance_loss: u128,
 }
 
+#[cfg(feature = "av2-lossy-stats")]
 impl Av2LossyPlaneStats {
     fn record(&mut self, choice: &Av2LossyTxbChoice, analysis: &Av2LossyTxbAnalysis) {
         self.txbs += 1;

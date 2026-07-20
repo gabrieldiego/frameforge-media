@@ -177,6 +177,19 @@ FRAMEFORGE_AV2_SB_BITS=verification/generated/profiling/av2_sb_bits.jsonl \
   --encode av2:verification/generated/profiling/frameforge_sb_bits.obu --qp 24
 ```
 
+For AV2 lossy mode and TXB choice summaries, compile the separate gated
+`av2-lossy-stats` feature through `AV2_LOSSY_STATS=1`, then set
+`FRAMEFORGE_AV2_LOSSY_STATS=1` for the run. This keeps the normal encoder free
+of the statistics counters and environment checks.
+
+```sh
+make build AV2_LOSSY_STATS=1
+FRAMEFORGE_AV2_LOSSY_STATS=1 \
+  ./ff encode input.yuv --video 1920x1080:yuv420p8 --frames 1 \
+  --encode av2:verification/generated/profiling/frameforge_lossy_stats.obu \
+  --qp 24 2> verification/generated/profiling/frameforge_lossy_stats.log
+```
+
 For comparable direct-libaom superblock deltas, build the patched libaom
 instrumentation in its separate build directory and set
 `FRAMEFORGE_LIBAOM_SB_BITS` for the run. The direct libaom output is a total
@@ -191,6 +204,29 @@ FRAMEFORGE_LIBAOM_SB_BITS=verification/generated/profiling/libaom_sb_bits.jsonl 
   COMPRESSION_REFERENCE_PRESET=realtime-screen \
   LIBAOM_SB_BITS=1 COMPRESSION_REFRESH_REFERENCE=1
 ```
+
+For comparable AVM superblock deltas, build the patched AVM instrumentation in
+its separate build directory and set `FRAMEFORGE_AVM_SB_BITS` for the run. This
+is useful for AV2-native tool guidance; AVM is not expected to be an fps
+baseline.
+
+```sh
+make reference-setup REFERENCE_CODEC=av2 AVM_SB_BITS=1
+FRAMEFORGE_AVM_SB_BITS=verification/generated/profiling/avm_sb_bits.jsonl \
+  make compare-compression CODEC=av2 COMPRESSION_SET=smoke \
+  COMPRESSION_REFERENCE_BACKEND=reference \
+  COMPRESSION_REFERENCE_PRESET=fast \
+  AVM_SB_BITS=1 COMPRESSION_REFRESH_REFERENCE=1
+```
+
+Summarize FrameForge, libaom, AVM, field-trace, and lossy-stats outputs with:
+
+```sh
+scripts/summarize_encoder_instrumentation.py --help
+```
+
+The comparative workflow and source-code audit pointers are documented in
+[`av2-comparative-instrumentation.md`](av2-comparative-instrumentation.md).
 
 For local source-file manifests backed by large Y4M inputs, set
 `COMPRESSION_DIRECT_SOURCE_FILES=1` to feed the source path directly and use

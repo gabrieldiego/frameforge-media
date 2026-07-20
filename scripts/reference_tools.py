@@ -289,11 +289,15 @@ def build_reference(manifest: ReferenceManifest, root: Path) -> None:
 
 
 def apply_reference_patches(manifest: ReferenceManifest, root: Path) -> None:
-    if manifest.codec != "libaom" or not truthy_env("FRAMEFORGE_LIBAOM_SB_BITS_BUILD"):
+    patch = None
+    if manifest.codec == "libaom" and truthy_env("FRAMEFORGE_LIBAOM_SB_BITS_BUILD"):
+        patch = REPO_ROOT / "tools" / "libaom-sb-bits.patch"
+    elif manifest.codec == "av2" and truthy_env("FRAMEFORGE_AVM_SB_BITS_BUILD"):
+        patch = REPO_ROOT / "tools" / "avm-sb-bits.patch"
+    else:
         return
-    patch = REPO_ROOT / "tools" / "libaom-sb-bits.patch"
     if not patch.exists():
-        raise SystemExit(f"missing libaom superblock bit patch: {patch}")
+        raise SystemExit(f"missing superblock bit patch: {patch}")
     reverse_check = subprocess.run(
         ["git", "apply", "--reverse", "--check", str(patch)],
         check=False,
@@ -309,8 +313,8 @@ def apply_reference_patches(manifest: ReferenceManifest, root: Path) -> None:
         cwd=root,
     )
     if forward_check.returncode != 0:
-        raise SystemExit(f"cannot apply libaom superblock bit patch to {root}")
-    print(f"applying libaom superblock bit patch: {patch}", file=sys.stderr)
+        raise SystemExit(f"cannot apply superblock bit patch to {root}")
+    print(f"applying superblock bit patch: {patch}", file=sys.stderr)
     run(["git", "apply", str(patch)], cwd=root)
 
 
@@ -371,6 +375,8 @@ def cmake_args(manifest: ReferenceManifest) -> list[str]:
             args.append("-DAOM_TARGET_CPU=generic")
     if manifest.codec == "libaom" and truthy_env("FRAMEFORGE_LIBAOM_SB_BITS_BUILD"):
         args.append("-DCMAKE_C_FLAGS=-DFRAMEFORGE_LIBAOM_SB_BITS=1")
+    if manifest.codec == "av2" and truthy_env("FRAMEFORGE_AVM_SB_BITS_BUILD"):
+        args.append("-DCMAKE_C_FLAGS=-DFRAMEFORGE_AVM_SB_BITS=1")
     return args
 
 

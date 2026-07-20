@@ -106,8 +106,9 @@ external decoding.
 ## Build-Time Composition
 
 Codec and filter availability is selected at build time. By default,
-`make build` uses Cargo's `--all-features` mode so the copied `./ff` binary
-includes every codec and filter stage currently compiled by this workspace.
+`make build` enables the normal product feature set so the copied `./ff` binary
+includes every codec and filter stage currently intended for the developer CLI
+without compiling analysis-only instrumentation.
 
 Override `CARGO_FEATURES` to build a smaller or more specialized binary:
 
@@ -117,10 +118,13 @@ make build CARGO_FEATURES="codec-av2 filter-scale"
 make build CARGO_FEATURES=
 ```
 
-The `codec-av2` and `codec-vvc` features enable the imported experimental
-software models. The `filter-pattern` feature enables input-free generated
-pattern sources for fixtures. Other filter features are discovery placeholders
-for now; parsed transform filters are not executed yet.
+`CARGO_FEATURES=all` means all normal product features. The `codec-av2` and
+`codec-vvc` features enable the imported experimental software models. The
+`filter-pattern` feature enables input-free generated pattern sources for
+fixtures. Other filter features are discovery placeholders for now; parsed
+transform filters are not executed yet. Analysis-only features, such as AV2
+superblock bit accounting, are enabled through dedicated Makefile switches like
+`AV2_SB_BITS=1` so the normal product build is not slowed by instrumentation.
 
 ## CLI Shape
 
