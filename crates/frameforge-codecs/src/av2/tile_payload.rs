@@ -455,6 +455,50 @@ pub(crate) fn av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_wit
         &mut lossless,
         reference,
         palette,
+        false,
+    );
+    lossless.copy_source_to_recon_region();
+    writer.finish()
+}
+
+pub(crate) fn av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+    region: Av2TileRegion,
+    profile: Av2Black444MvpProfile,
+    geometry: Av2VideoGeometry,
+    chroma_format: Av2ChromaFormat,
+    bit_depth: SampleBitDepth,
+    source: &[u8],
+    reference: &[u8],
+    recon: &mut [u8],
+    palette: Option<&Av2LumaPalette444>,
+    block_modes: &Av2LosslessInterTileBlockModes,
+    record_fields: bool,
+) -> Av2EntropyPayload {
+    let plan = Av2Black444TilePlan::for_region_with_fixed_inter_partition_modes(
+        region,
+        profile,
+        chroma_format,
+        block_modes,
+    );
+    let mut writer =
+        Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
+    let mut lossless = Av2LosslessSubsampledTileState::new(
+        geometry,
+        region,
+        chroma_format,
+        bit_depth,
+        Av2LosslessSubsampledModeSearch::FastScreenContent,
+        source,
+        recon,
+    );
+    plan.write_lossless_mixed_inter_intra_entropy(
+        &mut writer,
+        1,
+        block_modes,
+        &mut lossless,
+        reference,
+        palette,
+        true,
     );
     lossless.copy_source_to_recon_region();
     writer.finish()
@@ -1110,6 +1154,26 @@ impl Av2Black444TilePlan {
             profile,
             chroma_format,
             Av2PartitionPolicy::LosslessInterModes,
+            false,
+            false,
+            None,
+            None,
+            None,
+            Some(block_modes.clone()),
+        )
+    }
+
+    fn for_region_with_fixed_inter_partition_modes(
+        region: Av2TileRegion,
+        profile: Av2Black444MvpProfile,
+        chroma_format: Av2ChromaFormat,
+        block_modes: &Av2LosslessInterTileBlockModes,
+    ) -> Self {
+        Self::for_region_with_partition_policy_and_features(
+            region,
+            profile,
+            chroma_format,
+            Av2PartitionPolicy::Fixed8x8Leaves,
             false,
             false,
             None,
@@ -2446,6 +2510,7 @@ impl Av2Black444TilePlan {
         lossless: &mut Av2LosslessSubsampledTileState<'_>,
         reference: &[u8],
         palette: Option<&Av2LumaPalette444>,
+        use_regular_inter_txb_contexts: bool,
     ) {
         let mut partition_context =
             Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
@@ -2553,6 +2618,9 @@ impl Av2Black444TilePlan {
                                     &inter_context,
                                     total_refs,
                                 );
+                                if use_regular_inter_txb_contexts {
+                                    write_lossless_tx_size_4x4(writer, decision.block_size);
+                                }
                                 skip_context.update_leaf(
                                     decision.row,
                                     decision.col,
@@ -2830,6 +2898,7 @@ impl Av2Black444TilePlan {
                                     reference,
                                     0,
                                     0,
+                                    use_regular_inter_txb_contexts,
                                 );
                                 coded_mi_context.update_leaf(
                                     decision.row,

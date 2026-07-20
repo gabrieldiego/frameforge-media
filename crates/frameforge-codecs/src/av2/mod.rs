@@ -24,6 +24,7 @@ use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
+    av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields,
@@ -1444,33 +1445,53 @@ fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_fra
     let mut reconstruction = vec![0; expected_len];
     let mut tile_payloads = Vec::with_capacity(tile_layout.tile_count());
     for (&region, tile_mode) in tile_layout.regions.iter().zip(tile_modes.iter()) {
-        let reference = if matches!(tile_mode, Av2PredictiveTileMode::ZeroMv) {
-            reference_reconstruction
-        } else {
-            frame
-        };
-        if !layout.copy_region_between(
-            &mut reconstruction,
-            region.origin_x,
-            region.origin_y,
-            reference,
-            region.origin_x,
-            region.origin_y,
-            region.width,
-            region.height,
-        ) {
-            return None;
+        match tile_mode {
+            Av2PredictiveTileMode::ZeroMv => {
+                if !layout.copy_region_between(
+                    &mut reconstruction,
+                    region.origin_x,
+                    region.origin_y,
+                    reference_reconstruction,
+                    region.origin_x,
+                    region.origin_y,
+                    region.width,
+                    region.height,
+                ) {
+                    return None;
+                }
+                tile_payloads.push(av2_lossless_predictive_tile_payload_for_mode(
+                    region,
+                    tile_mode,
+                    profile,
+                    geometry,
+                    stream_format,
+                    frame,
+                    reference_source,
+                    palette_ref,
+                ));
+            }
+            Av2PredictiveTileMode::Intra => {
+                let residual_blocks = lossless_tile_zero_mv_residual_block_modes(region)?;
+                tile_payloads.push(
+                    av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                        region,
+                        profile,
+                        geometry,
+                        stream_format.chroma_format,
+                        stream_format.bit_depth,
+                        frame,
+                        reference_reconstruction,
+                        &mut reconstruction,
+                        palette_ref,
+                        &residual_blocks,
+                        false,
+                    ),
+                );
+            }
+            Av2PredictiveTileMode::NewMv(_)
+            | Av2PredictiveTileMode::Mixed(_)
+            | Av2PredictiveTileMode::MixedInterIntraOrResidual { .. } => return None,
         }
-        tile_payloads.push(av2_lossless_predictive_tile_payload_for_mode(
-            region,
-            tile_mode,
-            profile,
-            geometry,
-            stream_format,
-            frame,
-            reference_source,
-            palette_ref,
-        ));
     }
 
     let mut payload = av2_mvp_regular_inter_header_payload(
@@ -1911,6 +1932,26 @@ fn lossless_tile_inter_residual_block_modes(
         region,
         Av2LosslessInterBlockMode::ZeroMvResidual,
     )
+}
+
+fn lossless_tile_zero_mv_residual_block_modes(
+    region: Av2TileRegion,
+) -> Option<Av2LosslessInterTileBlockModes> {
+    if region.origin_x % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.origin_y % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.width % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.height % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+    {
+        return None;
+    }
+
+    let blocks_wide = region.width / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let blocks_high = region.height / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    Some(Av2LosslessInterTileBlockModes::new(
+        blocks_wide,
+        blocks_high,
+        vec![Av2LosslessInterBlockMode::ZeroMvResidual; blocks_wide * blocks_high],
+    ))
 }
 
 fn lossless_tile_mixed_inter_block_modes(

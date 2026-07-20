@@ -1436,3 +1436,91 @@ cmp <internal_recon.raw> <reference.yuv>
 manual six-row first-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction framerates
 manual six-row 50-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction framerates
 ```
+
+### Predictive Zero-MV Residual Tiles
+
+This checkpoint changes lossy predictive frames only. When a predictive tile is
+not identical to the previous reconstruction, the encoder now keeps the tile in
+inter syntax and codes exact zero-MV residuals for the changed 8x8 blocks
+instead of falling back to an intra tile payload. The reconstruction is
+unchanged: skipped blocks still copy the previous reconstruction, and changed
+blocks still reconstruct from the current source. This preserves the active
+PSNR guardrail while removing a large amount of intra mode syntax and improving
+encode speed.
+
+The AVM syntax fix was to emit the lossless inter `TX_4X4` size symbol before
+the residual coefficients on this regular-inter residual path. Without that
+symbol, AVM decoded some residual blocks with a larger transform size and
+rejected the tile. The lossy residual writer also uses the regular inter TXB
+contexts, while the existing lossless predictive writer keeps its previous
+lossless-compatible context path. A larger-leaf residual partition probe was
+rejected for now because AVM still rejected the bitstream; keeping residual
+leaves at 8x8 is the current compatible path until the larger transform-block
+traversal is implemented.
+
+First-frame QP24 rows are unchanged by this checkpoint; this is a predictive
+inter-frame change.
+
+Retained 50-frame QP24 predictive comparison:
+
+| Vector | Format | FF bytes | Delta bytes | FF size | FF fps | FF PSNR | Delta PSNR | ffmpeg/libaom bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 5,805,343 | -4,911,205 | 5.536 MiB | 15.99 | 56.585436 | +0.000 | 353,820 |
+| SceneComposition_1_422 | yuv422p8 | 6,618,461 | -5,607,435 | 6.312 MiB | 13.79 | 56.793668 | +0.000 | 408,009 |
+| screen_wayland_activity_rgb | rgb24 | 4,415,394 | -6,607,922 | 4.211 MiB | 5.35 | 53.400617 | +0.000 | 434,822 |
+| MissionControlClip1_420 | yuv420p10le | 11,072,824 | -16,988,092 | 10.560 MiB | 4.57 | 49.976582 | +0.000 | 682,773 |
+| MissionControlClip1_422 | yuv422p10le | 12,491,509 | -19,163,405 | 11.913 MiB | 3.75 | 50.867169 | +0.000 | 731,234 |
+| MissionControlClip1_444 | yuv444p10le | 14,973,295 | -23,107,578 | 14.280 MiB | 2.89 | 51.941656 | +0.000 | 777,812 |
+| total | mixed | 55,376,826 | -76,385,637 | 52.811 MiB | 5.21 | n/a | n/a | 3,388,470 |
+
+The 50-frame total drops from the directional-luma checkpoint's 131,762,463
+bytes to 55,376,826 bytes, a 76,385,637 byte reduction, or about 58.0%. PSNR is
+unchanged because the changed predictive blocks still reconstruct from the
+current source.
+
+Direct `aomenc` refresh, using realtime screen-content settings with eight
+threads. The RGB row is fed to `aomenc` through a planar 4:4:4 Y4M wrapper and
+scored plane-for-plane against the same planarized RGB components.
+
+50-frame QP24 predictive comparison:
+
+| Vector | Format | FF Mbps | FF fps | FF PSNR | aomenc Mbps | aomenc fps | aomenc PSNR | FF/aomenc bitrate |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 13.93 | 15.66 | 56.585 | 0.96 | 17.99 | 48.633 | 14.51x |
+| SceneComposition_1_422 | yuv422p8 | 15.88 | 14.06 | 56.794 | 1.10 | 18.93 | 49.291 | 14.46x |
+| screen_wayland_activity_rgb | rgb24 | 21.19 | 5.06 | 53.401 | 1.45 | 9.23 | 47.085 | 14.64x |
+| MissionControlClip1_420 | yuv420p10le | 106.30 | 4.54 | 49.977 | 5.78 | 10.65 | 33.847 | 18.38x |
+| MissionControlClip1_422 | yuv422p10le | 119.92 | 2.82 | 50.867 | 5.90 | 7.98 | 34.881 | 20.33x |
+| MissionControlClip1_444 | yuv444p10le | 143.74 | 2.18 | 51.942 | 6.26 | 7.88 | 36.460 | 22.95x |
+
+First-frame QP24 intra comparison:
+
+| Vector | Format | FF Mbps | FF fps | FF PSNR | aomenc Mbps | aomenc fps | aomenc PSNR | FF/aomenc bitrate |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 22.09 | 1.72 | 50.062 | 16.03 | 0.97 | 51.540 | 1.38x |
+| SceneComposition_1_422 | yuv422p8 | 23.17 | 1.42 | 50.515 | 18.76 | 1.20 | 51.704 | 1.23x |
+| screen_wayland_activity_rgb | rgb24 | 130.15 | 0.61 | 49.726 | 37.00 | 0.73 | 49.371 | 3.52x |
+| MissionControlClip1_420 | yuv420p10le | 218.69 | 1.18 | 48.022 | 126.09 | 0.65 | 47.869 | 1.73x |
+| MissionControlClip1_422 | yuv422p10le | 235.72 | 1.02 | 48.799 | 135.81 | 0.59 | 48.520 | 1.74x |
+| MissionControlClip1_444 | yuv444p10le | 260.24 | 0.78 | 49.632 | 147.51 | 0.53 | 49.501 | 1.76x |
+
+The refreshed direct `aomenc` run puts the current first-frame total at
+2,408,342 FrameForge bytes versus 1,297,001 `aomenc` bytes, or 1.86x. The
+50-frame total is 55,376,826 FrameForge bytes versus 3,028,382 `aomenc` bytes,
+or 18.29x. The long-run gap is therefore now dominated by predictive coding
+efficiency and rate control, while the first-frame gap is mostly the RGB screen
+content row.
+
+Validation:
+
+```text
+cargo fmt --all
+cargo check -p frameforge-codecs --all-features
+cargo test -p frameforge-codecs --all-features av2_regular_qp -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossy -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossless -- --nocapture
+make build
+SceneComposition_1_420 three-frame QP24 predictive AVM decode + cmp
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+manual direct aomenc six-row 50-frame and first-frame QP24 predictive chart
+```

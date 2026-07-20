@@ -135,10 +135,7 @@ fn write_lossy_subsampled_residual_coefficients(
     }
 }
 
-fn write_regular_q_tx_partition_split_8x8(
-    writer: &mut Av2EntropyWriter,
-    decision: Av2TileDecision,
-) {
+fn write_regular_q_tx_partition_split_8x8(writer: &mut Av2EntropyWriter, decision: Av2TileDecision) {
     debug_assert_eq!(decision.block_size.width, 8);
     debug_assert_eq!(decision.block_size.height, 8);
 
@@ -947,6 +944,7 @@ fn write_lossless_inter_residual_coefficients(
     reference: &[u8],
     mv_row_px: i16,
     mv_col_px: i16,
+    use_regular_inter_txb_contexts: bool,
 ) {
     let txb_width = decision
         .block_size
@@ -973,11 +971,19 @@ fn write_lossless_inter_residual_coefficients(
                 mv_col_px,
             );
             let (context, _) = if tx4x4_residual_is_zero(&residual) {
-                write_y_txb_all_zero(writer, skip_ctx);
+                if use_regular_inter_txb_contexts {
+                    write_y_inter_txb_all_zero(writer, skip_ctx);
+                } else {
+                    write_y_txb_all_zero(writer, skip_ctx);
+                }
                 (0, false)
             } else {
                 let coefficients = tx4x4_coefficients_from_residual(&residual, false);
-                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+                if use_regular_inter_txb_contexts {
+                    write_luma_inter_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+                } else {
+                    write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &coefficients)
+                }
             };
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::Y, x0, y0);
             contexts.y_above[abs_col] = context;
@@ -1009,7 +1015,7 @@ fn write_lossless_inter_residual_coefficients(
                 mv_col_px,
             );
             let (context, nonzero) = if tx4x4_residual_is_zero(&residual) {
-                write_u_txb_all_zero(writer, skip_ctx, false);
+                write_u_txb_all_zero(writer, skip_ctx, use_regular_inter_txb_contexts);
                 (0, false)
             } else {
                 let coefficients = tx4x4_coefficients_from_residual(&residual, false);
@@ -1018,7 +1024,7 @@ fn write_lossless_inter_residual_coefficients(
                     Av2ChromaPlane::U,
                     skip_ctx,
                     &coefficients,
-                    false,
+                    use_regular_inter_txb_contexts,
                 )
             };
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::U, x0, y0);

@@ -740,29 +740,69 @@ def ffmpeg_libaom_reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
-    bit_depth, _chroma = av1_pixel_format(vector.fmt)
+    bit_depth = 8 if vector.fmt == "rgb24" else av1_pixel_format(vector.fmt)[0]
     if bit_depth not in {8, 10, 12}:
         raise SystemExit(f"unsupported ffmpeg/libaom reference encode pixel format: {vector.fmt}")
 
-    y4m_input = ffmpeg_libaom_input_path(vector, vector_path, output)
     command = [
         encoder,
         "-y",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-i",
-        str(y4m_input),
-        "-frames:v",
-        str(vector.frames),
-        "-c:v",
-        "libaom-av1",
     ]
+    command.extend(ffmpeg_libaom_input_args(vector, vector_path, output))
+    command.extend(
+        [
+            "-frames:v",
+            str(vector.frames),
+        ]
+    )
+    if vector.fmt == "rgb24":
+        command.extend(
+            [
+                "-vf",
+                "format=gbrp",
+                "-color_range",
+                "pc",
+            ]
+        )
+    command.extend(
+        [
+            "-c:v",
+            "libaom-av1",
+        ]
+    )
     command.extend(ffmpeg_libaom_preset_args(vector, args))
     if args.reference_args:
         command.extend(shlex.split(args.reference_args))
     command.append(str(output))
     return command
+
+
+def ffmpeg_libaom_input_args(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+) -> list[str]:
+    if vector.fmt == "rgb24" and vector_path.suffix.lower() != ".y4m":
+        return [
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-video_size",
+            f"{vector.width}x{vector.height}",
+            "-framerate",
+            reference_fps_ratio(vector),
+            "-i",
+            str(vector_path),
+        ]
+
+    return [
+        "-i",
+        str(ffmpeg_libaom_input_path(vector, vector_path, output)),
+    ]
 
 
 def ffmpeg_libaom_input_path(
