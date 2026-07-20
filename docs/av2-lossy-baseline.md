@@ -1524,3 +1524,80 @@ SceneComposition_1_420 three-frame QP24 predictive AVM decode + cmp
 make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
 manual direct aomenc six-row 50-frame and first-frame QP24 predictive chart
 ```
+
+### Transform-Aware DC Refinement
+
+The new instrumentation showed that residual symbols still dominate the current
+lossy screen-content bitstream. On first-frame probes, several leaves selected
+H/V/Paeth/smooth from the cheap prediction proxy even though the regular-Q DCT
+residual writer produced fewer residual bits with DC prediction. This checkpoint
+adds a narrow second-stage check for those close calls: when the proxy-selected
+mode is non-DC and DC is within a conservative margin, the encoder samples the
+same regular-Q DCT/DC-only residual decision used by the final writer and keeps
+DC only when that transform-aware score wins by a small quantization-scaled
+margin.
+
+The same rule is used for all bit depths and chroma formats. An earlier
+8-bit-only gate was rejected because the refinement can also produce positive
+high-bit-depth deltas. A looser shared margin was also rejected because it left
+the 10-bit 4:2:2 row slightly negative.
+
+Retained first-frame QP24 predictive comparison versus the directional-luma
+checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 183,605 | -501 | 50.080987 | +0.019 |
+| SceneComposition_1_422 | yuv422p8 | 193,002 | -89 | 50.537574 | +0.022 |
+| screen_wayland_activity_rgb | rgb24 | 541,677 | -612 | 49.720871 | -0.005 |
+| MissionControlClip1_420 | yuv420p10le | 455,320 | -290 | 48.034375 | +0.013 |
+| MissionControlClip1_422 | yuv422p10le | 490,809 | -280 | 48.818224 | +0.019 |
+| MissionControlClip1_444 | yuv444p10le | 541,754 | -403 | 49.648672 | +0.017 |
+| total | mixed | 2,405,167 | -2,175 | n/a | n/a |
+
+The first retained probe without the final positive margin showed why the
+refinement works: the superblock bit maps attributed almost all of the Scene
+and RGB first-frame wins to residual symbols. Scene residual symbols dropped by
+2,000 bits, and RGB residual symbols dropped by 7,512 bits. Luma mode and
+partition syntax were effectively flat.
+
+Retained 50-frame QP24 predictive comparison versus the predictive
+zero-MV-residual checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF fps | FF PSNR guardrail | ffmpeg/libaom bytes |
+|---|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 5,804,345 | -998 | 16.02 | ~56.585 | 353,820 |
+| SceneComposition_1_422 | yuv422p8 | 6,617,484 | -977 | 14.30 | ~56.794 | 408,009 |
+| screen_wayland_activity_rgb | rgb24 | 4,410,790 | -4,604 | 5.25 | ~53.401 | 434,822 |
+| MissionControlClip1_420 | yuv420p10le | 11,070,971 | -1,853 | 4.20 | 49.977 | 682,773 |
+| MissionControlClip1_422 | yuv422p10le | 12,488,645 | -2,864 | 3.48 | 50.867 | 731,234 |
+| MissionControlClip1_444 | yuv444p10le | 14,970,720 | -2,575 | 2.55 | 51.942 | 777,812 |
+| total | mixed | 55,362,955 | -13,871 | 4.84 | n/a | 3,388,470 |
+
+Rejected probes:
+
+| Probe | Result | Decision |
+|---|---|---|
+| Coarse 8-bit-only gate | Avoided high-bit-depth search cost but discarded positive 10-bit 4:2:0, 4:2:2, and 4:4:4 byte deltas | Rejected: too broad a gate |
+| Looser shared margin, `selected / 512` or `txbs * qstep / 8` | Total stayed positive, but 10-bit 4:2:2 regressed by 302 bytes | Rejected: one subsampling row was negative |
+| No positive margin after transform-aware scoring | Total stayed positive, but 10-bit 4:2:2 regressed by 444 bytes | Rejected: one subsampling row was negative |
+| Relax DC-only residual acceptance by 3x-4x | Small byte wins but visible first-frame PSNR drops, up to roughly 0.8 dB on Scene | Rejected: not enough quality margin |
+| Prune small AC coefficients before residual coding | Large PSNR loss on screen content | Rejected |
+| Enable FSC/IDTX for 8-bit 4:4:4 | RGB probe selected `fsc=0` everywhere and produced no size change | Rejected: no measured win |
+| Larger lossy leaves without larger transform syntax | Promising direction, but legal 16x16 transform partitioning reaches 8x8 TXBs and this path only has 4x4 DCT/coeff tables today | Deferred until larger transforms are implemented |
+
+Validation:
+
+```text
+cargo fmt --all
+cargo check -p frameforge-codecs --all-features
+cargo test -p frameforge-codecs --all-features av2_regular_qp -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossy -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossless -- --nocapture
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+manual six-row first-frame QP24 predictive encode + ffmpeg PSNR with matched raw reconstruction formats
+./ff encode verification/generated/test_vectors/aomctc_b2_SceneComposition_1_420_1920x1080_15_1f_yuv420p8.yuv --frames 1 --encode av2:verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f.obu --recon verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f.recon --qp 24 --set predictive
+verification/references/av2/avm/build/avmdec --rawvideo -o verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f_dec.yuv verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f.obu
+cmp verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f.recon verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f_dec.yuv
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+```

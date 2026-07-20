@@ -609,13 +609,30 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         let (mut qcoeff, _) =
             av2_regular_quantize_dct4x4(&coefficients, self.base_qindex, self.bit_depth);
         qcoeff[1..].fill(0);
-        self.regular_dct_candidate_from_qcoeff(analysis, &qcoeff)
+        self.regular_dct_candidate_from_qcoeff_kind(
+            analysis,
+            &qcoeff,
+            Av2LossyResidualCandidateKind::RegularDctDcOnly,
+        )
     }
 
     fn regular_dct_candidate_from_qcoeff(
         &self,
         analysis: &Av2LossyTxbAnalysis,
         qcoeff: &[i32; TX4X4_SAMPLES],
+    ) -> Av2LossyQuantizedResidualCandidate {
+        self.regular_dct_candidate_from_qcoeff_kind(
+            analysis,
+            qcoeff,
+            Av2LossyResidualCandidateKind::RegularDct,
+        )
+    }
+
+    fn regular_dct_candidate_from_qcoeff_kind(
+        &self,
+        analysis: &Av2LossyTxbAnalysis,
+        qcoeff: &[i32; TX4X4_SAMPLES],
+        kind: Av2LossyResidualCandidateKind,
     ) -> Av2LossyQuantizedResidualCandidate {
         let dqcoeff = av2_regular_dequantize_dct4x4(qcoeff, self.base_qindex, self.bit_depth);
         let residual = av2_idct4x4(&dqcoeff, self.bit_depth);
@@ -630,7 +647,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             sse += (diff * diff) as usize;
         }
         Av2LossyQuantizedResidualCandidate {
-            kind: Av2LossyResidualCandidateKind::RegularDct,
+            kind,
             residual,
             coefficients: av2_regular_quantized_level_coefficients(qcoeff),
             sse,
@@ -961,6 +978,45 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
         mode.luma_intra_mode = best_luma.0;
         mode.luma_bdpcm_horz = best_luma.1;
+        if mode.luma_bdpcm_horz.is_none()
+            && mode.luma_intra_mode != Av2LumaIntraMode::Dc
+            && lossy_regular_q_dc_refinement_allowed(
+                best_luma.2,
+                luma_scores.dc + lossy_luma_mode_syntax_penalty(Av2LumaIntraMode::Dc, luma_mode_syntax),
+                txb_width * txb_height,
+            )
+        {
+            let selected_score = self.sampled_luma_regular_q_leaf_score(
+                decision,
+                txb_width,
+                txb_height,
+                luma_context,
+                mode,
+                luma_mode_syntax,
+            );
+            let dc_mode = Av2LossySubsampledModeDecision {
+                luma_intra_mode: Av2LumaIntraMode::Dc,
+                luma_bdpcm_horz: None,
+                ..mode
+            };
+            let dc_score = self.sampled_luma_regular_q_leaf_score(
+                decision,
+                txb_width,
+                txb_height,
+                luma_context,
+                dc_mode,
+                luma_mode_syntax,
+            );
+            if lossy_regular_q_refinement_selects_dc(
+                selected_score,
+                dc_score,
+                txb_width * txb_height,
+                self.quant_step(),
+            ) {
+                mode.luma_intra_mode = Av2LumaIntraMode::Dc;
+                mode.luma_bdpcm_horz = None;
+            }
+        }
 
         let chroma_span = chroma_tx4x4_span(
             decision,
@@ -1159,6 +1215,47 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
         mode.chroma_use_bdpcm = best_chroma.0;
         mode.chroma_intra_mode = best_chroma.1;
+        if !mode.chroma_use_bdpcm
+            && mode.chroma_intra_mode != Av2ChromaIntraMode::Dc
+            && lossy_regular_q_dc_refinement_allowed(
+                best_chroma.2,
+                chroma_scores.dc
+                    + lossy_chroma_mode_syntax_penalty(
+                        mode.coded_luma_mode(),
+                        Av2ChromaIntraMode::Dc,
+                    ),
+                chroma_total_txbs,
+            )
+        {
+            let chroma_context = Av2LossyLeafPredictorContext {
+                leaf_x0: chroma_leaf_x0,
+                leaf_y0: chroma_leaf_y0,
+                leaf_width: chroma_leaf_width,
+                leaf_height: chroma_leaf_height,
+                coded_mi_context,
+            };
+            let selected_score = self.sampled_chroma_regular_q_leaf_score(
+                chroma_span,
+                chroma_context,
+                mode,
+            );
+            let dc_mode = Av2LossySubsampledModeDecision {
+                chroma_use_bdpcm: false,
+                chroma_intra_mode: Av2ChromaIntraMode::Dc,
+                ..mode
+            };
+            let dc_score =
+                self.sampled_chroma_regular_q_leaf_score(chroma_span, chroma_context, dc_mode);
+            if lossy_regular_q_refinement_selects_dc(
+                selected_score,
+                dc_score,
+                chroma_total_txbs,
+                self.quant_step(),
+            ) {
+                mode.chroma_use_bdpcm = false;
+                mode.chroma_intra_mode = Av2ChromaIntraMode::Dc;
+            }
+        }
         if self.chroma_format == Av2ChromaFormat::Yuv444
             && lossy_fsc_search_allowed(txb_width * txb_height + chroma_total_txbs)
         {
@@ -1184,6 +1281,90 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             mode,
         );
         mode
+    }
+
+    fn sampled_luma_regular_q_leaf_score(
+        &self,
+        decision: Av2TileDecision,
+        txb_width: usize,
+        txb_height: usize,
+        context: Av2LossyLeafPredictorContext<'_>,
+        mode: Av2LossySubsampledModeDecision,
+        luma_mode_syntax: Av2LumaModeSyntax,
+    ) -> usize {
+        let mut score =
+            lossy_luma_refinement_syntax_penalty(mode.coded_luma_mode(), luma_mode_syntax);
+        let mut sampled_txbs = 0usize;
+        for row in 0..txb_height {
+            for col in 0..txb_width {
+                if !lossy_mode_search_samples_txb(row, col, txb_width, txb_height) {
+                    continue;
+                }
+                let (x0, y0) =
+                    self.txb_origin(Av2LossyPlane::Y, decision.col + col, decision.row + row);
+                let analysis = self.analyze_txb(Av2LossyPlane::Y, x0, y0, mode, context);
+                score +=
+                    self.regular_q_txb_rd_score(&analysis, Av2CoefficientProxyKind::LumaTransform);
+                sampled_txbs += 1;
+            }
+        }
+        lossy_scale_sampled_score(score, txb_width * txb_height, sampled_txbs)
+    }
+
+    fn sampled_chroma_regular_q_leaf_score(
+        &self,
+        chroma_span: Av2ChromaTx4x4Span,
+        context: Av2LossyLeafPredictorContext<'_>,
+        mode: Av2LossySubsampledModeDecision,
+    ) -> usize {
+        let mut score =
+            lossy_chroma_mode_syntax_penalty(mode.coded_luma_mode(), mode.chroma_intra_mode);
+        let mut sampled_txbs = 0usize;
+        for plane in [Av2LossyPlane::U, Av2LossyPlane::V] {
+            for row in 0..chroma_span.height {
+                for col in 0..chroma_span.width {
+                    if !lossy_mode_search_samples_txb(
+                        row,
+                        col,
+                        chroma_span.width,
+                        chroma_span.height,
+                    ) {
+                        continue;
+                    }
+                    let (x0, y0) =
+                        self.txb_origin(plane, chroma_span.col + col, chroma_span.row + row);
+                    let analysis = self.analyze_txb(plane, x0, y0, mode, context);
+                    score += self
+                        .regular_q_txb_rd_score(&analysis, Av2CoefficientProxyKind::ChromaTransform);
+                    sampled_txbs += 1;
+                }
+            }
+        }
+        lossy_scale_sampled_score(
+            score,
+            chroma_span.width * chroma_span.height * 2,
+            sampled_txbs,
+        )
+    }
+
+    fn regular_q_txb_rd_score(
+        &self,
+        analysis: &Av2LossyTxbAnalysis,
+        kind: Av2CoefficientProxyKind,
+    ) -> usize {
+        let candidate = choose_regular_q_lossy_txb(
+            self.regular_dct_quantized_residual_candidate(analysis),
+            self.regular_dct_dc_only_candidate(analysis),
+            kind,
+            self.quant_step(),
+        );
+        let rate = coefficient_proxy_score(&candidate.coefficients, kind);
+        lossy_txb_score(
+            rate,
+            candidate.sse,
+            candidate.variance_loss,
+            regular_q_rd_quant_step(self.quant_step()),
+        )
     }
 
     fn fsc_leaf_scores(
@@ -2426,6 +2607,46 @@ fn lossy_mode_search_samples_txb(row: usize, col: usize, width: usize, height: u
     (row % 2 == 0 && col % 2 == 0) || row + 1 == height || col + 1 == width
 }
 
+fn lossy_scale_sampled_score(score: usize, total_txbs: usize, sampled_txbs: usize) -> usize {
+    if sampled_txbs == 0 || sampled_txbs == total_txbs {
+        return score;
+    }
+    score.saturating_mul(total_txbs) / sampled_txbs
+}
+
+fn lossy_regular_q_dc_refinement_allowed(
+    selected_score: usize,
+    dc_score: usize,
+    total_txbs: usize,
+) -> bool {
+    let txb_count = total_txbs.max(1);
+    dc_score <= selected_score.saturating_add((selected_score / 16).max(txb_count * 64))
+}
+
+fn lossy_regular_q_refinement_selects_dc(
+    selected_score: usize,
+    dc_score: usize,
+    total_txbs: usize,
+    quant_step: i32,
+) -> bool {
+    let txb_count = total_txbs.max(1);
+    let quant_margin = usize::try_from(quant_step.max(1)).unwrap_or(1);
+    let margin = (selected_score / 256).max(txb_count * quant_margin / 4);
+    dc_score.saturating_add(margin) <= selected_score
+}
+
+fn lossy_luma_refinement_syntax_penalty(
+    mode: Av2LumaIntraMode,
+    syntax: Av2LumaModeSyntax,
+) -> usize {
+    match mode {
+        Av2LumaIntraMode::Smooth
+        | Av2LumaIntraMode::SmoothVertical
+        | Av2LumaIntraMode::SmoothHorizontal => 192,
+        _ => lossy_luma_mode_syntax_penalty(mode, syntax),
+    }
+}
+
 fn lossy_luma_smooth_search_allowed(scores: Av2LossyIntraTxbScores, total_txbs: usize) -> bool {
     let txb_count = total_txbs.max(1);
     let best_axis = scores.horizontal.min(scores.vertical);
@@ -2561,6 +2782,7 @@ enum Av2LossyResidualCandidateKind {
     RefinedSpatial,
     Transform,
     RegularDct,
+    RegularDctDcOnly,
 }
 
 #[cfg(feature = "av2-lossy-stats")]
@@ -2737,6 +2959,7 @@ struct Av2LossyPlaneStats {
     refined_spatial: u64,
     transform: u64,
     regular_dct: u64,
+    regular_dct_dc_only: u64,
     chosen_sse: u128,
     source_variance: u128,
     variance_loss: u128,
@@ -2769,6 +2992,9 @@ impl Av2LossyPlaneStats {
                     }
                     Av2LossyResidualCandidateKind::Transform => self.transform += 1,
                     Av2LossyResidualCandidateKind::RegularDct => self.regular_dct += 1,
+                    Av2LossyResidualCandidateKind::RegularDctDcOnly => {
+                        self.regular_dct_dc_only += 1;
+                    }
                 }
                 self.chosen_sse += candidate.sse as u128;
                 self.variance_loss += candidate.variance_loss as u128;
@@ -2779,7 +3005,7 @@ impl Av2LossyPlaneStats {
     fn print(&self, label: &str) {
         let txbs = u128::from(self.txbs.max(1));
         eprintln!(
-            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
+            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_dc_only={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
             self.txbs,
             self.exact,
             self.exact_zero,
@@ -2789,6 +3015,7 @@ impl Av2LossyPlaneStats {
             self.refined_spatial,
             self.transform,
             self.regular_dct,
+            self.regular_dct_dc_only,
             self.chosen_sse / txbs,
             self.source_variance / txbs,
             self.variance_loss / txbs,
