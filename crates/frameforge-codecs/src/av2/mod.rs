@@ -24,7 +24,6 @@ use tile::{
     av2_black_444_tile_entropy_payload_for_region_with_fields,
     av2_black_444_tile_entropy_payload_for_region_with_intrabc_and_fields,
     av2_black_tile_entropy_payload_for_region,
-    av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_mixed_inter_tile_entropy_payload_for_region_with_fields,
     av2_lossless_new_mv_inter_tile_entropy_payload_for_region_with_fields,
@@ -32,6 +31,7 @@ use tile::{
     av2_lossless_subsampled_regular_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossless_subsampled_tile_entropy_payload_for_region_with_fields,
     av2_lossless_zero_mv_inter_tile_entropy_payload_for_region_with_fields,
+    av2_lossy_fixed_inter_intra_tile_entropy_payload_for_region_with_fields,
     av2_lossy_subsampled_tile_entropy_payload_for_region,
     av2_lossy_subsampled_tile_entropy_payload_for_region_with_fields,
     av2_luma_palette_444_tile_entropy_payload_for_region_with_fields, Av2LosslessInterBlockMode,
@@ -224,6 +224,19 @@ impl Av2QuantizationParams {
 fn av2_base_qindex_for_qp(qp: u8, bit_depth: SampleBitDepth) -> u16 {
     let scaled = (u32::from(qp.max(1)) * 10).div_ceil(3);
     (scaled as u16).min(av2_max_qindex(bit_depth))
+}
+
+fn av2_predictive_inter_qp_for_qp(qp: u8, bit_depth: SampleBitDepth) -> u8 {
+    let qp = u16::from(qp.max(1));
+    // Until delta-q is active, changed predictive tiles share one inter-frame
+    // qindex. Keep it below the key-frame QP so zero-MV residuals do not spend
+    // the accumulated prediction quality budget too aggressively.
+    let scaled = if bit_depth.bits() > 8 {
+        qp.div_ceil(6)
+    } else {
+        (qp * 2).div_ceil(3)
+    };
+    scaled.clamp(1, u16::from(u8::MAX)) as u8
 }
 
 fn av2_qindex_bits(bit_depth: SampleBitDepth) -> u8 {
@@ -914,6 +927,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                             frame,
                             reference,
                             reference_reconstruction,
+                            qp,
                             order_hint,
                         )
                         .unwrap_or_else(|| {
@@ -1381,6 +1395,7 @@ fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_fra
     frame: &[u8],
     reference_source: &[u8],
     reference_reconstruction: &[u8],
+    qp: u8,
     order_hint: u16,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
     let expected_len = Picture::expected_len(
@@ -1405,35 +1420,83 @@ fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_fra
         return None;
     }
 
-    let mut has_zero_mv_tile = false;
-    let mut has_intra_tile = false;
+    let mut zero_mv_tiles = Vec::with_capacity(tile_layout.tile_count());
+    let mut motion_search_regions = Vec::new();
+    for region in &tile_layout.regions {
+        let zero_mv = layout.regions_equal_between(
+            frame,
+            region.origin_x,
+            region.origin_y,
+            reference_source,
+            region.origin_x,
+            region.origin_y,
+            region.width,
+            region.height,
+        );
+        zero_mv_tiles.push(zero_mv);
+        if !zero_mv {
+            motion_search_regions.push(Av2MotionSearchRegion {
+                x0: region.origin_x,
+                y0: region.origin_y,
+                width: region.width,
+                height: region.height,
+            });
+        }
+    }
+    if motion_search_regions.is_empty() {
+        return None;
+    }
+
+    let use_exact_motion_residuals = stream_format.bit_depth.bits() <= 8;
+    let motion_map = use_exact_motion_residuals
+        .then(|| {
+            motion::build_lossless_motion_map_for_regions(
+                frame,
+                reference_source,
+                geometry,
+                stream_format.chroma_format,
+                stream_format.bit_depth,
+                &motion_search_regions,
+            )
+            .ok()
+        })
+        .flatten();
     let tile_modes: Vec<_> = tile_layout
         .regions
         .iter()
-        .map(|region| {
-            if layout.regions_equal_between(
-                frame,
-                region.origin_x,
-                region.origin_y,
-                reference_source,
-                region.origin_x,
-                region.origin_y,
-                region.width,
-                region.height,
-            ) {
-                has_zero_mv_tile = true;
+        .zip(zero_mv_tiles.iter())
+        .map(|(region, zero_mv)| {
+            if *zero_mv {
                 Av2PredictiveTileMode::ZeroMv
+            } else if let Some(blocks) = motion_map
+                .as_ref()
+                .and_then(|map| lossy_tile_inter_residual_block_modes(map, *region))
+            {
+                Av2PredictiveTileMode::Residual(blocks)
             } else {
-                has_intra_tile = true;
                 Av2PredictiveTileMode::Intra
             }
         })
         .collect();
-    if !has_zero_mv_tile || !has_intra_tile {
+    let has_zero_mv_tile = tile_modes
+        .iter()
+        .any(|mode| matches!(mode, Av2PredictiveTileMode::ZeroMv));
+    let has_residual_tile = tile_modes.iter().any(|mode| {
+        matches!(
+            mode,
+            Av2PredictiveTileMode::Intra | Av2PredictiveTileMode::Residual(_)
+        )
+    });
+    let has_newmv_residual_tile = tile_modes
+        .iter()
+        .any(|mode| matches!(mode, Av2PredictiveTileMode::Residual(_)));
+    if !has_residual_tile || (!has_zero_mv_tile && !has_newmv_residual_tile) {
         return None;
     }
 
     let profile = Av2Black444MvpProfile::current();
+    let inter_qp = av2_predictive_inter_qp_for_qp(qp, stream_format.bit_depth);
+    let quantization = Av2QuantizationParams::regular_qp(inter_qp, stream_format.bit_depth);
     let palette = palette::build_luma_palette_lossless(
         frame,
         geometry,
@@ -1470,10 +1533,9 @@ fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_fra
                     palette_ref,
                 ));
             }
-            Av2PredictiveTileMode::Intra => {
-                let residual_blocks = lossless_tile_zero_mv_residual_block_modes(region)?;
+            Av2PredictiveTileMode::Residual(residual_blocks) => {
                 tile_payloads.push(
-                    av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                    av2_lossy_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
                         region,
                         profile,
                         geometry,
@@ -1482,8 +1544,28 @@ fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_fra
                         frame,
                         reference_reconstruction,
                         &mut reconstruction,
-                        palette_ref,
+                        residual_blocks,
+                        inter_qp,
+                        quantization.base_qindex,
+                        false,
+                    ),
+                );
+            }
+            Av2PredictiveTileMode::Intra => {
+                let residual_blocks = lossless_tile_zero_mv_residual_block_modes(region)?;
+                tile_payloads.push(
+                    av2_lossy_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+                        region,
+                        profile,
+                        geometry,
+                        stream_format.chroma_format,
+                        stream_format.bit_depth,
+                        frame,
+                        reference_reconstruction,
+                        &mut reconstruction,
                         &residual_blocks,
+                        inter_qp,
+                        quantization.base_qindex,
                         false,
                     ),
                 );
@@ -1494,12 +1576,8 @@ fn av2_lossy_subsampled_zero_mv_inter_tiles_bitstream_and_reconstruction_for_fra
         }
     }
 
-    let mut payload = av2_mvp_regular_inter_header_payload(
-        &tile_layout,
-        stream_format,
-        Av2QuantizationParams::lossless(),
-        order_hint,
-    );
+    let mut payload =
+        av2_mvp_regular_inter_header_payload(&tile_layout, stream_format, quantization, order_hint);
     let tile_payload = tile_group_payload_from_entropy(&tile_payloads);
     let bit_offset = payload.bytes.len() * 8;
     payload.fields.push(syntax::Av2SyntaxField {
@@ -1713,6 +1791,7 @@ enum Av2PredictiveTileMode {
     ZeroMv,
     NewMv(Av2MotionVector),
     Mixed(Av2LosslessInterTileBlockModes),
+    Residual(Av2LosslessInterTileBlockModes),
     MixedInterIntraOrResidual {
         intra_blocks: Av2LosslessInterTileBlockModes,
         residual_blocks: Av2LosslessInterTileBlockModes,
@@ -1757,6 +1836,9 @@ fn av2_lossless_predictive_tile_payload_for_mode(
                 blocks,
                 false,
             )
+        }
+        Av2PredictiveTileMode::Residual(_) => {
+            unreachable!("lossless predictive path does not emit lossy residual tile modes")
         }
         Av2PredictiveTileMode::MixedInterIntraOrResidual {
             intra_blocks,
@@ -1932,6 +2014,45 @@ fn lossless_tile_inter_residual_block_modes(
         region,
         Av2LosslessInterBlockMode::ZeroMvResidual,
     )
+}
+
+fn lossy_tile_inter_residual_block_modes(
+    motion_map: &Av2LosslessMotionMap,
+    region: Av2TileRegion,
+) -> Option<Av2LosslessInterTileBlockModes> {
+    if region.origin_x % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.origin_y % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.width % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+        || region.height % AV2_LOSSLESS_ME_BLOCK_SIZE != 0
+    {
+        return None;
+    }
+
+    let blocks_wide = region.width / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let blocks_high = region.height / AV2_LOSSLESS_ME_BLOCK_SIZE;
+    let mut blocks = Vec::with_capacity(blocks_wide * blocks_high);
+    let mut has_newmv_residual = false;
+    for y in (region.origin_y..region.origin_y + region.height).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
+    {
+        for x in
+            (region.origin_x..region.origin_x + region.width).step_by(AV2_LOSSLESS_ME_BLOCK_SIZE)
+        {
+            if let Some(block) = motion_map.candidate_at(x, y) {
+                if block.mv.row_px != 0 || block.mv.col_px != 0 {
+                    has_newmv_residual = true;
+                    blocks.push(Av2LosslessInterBlockMode::NewMvResidual {
+                        row_px: block.mv.row_px,
+                        col_px: block.mv.col_px,
+                    });
+                    continue;
+                }
+            }
+            blocks.push(Av2LosslessInterBlockMode::ZeroMvResidual);
+        }
+    }
+
+    has_newmv_residual
+        .then(|| Av2LosslessInterTileBlockModes::new(blocks_wide, blocks_high, blocks))
 }
 
 fn lossless_tile_zero_mv_residual_block_modes(
@@ -4118,6 +4239,7 @@ mod tests {
                 &second,
                 &first,
                 &first_recon,
+                24,
                 1,
             )
             .expect("unchanged left tile should use a zero-MV inter frame");
@@ -4138,16 +4260,52 @@ mod tests {
             512,
             geometry.height
         ));
-        assert!(layout.regions_equal_between(
+        assert!(!layout.regions_equal_between(
             &inter_recon,
             512,
             0,
-            &second,
+            &first_recon,
             512,
             0,
             512,
             geometry.height
         ));
+    }
+
+    #[test]
+    fn av2_lossy_exact_motion_residual_map_uses_newmv_for_shifted_8bit_blocks() {
+        let geometry = Av2VideoGeometry {
+            width: 1024,
+            height: 64,
+        };
+        let format = PixelFormat::Yuv420p8;
+        let first = shifted_tile_reference_frame(geometry);
+        let second = shifted_tile_current_frame(&first, geometry);
+        let stream_format =
+            Av2StreamFormat::from_pixel_format(format).expect("yuv420p8 is an AV2 stream format");
+        let motion_map = motion::build_lossless_motion_map(
+            &second,
+            &first,
+            geometry,
+            stream_format.chroma_format,
+            stream_format.bit_depth,
+        )
+        .expect("shifted tile motion map should build");
+        let right_tile = Av2TileRegion {
+            origin_x: 512,
+            origin_y: 0,
+            width: 512,
+            height: 64,
+        };
+        let residual_blocks = lossy_tile_inter_residual_block_modes(&motion_map, right_tile)
+            .expect("shifted tile should expose exact NEWMV residual blocks");
+        assert_eq!(
+            residual_blocks.block_mode_at(0, 0),
+            Some(Av2LosslessInterBlockMode::NewMvResidual {
+                row_px: 0,
+                col_px: -8
+            })
+        );
     }
 
     #[test]

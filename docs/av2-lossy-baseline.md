@@ -1665,3 +1665,148 @@ verification/references/av2/avm/build/avmdec --rawvideo -o verification/generate
 cmp verification/generated/instrumentation_loop/tail_unit_prune_tight_1f/scene420_yuv420p8.recon verification/generated/instrumentation_loop/tail_unit_prune_tight_1f/scene420_yuv420p8_dec.yuv
 make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
 ```
+
+### Regular-Q Inter Residual And Gated Double-Tail Pruning
+
+This checkpoint fixes an adaptive-CDF mismatch in lossy predictive inter
+residuals and keeps the bitrate work moving inside the regular-Q residual
+selector. The reference mismatch was in inter 4x4 transform-type context
+selection: AVM derives the reduced transform set context from `eob - 1` as a
+raster last-position value, while FrameForge was using the scan position. The
+fix lets adaptive CDF streams decode cleanly with AVM on the 50-frame
+SceneComposition_1 4:2:0 predictive stream.
+
+The retained bitrate change widens the single trailing-unit AC prune guard
+from `qstep / 16` to `qstep / 8`, then adds a second candidate that prunes two
+trailing unit AC coefficients. The second candidate is gated off for 4:4:4
+because the measured RGB row was a tiny byte regression there; it remains
+available for 4:2:0 and 4:2:2, where both 8-bit and 10-bit rows improved.
+The selector also now derives the DC-only regular-Q candidate from the same
+already-quantized 4x4 DCT coefficients, removing a duplicate FDCT/quantize pass
+without changing the bitstream.
+
+Retained first-frame QP24 predictive comparison versus the tight tail-unit
+checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 182,595 | -585 | 50.082764 | -0.015011 |
+| SceneComposition_1_422 | yuv422p8 | 192,034 | -574 | 50.530519 | -0.021286 |
+| screen_wayland_activity_rgb | rgb24 | 541,056 | -249 | 49.726284 | -0.002789 |
+| MissionControlClip1_420 | yuv420p10le | 455,320 | 0 | 48.034375 | +0.000000 |
+| MissionControlClip1_422 | yuv422p10le | 490,809 | 0 | 48.818224 | +0.000000 |
+| MissionControlClip1_444 | yuv444p10le | 541,754 | 0 | 49.648672 | +0.000000 |
+| total | mixed | 2,403,568 | -1,408 | n/a | n/a |
+
+Retained 50-frame QP24 predictive comparison versus the tight tail-unit
+checkpoint. PSNR is the ffmpeg `psnr` filter sequence average against the
+internal reconstruction; FPS is from `make compare-compression` without recon
+I/O:
+
+| Vector | Format | FF bytes | Delta bytes | FF fps | FF PSNR | ffmpeg/libaom bytes |
+|---|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 3,159,134 | -2,644,600 | 9.90 | 50.456733 | 353,820 |
+| SceneComposition_1_422 | yuv422p8 | 3,415,059 | -3,201,929 | 8.42 | 50.712149 | 408,009 |
+| screen_wayland_activity_rgb | rgb24 | 3,415,489 | -992,202 | 4.57 | 51.443187 | 434,822 |
+| MissionControlClip1_420 | yuv420p10le | 9,762,068 | -1,308,903 | 3.44 | 49.834693 | 682,773 |
+| MissionControlClip1_422 | yuv422p10le | 10,767,579 | -1,721,066 | 2.73 | 50.694677 | 731,234 |
+| MissionControlClip1_444 | yuv444p10le | 12,314,927 | -2,655,793 | 2.10 | 51.731175 | 777,812 |
+| total | mixed | 42,834,256 | -12,524,493 | 3.82 | n/a | 3,388,470 |
+
+Lossless predictive guardrail stayed exact on the same six-vector set. The
+static CDF key cleanup changes the bitstream by +120 bytes total versus the
+previous documented lossless guardrail, with no reconstruction change:
+
+| Vector | Format | FF bytes | Delta bytes | Result |
+|---|---|---:|---:|---|
+| SceneComposition_1_420 | yuv420p8 | 4,291,092 | 0 | exact |
+| SceneComposition_1_422 | yuv422p8 | 4,828,242 | 0 | exact |
+| screen_wayland_activity_rgb | rgb24 | 3,604,512 | 0 | exact |
+| MissionControlClip1_420 | yuv420p10le | 19,506,053 | +40 | exact |
+| MissionControlClip1_422 | yuv422p10le | 22,696,884 | +40 | exact |
+| MissionControlClip1_444 | yuv444p10le | 28,604,519 | +40 | exact |
+| total | mixed | 83,531,302 | +120 | exact |
+
+Instrumentation notes:
+
+Post-change first-frame SB maps still point at residuals as the next target:
+SceneComposition_1 4:2:0 spends 85.3% of symbol bits on residuals, 6.4% on
+luma mode, and 6.2% on partition syntax; the RGB row spends 91.7% on
+residuals, 3.6% on luma mode, and 3.5% on partition syntax.
+
+| Probe | Result | Decision |
+|---|---|---|
+| Two-tail prune with `2 * qstep / 8` SSE guard | Scene 4:2:0 dipped to 49.966 dB on one 50-frame sample | Rejected: crossed the quality floor |
+| Two-tail prune with shared `qstep / 8` guard on all formats | Positive on 4:2:0/4:2:2, but RGB regressed by 34 bytes and lost speed | Rejected: one format was negative |
+| Two-tail prune with shared `qstep / 8` guard on non-4:4:4 only | Six-row total improved by 68,211 bytes versus the single-tail `qstep / 8` run | Retained |
+| Reuse regular-Q DCT quantization for DC-only candidate | Byte-identical; total compare speed moved from 3.72 to 3.82 fps | Retained |
+
+Validation:
+
+```text
+cargo fmt --all
+cargo check -p frameforge-codecs --features av2
+cargo test -p frameforge-codecs --features av2
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+manual six-row first-frame QP24 predictive encode + direct raw PSNR
+manual six-row 50-frame QP24 predictive encode + ffmpeg psnr filter
+verification/references/av2/avm/build/avmdec --codec=av2 --rawvideo -o verification/generated/instrumentation_loop/double_tail_prune/scene420_50f_avm.raw verification/generated/instrumentation_loop/double_tail_prune/scene420_50f.obu
+cmp verification/generated/instrumentation_loop/double_tail_prune/scene420_50f.recon verification/generated/instrumentation_loop/double_tail_prune/scene420_50f_avm.raw
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+```
+
+### 8-bit Exact NEWMV Residuals
+
+This checkpoint adds a first lossy predictive motion path. Changed 8-bit tiles
+now run the existing exact 8x8 source-block motion matcher; exact moved blocks
+are coded as `NEWMV` inter blocks with regular-Q residuals against the previous
+reconstruction. Blocks without an exact moved source match stay on the previous
+zero-MV residual path. The selector is gated to 8-bit streams because the same
+exact-motion rule on the 10-bit rows spent far too much bitrate for excess
+PSNR.
+
+The ffmpeg/libaom comparison below was regenerated with per-vector CRF values
+chosen near 50 dB, rather than the older fixed 4 Mbps reference row. This makes
+the size comparison a closer quality match. PSNR is ffmpeg `psnr` sequence
+average against raw reconstructions.
+
+Retained 50-frame QP24 predictive comparison versus the previous retained
+regular-Q inter residual checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF fps | FF PSNR | libaom CRF | libaom bytes | libaom fps | libaom PSNR | FF/libaom |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2,465,586 | -693,548 | 9.48 | 50.833610 | 28 | 409,023 | 33.04 | 49.981500 | 6.028x |
+| SceneComposition_1_422 | yuv422p8 | 2,734,654 | -680,405 | 8.17 | 51.071450 | 30 | 423,696 | 30.94 | 50.192980 | 6.454x |
+| screen_wayland_activity_rgb | rgb24 | 3,256,430 | -159,059 | 5.83 | 53.218344 | 44 | 429,325 | 23.18 | 50.858582 | 7.585x |
+| MissionControlClip1_420 | yuv420p10le | 9,762,068 | 0 | 3.38 | 49.834693 | 14 | 3,531,748 | 11.62 | 50.089860 | 2.764x |
+| MissionControlClip1_422 | yuv422p10le | 10,767,579 | 0 | 2.72 | 50.694677 | 16 | 3,427,064 | 10.90 | 50.063863 | 3.142x |
+| MissionControlClip1_444 | yuv444p10le | 12,314,927 | 0 | 2.04 | 51.731175 | 20 | 3,136,726 | 10.54 | 49.981660 | 3.926x |
+| total | mixed | 41,301,244 | -1,533,012 | 3.86 | n/a | mixed | 11,357,582 | 15.86 | n/a | 3.636x |
+
+Probe notes:
+
+| Probe | Result | Decision |
+|---|---|---|
+| Whole-block skip for quantized-zero inter leaves | Only -9,087 bytes total, but FF FPS dropped from 3.79 to 3.57 in the measured run | Rejected: not enough bitrate win for the extra analysis pass |
+| Exact NEWMV residuals on all bit depths | 8-bit rows improved, but 10-bit rows regressed by +32,019,137 bytes total and jumped to ~56-57 dB PSNR | Rejected: 10-bit needs an RD threshold before using this predictor |
+| Exact NEWMV residuals gated to 8-bit streams | 8-bit rows improved by 1,533,012 bytes total; 10-bit rows are byte-identical to the previous checkpoint | Retained |
+
+Validation:
+
+```text
+cargo fmt
+cargo check -p frameforge-codecs --features av2
+cargo test -p frameforge-codecs --features av2
+make build
+manual six-row 50-frame QP24 predictive encode + ffmpeg psnr filter
+verification/references/av2/avm/build/avmdec --codec=av2 --rawvideo -o verification/generated/instrumentation_tuning/newmv_8bit_qmatch_50f/aomctc_b2_SceneComposition_1_420_1920x1080_15_50f_yuv420p8_ff_qp24_pred_avm.raw verification/generated/instrumentation_tuning/newmv_8bit_qmatch_50f/aomctc_b2_SceneComposition_1_420_1920x1080_15_50f_yuv420p8_ff_qp24_pred.obu
+cmp verification/generated/instrumentation_tuning/newmv_8bit_qmatch_50f/aomctc_b2_SceneComposition_1_420_1920x1080_15_50f_yuv420p8_ff_qp24_pred.recon verification/generated/instrumentation_tuning/newmv_8bit_qmatch_50f/aomctc_b2_SceneComposition_1_420_1920x1080_15_50f_yuv420p8_ff_qp24_pred_avm.raw
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive VALIDATION_LIMIT=1
+```
+
+Reference-decoder note: the changed 4:2:0 row decodes cleanly with AVM and
+matches the internal reconstruction. The current 4:2:2 and RGB predictive
+lossy rows still hit the pre-existing AVM decoder error `Invalid value for
+chroma intra mode index`, including on the previous retained baseline
+bitstreams, so those rows remain guarded by internal reconstruction and raw
+PSNR until that separate compatibility issue is fixed.

@@ -344,6 +344,44 @@ fn partition_aspect_allowed(block_size: Av2MvpBlockSize, partition: Av2MvpPartit
     true
 }
 
+#[cfg(feature = "av2-lossy-stats")]
+fn partition_trace_enabled() -> bool {
+    std::env::var_os("FRAMEFORGE_AV2_PARTITION_TRACE").is_some_and(|value| value != "0")
+}
+
+#[cfg(feature = "av2-lossy-stats")]
+fn trace_partition_symbol(
+    decision: Av2TileDecision,
+    syntax: &'static str,
+    ctx: usize,
+    symbol: usize,
+) {
+    if partition_trace_enabled() {
+        eprintln!(
+            "FRAMEFORGE_AV2_PARTITION_TRACE {} mi=({},{}) block={}x{} bsize_map={} rect_map={} ctx={} symbol={}",
+            syntax,
+            decision.row,
+            decision.col,
+            decision.block_size.width,
+            decision.block_size.height,
+            decision.block_size.bsize_map(),
+            decision.block_size.bsize_rect_map(),
+            ctx,
+            symbol,
+        );
+    }
+}
+
+#[cfg(not(feature = "av2-lossy-stats"))]
+#[inline(always)]
+fn trace_partition_symbol(
+    _decision: Av2TileDecision,
+    _syntax: &'static str,
+    _ctx: usize,
+    _symbol: usize,
+) {
+}
+
 fn write_partition(
     writer: &mut Av2EntropyWriter,
     decision: Av2TileDecision,
@@ -376,6 +414,7 @@ fn write_partition(
     if allowed.none {
         let ctx = partition_context.split_context(decision.row, decision.col, decision.block_size);
         let mut cdf = DEFAULT_DO_SPLIT_CDFS[ctx];
+        trace_partition_symbol(decision, "do_split", ctx, usize::from(do_split));
         writer.write_symbol_with_static_cdf_key(
             "tile.partition.do_split",
             partition_do_split_static_cdf_key(ctx),
@@ -397,8 +436,15 @@ fn write_partition(
     if allowed.horz && allowed.vert && rect_type_implied_by_bsize(decision.block_size).is_none() {
         let ctx = partition_context.rect_context(decision.row, decision.col, decision.block_size);
         let mut cdf = DEFAULT_RECT_TYPE_CDFS[ctx];
-        writer.write_symbol(
+        trace_partition_symbol(
+            decision,
+            "rect_type",
+            ctx,
+            usize::from(partition == Av2MvpPartition::Vert),
+        );
+        writer.write_symbol_with_static_cdf_key(
             "tile.partition.rect_type",
+            partition_rect_type_static_cdf_key(ctx),
             usize::from(partition == Av2MvpPartition::Vert),
             &mut cdf,
             2,

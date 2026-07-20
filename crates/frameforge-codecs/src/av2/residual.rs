@@ -12,6 +12,99 @@ fn quantize_i32_to_step(value: i32, step: i32) -> i32 {
     round_div_i32(value, step) * step
 }
 
+const AV2_STATIC_CDF_TX_PARTITION_INTRA_DO_8X8: usize = 580;
+const AV2_STATIC_CDF_TX_PARTITION_INTRA_TYPE_8X8: usize = 581;
+const AV2_STATIC_CDF_TX_PARTITION_INTER_DO_8X8: usize = 582;
+const AV2_STATIC_CDF_TX_PARTITION_INTER_TYPE_8X8: usize = 583;
+
+#[cfg(feature = "av2-lossy-stats")]
+fn inter_residual_trace_enabled() -> bool {
+    std::env::var_os("FRAMEFORGE_AV2_INTER_RESIDUAL_TRACE").is_some_and(|value| value != "0")
+}
+
+#[cfg(not(feature = "av2-lossy-stats"))]
+#[inline(always)]
+fn inter_residual_trace_enabled() -> bool {
+    false
+}
+
+fn quantized_txb_eob(coefficients: &[i32; TX4X4_SAMPLES]) -> usize {
+    TX4X4_SCAN
+        .iter()
+        .rposition(|&pos| coefficients[pos] != 0)
+        .map_or(0, |index| index + 1)
+}
+
+fn trace_inter_txb(
+    decision: Av2TileDecision,
+    plane: &'static str,
+    x0: usize,
+    y0: usize,
+    row: usize,
+    col: usize,
+    skip_ctx: u8,
+    dc_sign_ctx: Option<u8>,
+    source_zero: bool,
+    quantized_zero: bool,
+    eob: usize,
+    coefficients: Option<&[i32; TX4X4_SAMPLES]>,
+) {
+    if inter_residual_trace_enabled() {
+        let mut coeffs = String::new();
+        if let Some(coefficients) = coefficients {
+            for scan_index in 0..eob {
+                let pos = TX4X4_SCAN[scan_index];
+                if scan_index != 0 {
+                    coeffs.push(',');
+                }
+                coeffs.push_str(&format!("{pos}:{}", coefficients[pos] / 8));
+            }
+        }
+        eprintln!(
+            "FRAMEFORGE_AV2_INTER_RESIDUAL_TRACE mi=({},{}) local_mi=({},{}) plane={} txb=({},{}) skip_ctx={} dc_sign_ctx={} source_zero={} quantized_zero={} eob={} qcoeffs_scan={}",
+            y0 / MI_SIZE,
+            x0 / MI_SIZE,
+            decision.row,
+            decision.col,
+            plane,
+            row,
+            col,
+            skip_ctx,
+            dc_sign_ctx.map_or_else(|| "n/a".to_string(), |ctx| ctx.to_string()),
+            source_zero,
+            quantized_zero,
+            eob,
+            coeffs
+        );
+    }
+}
+
+fn trace_inter_candidate_residual(
+    plane: &'static str,
+    x0: usize,
+    y0: usize,
+    base_qindex: u16,
+    candidate: &Av2LossyQuantizedResidualCandidate,
+) {
+    if inter_residual_trace_enabled() {
+        let residual = candidate
+            .residual
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "FRAMEFORGE_AV2_INTER_RESIDUAL_CANDIDATE mi=({},{}) plane={} base_qindex={} kind={:?} residual={}",
+            y0 / MI_SIZE,
+            x0 / MI_SIZE,
+            plane,
+            base_qindex,
+            candidate.kind,
+            residual
+        );
+    }
+}
+
 fn write_lossy_subsampled_residual_coefficients(
     writer: &mut Av2EntropyWriter,
     decision: Av2TileDecision,
@@ -135,23 +228,64 @@ fn write_lossy_subsampled_residual_coefficients(
     }
 }
 
-fn write_regular_q_tx_partition_split_8x8(writer: &mut Av2EntropyWriter, decision: Av2TileDecision) {
+fn write_regular_q_tx_partition_split_8x8(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+) {
+    write_regular_q_tx_partition_split_8x8_with_cdfs(
+        writer,
+        decision,
+        "tile.tx_partition.do_partition",
+        AV2_STATIC_CDF_TX_PARTITION_INTRA_DO_8X8,
+        DEFAULT_TXFM_DO_PARTITION_INTRA_8X8_CDF,
+        "tile.tx_partition.partition_type",
+        AV2_STATIC_CDF_TX_PARTITION_INTRA_TYPE_8X8,
+        DEFAULT_TXFM_4WAY_PARTITION_INTRA_8X8_CDF,
+    );
+}
+
+fn write_regular_q_inter_tx_partition_split_8x8(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+) {
+    write_regular_q_tx_partition_split_8x8_with_cdfs(
+        writer,
+        decision,
+        "tile.inter_tx_partition.do_partition",
+        AV2_STATIC_CDF_TX_PARTITION_INTER_DO_8X8,
+        DEFAULT_TXFM_DO_PARTITION_INTER_8X8_CDF,
+        "tile.inter_tx_partition.partition_type",
+        AV2_STATIC_CDF_TX_PARTITION_INTER_TYPE_8X8,
+        DEFAULT_TXFM_4WAY_PARTITION_INTER_8X8_CDF,
+    );
+}
+
+fn write_regular_q_tx_partition_split_8x8_with_cdfs(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    do_partition_name: &'static str,
+    do_partition_static_key: usize,
+    do_partition_cdf: [u16; 6],
+    partition_type_name: &'static str,
+    partition_type_static_key: usize,
+    partition_type_cdf: [u16; 11],
+) {
     debug_assert_eq!(decision.block_size.width, 8);
     debug_assert_eq!(decision.block_size.height, 8);
 
-    let mut do_partition_cdf = DEFAULT_TXFM_DO_PARTITION_INTRA_8X8_CDF;
+    let mut do_partition_cdf = do_partition_cdf;
     writer.write_symbol_with_static_cdf_key(
-        "tile.tx_partition.do_partition",
-        512,
+        do_partition_name,
+        do_partition_static_key,
         1,
         &mut do_partition_cdf,
         2,
         false,
     );
-    let mut partition_type_cdf = DEFAULT_TXFM_4WAY_PARTITION_INTRA_8X8_CDF;
+    let mut partition_type_cdf = partition_type_cdf;
     writer.write_symbol_with_static_cdf_key(
-        "tile.tx_partition.partition_type",
-        513,
+        partition_type_name,
+        partition_type_static_key,
         0,
         &mut partition_type_cdf,
         7,
@@ -185,7 +319,6 @@ fn write_lossy_luma_txb(
     if !mode.use_fsc {
         let candidate = choose_regular_q_lossy_txb(
             lossy.regular_dct_quantized_residual_candidates(&analysis),
-            lossy.regular_dct_dc_only_candidate(&analysis),
             Av2CoefficientProxyKind::LumaTransform,
             lossy.quant_step(),
         );
@@ -396,7 +529,6 @@ fn write_lossy_chroma_txb(
     if !mode.use_fsc {
         let candidate = choose_regular_q_lossy_txb(
             lossy.regular_dct_quantized_residual_candidates(&analysis),
-            lossy.regular_dct_dc_only_candidate(&analysis),
             Av2CoefficientProxyKind::ChromaTransform,
             lossy.quant_step(),
         );
@@ -500,7 +632,6 @@ fn write_lossy_chroma_txb(
 
 fn choose_regular_q_lossy_txb(
     candidates: Av2LossyRegularDctCandidates,
-    dc_only_candidate: Av2LossyQuantizedResidualCandidate,
     kind: Av2CoefficientProxyKind,
     quant_step: i32,
 ) -> Av2LossyQuantizedResidualCandidate {
@@ -516,22 +647,28 @@ fn choose_regular_q_lossy_txb(
     let mut best_score = transform_score;
     let max_extra_sse = regular_q_dc_only_max_extra_sse(quant_step);
     let max_tail_extra_sse = regular_q_tail_pruned_max_extra_sse(quant_step);
-    if let Some(tail_pruned_candidate) = candidates.tail_pruned {
-        let tail_rate = coefficient_proxy_score(&tail_pruned_candidate.coefficients, kind);
-        let tail_score = lossy_txb_score(
-            tail_rate,
-            tail_pruned_candidate.sse,
-            tail_pruned_candidate.variance_loss,
-            regular_q_rd_quant_step(quant_step),
-        );
-        if tail_score < best_score
-            && tail_pruned_candidate.sse
-                <= transform_candidate.sse.saturating_add(max_tail_extra_sse)
-        {
-            best_candidate = tail_pruned_candidate;
-            best_score = tail_score;
+    for (candidate, max_extra_sse) in [
+        (candidates.tail_pruned, max_tail_extra_sse),
+        (candidates.double_tail_pruned, max_tail_extra_sse),
+    ] {
+        if let Some(tail_pruned_candidate) = candidate {
+            let tail_rate = coefficient_proxy_score(&tail_pruned_candidate.coefficients, kind);
+            let tail_score = lossy_txb_score(
+                tail_rate,
+                tail_pruned_candidate.sse,
+                tail_pruned_candidate.variance_loss,
+                regular_q_rd_quant_step(quant_step),
+            );
+            if tail_score < best_score
+                && tail_pruned_candidate.sse
+                    <= transform_candidate.sse.saturating_add(max_extra_sse)
+            {
+                best_candidate = tail_pruned_candidate;
+                best_score = tail_score;
+            }
         }
     }
+    let dc_only_candidate = candidates.dc_only;
     let dc_rate = coefficient_proxy_score(&dc_only_candidate.coefficients, kind);
     let dc_score = lossy_txb_score(
         dc_rate,
@@ -750,7 +887,7 @@ fn regular_q_dc_only_max_extra_sse(quant_step: i32) -> usize {
 }
 
 fn regular_q_tail_pruned_max_extra_sse(quant_step: i32) -> usize {
-    (quant_step.max(1) as usize / 16).max(1)
+    (quant_step.max(1) as usize / 8).max(1)
 }
 
 fn lossy_should_try_ac_quantized(dc_sse: usize, quant_step: i32) -> bool {
@@ -1092,6 +1229,305 @@ fn write_lossless_inter_residual_coefficients(
                 )
             };
             lossless.copy_source_to_recon_txb(Av2LosslessPlane::V, x0, y0);
+            contexts.v_above[abs_col] = context;
+            contexts.v_left[abs_row] = context;
+        }
+    }
+}
+
+fn write_lossy_inter_residual_coefficients(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    visible_rows_mi: usize,
+    visible_cols_mi: usize,
+    contexts: &mut Av2TxbEntropyContexts,
+    lossy: &mut Av2LossySubsampledTileState<'_>,
+    reference: &[u8],
+    mv_row_px: i16,
+    mv_col_px: i16,
+    use_regular_inter_txb_contexts: bool,
+) {
+    let txb_width = decision
+        .block_size
+        .tx4x4_width()
+        .min(visible_cols_mi.saturating_sub(decision.col));
+    let txb_height = decision
+        .block_size
+        .tx4x4_height()
+        .min(visible_rows_mi.saturating_sub(decision.row));
+    for row in 0..txb_height {
+        let abs_row = decision.row + row;
+        for col in 0..txb_width {
+            let abs_col = decision.col + col;
+            let skip_ctx =
+                luma_txb_skip_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
+            let dc_sign_ctx = dc_sign_context(contexts.y_above[abs_col], contexts.y_left[abs_row]);
+            let (x0, y0) = lossy.txb_origin(Av2LossyPlane::Y, abs_col, abs_row);
+            let analysis = lossy.analyze_inter_txb(
+                reference,
+                Av2LossyPlane::Y,
+                x0,
+                y0,
+                mv_row_px,
+                mv_col_px,
+            );
+            if tx4x4_residual_is_zero(&analysis.residual) {
+                trace_inter_txb(
+                    decision,
+                    "y",
+                    x0,
+                    y0,
+                    row,
+                    col,
+                    skip_ctx,
+                    Some(dc_sign_ctx),
+                    true,
+                    true,
+                    0,
+                    None,
+                );
+                if use_regular_inter_txb_contexts {
+                    write_y_inter_txb_all_zero(writer, skip_ctx);
+                } else {
+                    write_y_txb_all_zero(writer, skip_ctx);
+                }
+                let zero_residual = [0i32; TX4X4_SAMPLES];
+                lossy.fill_residual_recon_txb(
+                    Av2LossyPlane::Y,
+                    x0,
+                    y0,
+                    &analysis,
+                    &zero_residual,
+                );
+                lossy.record_txb_choice(Av2LossyPlane::Y, &Av2LossyTxbChoice::Exact, &analysis);
+                contexts.y_above[abs_col] = 0;
+                contexts.y_left[abs_row] = 0;
+                continue;
+            }
+            let candidate = choose_regular_q_lossy_txb(
+                lossy.regular_dct_quantized_residual_candidates(&analysis),
+                Av2CoefficientProxyKind::LumaTransform,
+                lossy.quant_step(),
+            );
+            let quantized_zero = regular_quantized_txb_is_zero(&candidate);
+            trace_inter_txb(
+                decision,
+                "y",
+                x0,
+                y0,
+                row,
+                col,
+                skip_ctx,
+                Some(dc_sign_ctx),
+                false,
+                quantized_zero,
+                quantized_txb_eob(&candidate.coefficients),
+                Some(&candidate.coefficients),
+            );
+            trace_inter_candidate_residual("y", x0, y0, lossy.base_qindex(), &candidate);
+            let (context, _) = if quantized_zero {
+                if use_regular_inter_txb_contexts {
+                    write_y_inter_txb_all_zero(writer, skip_ctx);
+                } else {
+                    write_y_txb_all_zero(writer, skip_ctx);
+                }
+                (0, false)
+            } else if use_regular_inter_txb_contexts {
+                write_luma_inter_residual_txb(writer, skip_ctx, dc_sign_ctx, &candidate.coefficients)
+            } else {
+                write_luma_palette_residual_txb(writer, skip_ctx, dc_sign_ctx, &candidate.coefficients)
+            };
+            lossy.fill_residual_recon_txb(
+                Av2LossyPlane::Y,
+                x0,
+                y0,
+                &analysis,
+                &candidate.residual,
+            );
+            lossy.record_txb_choice(
+                Av2LossyPlane::Y,
+                &Av2LossyTxbChoice::QuantizedResidual(candidate),
+                &analysis,
+            );
+            contexts.y_above[abs_col] = context;
+            contexts.y_left[abs_row] = context;
+        }
+    }
+
+    let chroma_span = chroma_tx4x4_span(
+        decision,
+        visible_rows_mi,
+        visible_cols_mi,
+        lossy.chroma_format,
+    );
+    let mut last_u_txb_nonzero = false;
+    for row in 0..chroma_span.height {
+        let abs_row = chroma_span.row + row;
+        for col in 0..chroma_span.width {
+            let abs_col = chroma_span.col + col;
+            let skip_ctx =
+                chroma_txb_skip_base_context(contexts.u_above[abs_col], contexts.u_left[abs_row])
+                    + 6;
+            let (x0, y0) = lossy.txb_origin(Av2LossyPlane::U, abs_col, abs_row);
+            let analysis = lossy.analyze_inter_txb(
+                reference,
+                Av2LossyPlane::U,
+                x0,
+                y0,
+                mv_row_px,
+                mv_col_px,
+            );
+            if tx4x4_residual_is_zero(&analysis.residual) {
+                trace_inter_txb(
+                    decision, "u", x0, y0, row, col, skip_ctx, None, true, true, 0, None,
+                );
+                write_u_txb_all_zero(writer, skip_ctx, use_regular_inter_txb_contexts);
+                let zero_residual = [0i32; TX4X4_SAMPLES];
+                lossy.fill_residual_recon_txb(
+                    Av2LossyPlane::U,
+                    x0,
+                    y0,
+                    &analysis,
+                    &zero_residual,
+                );
+                lossy.record_txb_choice(Av2LossyPlane::U, &Av2LossyTxbChoice::Exact, &analysis);
+                contexts.u_above[abs_col] = 0;
+                contexts.u_left[abs_row] = 0;
+                last_u_txb_nonzero = false;
+                continue;
+            }
+            let candidate = choose_regular_q_lossy_txb(
+                lossy.regular_dct_quantized_residual_candidates(&analysis),
+                Av2CoefficientProxyKind::ChromaTransform,
+                lossy.quant_step(),
+            );
+            let quantized_zero = regular_quantized_txb_is_zero(&candidate);
+            trace_inter_txb(
+                decision,
+                "u",
+                x0,
+                y0,
+                row,
+                col,
+                skip_ctx,
+                None,
+                false,
+                quantized_zero,
+                quantized_txb_eob(&candidate.coefficients),
+                Some(&candidate.coefficients),
+            );
+            let (context, nonzero) = if quantized_zero {
+                write_u_txb_all_zero(writer, skip_ctx, use_regular_inter_txb_contexts);
+                (0, false)
+            } else {
+                write_chroma_bdpcm_txb(
+                    writer,
+                    Av2ChromaPlane::U,
+                    skip_ctx,
+                    &candidate.coefficients,
+                    use_regular_inter_txb_contexts,
+                )
+            };
+            lossy.fill_residual_recon_txb(
+                Av2LossyPlane::U,
+                x0,
+                y0,
+                &analysis,
+                &candidate.residual,
+            );
+            lossy.record_txb_choice(
+                Av2LossyPlane::U,
+                &Av2LossyTxbChoice::QuantizedResidual(candidate),
+                &analysis,
+            );
+            contexts.u_above[abs_col] = context;
+            contexts.u_left[abs_row] = context;
+            last_u_txb_nonzero = nonzero;
+        }
+    }
+
+    for row in 0..chroma_span.height {
+        let abs_row = chroma_span.row + row;
+        for col in 0..chroma_span.width {
+            let abs_col = chroma_span.col + col;
+            let skip_ctx = v_txb_skip_context_for_chroma_format(
+                contexts.v_above[abs_col],
+                contexts.v_left[abs_row],
+                last_u_txb_nonzero,
+                lossy.chroma_format,
+                decision.block_size,
+            );
+            let (x0, y0) = lossy.txb_origin(Av2LossyPlane::V, abs_col, abs_row);
+            let analysis = lossy.analyze_inter_txb(
+                reference,
+                Av2LossyPlane::V,
+                x0,
+                y0,
+                mv_row_px,
+                mv_col_px,
+            );
+            if tx4x4_residual_is_zero(&analysis.residual) {
+                trace_inter_txb(
+                    decision, "v", x0, y0, row, col, skip_ctx, None, true, true, 0, None,
+                );
+                write_v_txb_all_zero(writer, skip_ctx);
+                let zero_residual = [0i32; TX4X4_SAMPLES];
+                lossy.fill_residual_recon_txb(
+                    Av2LossyPlane::V,
+                    x0,
+                    y0,
+                    &analysis,
+                    &zero_residual,
+                );
+                lossy.record_txb_choice(Av2LossyPlane::V, &Av2LossyTxbChoice::Exact, &analysis);
+                contexts.v_above[abs_col] = 0;
+                contexts.v_left[abs_row] = 0;
+                continue;
+            }
+            let candidate = choose_regular_q_lossy_txb(
+                lossy.regular_dct_quantized_residual_candidates(&analysis),
+                Av2CoefficientProxyKind::ChromaTransform,
+                lossy.quant_step(),
+            );
+            let quantized_zero = regular_quantized_txb_is_zero(&candidate);
+            trace_inter_txb(
+                decision,
+                "v",
+                x0,
+                y0,
+                row,
+                col,
+                skip_ctx,
+                None,
+                false,
+                quantized_zero,
+                quantized_txb_eob(&candidate.coefficients),
+                Some(&candidate.coefficients),
+            );
+            let (context, _) = if quantized_zero {
+                write_v_txb_all_zero(writer, skip_ctx);
+                (0, false)
+            } else {
+                write_chroma_bdpcm_txb(
+                    writer,
+                    Av2ChromaPlane::V,
+                    skip_ctx,
+                    &candidate.coefficients,
+                    false,
+                )
+            };
+            lossy.fill_residual_recon_txb(
+                Av2LossyPlane::V,
+                x0,
+                y0,
+                &analysis,
+                &candidate.residual,
+            );
+            lossy.record_txb_choice(
+                Av2LossyPlane::V,
+                &Av2LossyTxbChoice::QuantizedResidual(candidate),
+                &analysis,
+            );
             contexts.v_above[abs_col] = context;
             contexts.v_left[abs_row] = context;
         }

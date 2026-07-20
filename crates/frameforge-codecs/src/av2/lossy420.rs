@@ -202,6 +202,16 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         self.read_sample(self.source, self.offset(plane, x, y))
     }
 
+    fn reference_sample(
+        &self,
+        reference: &[u8],
+        plane: Av2LossyPlane,
+        x: usize,
+        y: usize,
+    ) -> Av2Sample {
+        self.read_sample(reference, self.offset(plane, x, y))
+    }
+
     fn recon_sample(&self, plane: Av2LossyPlane, x: usize, y: usize) -> Av2Sample {
         self.read_sample(self.recon, self.offset(plane, x, y))
     }
@@ -425,6 +435,77 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
+    fn analyze_inter_txb(
+        &self,
+        reference: &[u8],
+        plane: Av2LossyPlane,
+        x0: usize,
+        y0: usize,
+        mv_row_px: i16,
+        mv_col_px: i16,
+    ) -> Av2LossyTxbAnalysis {
+        assert_eq!(
+            reference.len(),
+            self.source.len(),
+            "AV2 lossy inter reference length must match source"
+        );
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        debug_assert_eq!(usize::from(mv_col_px.unsigned_abs()) % sub_x, 0);
+        debug_assert_eq!(usize::from(mv_row_px.unsigned_abs()) % sub_y, 0);
+        let ref_x0 = x0 as isize + isize::from(mv_col_px) / sub_x as isize;
+        let ref_y0 = y0 as isize + isize::from(mv_row_px) / sub_y as isize;
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        assert!(
+            ref_x0 >= 0 && ref_y0 >= 0,
+            "AV2 lossy inter reference is out of bounds"
+        );
+        let ref_x0 = ref_x0 as usize;
+        let ref_y0 = ref_y0 as usize;
+        assert!(
+            ref_x0 + TX4X4_SIZE <= plane_width && ref_y0 + TX4X4_SIZE <= plane_height,
+            "AV2 lossy inter reference is out of bounds"
+        );
+
+        let mut source = [0; TX4X4_SAMPLES];
+        let mut predictor = [0; TX4X4_SAMPLES];
+        let mut residual = [0i32; TX4X4_SAMPLES];
+        let mut sum = 0i32;
+        for local_y in 0..TX4X4_SIZE {
+            for local_x in 0..TX4X4_SIZE {
+                let index = local_y * TX4X4_SIZE + local_x;
+                let source_sample = self.source_sample(plane, x0 + local_x, y0 + local_y);
+                let predictor_sample =
+                    self.reference_sample(reference, plane, ref_x0 + local_x, ref_y0 + local_y);
+                let diff = i32::from(source_sample) - i32::from(predictor_sample);
+                source[index] = source_sample;
+                predictor[index] = predictor_sample;
+                residual[index] = diff;
+                sum += diff;
+            }
+        }
+        let average = round_div_i32(sum, TX4X4_SAMPLES as i32);
+        let max_delta = i32::from(self.bit_depth.max_sample());
+        let delta = quantize_i32_to_step(average, lossy_dc_delta_quant_step(self.quant_step()))
+            .clamp(-max_delta, max_delta) as i16;
+        let source_variance = txb_source_variance(&source);
+        let (dc_sse, dc_variance_loss) = txb_dc_recon_distortion_with_source_variance(
+            &source,
+            &predictor,
+            delta,
+            self.bit_depth,
+            source_variance,
+        );
+        Av2LossyTxbAnalysis {
+            source,
+            predictor,
+            residual,
+            delta,
+            dc_sse,
+            dc_variance_loss,
+            source_variance,
+        }
+    }
+
     fn fill_quantized_recon_txb(
         &mut self,
         plane: Av2LossyPlane,
@@ -600,32 +681,37 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         );
         let transform = self.regular_dct_candidate_from_qcoeff(analysis, &qcoeff);
         let mut tail_pruned_qcoeff = qcoeff;
-        let tail_pruned = prune_regular_dct_trailing_unit_ac(&mut tail_pruned_qcoeff).then(|| {
-            self.regular_dct_candidate_from_qcoeff_kind(
-                analysis,
-                &tail_pruned_qcoeff,
-                Av2LossyResidualCandidateKind::RegularDctTailPruned,
-            )
-        });
+        let tail_pruned = (prune_regular_dct_trailing_unit_acs(&mut tail_pruned_qcoeff, 1) == 1)
+            .then(|| {
+                self.regular_dct_candidate_from_qcoeff_kind(
+                    analysis,
+                    &tail_pruned_qcoeff,
+                    Av2LossyResidualCandidateKind::RegularDctTailPruned,
+                )
+            });
+        let mut double_tail_pruned_qcoeff = qcoeff;
+        let double_tail_pruned = (self.chroma_format != Av2ChromaFormat::Yuv444
+            && prune_regular_dct_trailing_unit_acs(&mut double_tail_pruned_qcoeff, 2) == 2)
+            .then(|| {
+                self.regular_dct_candidate_from_qcoeff_kind(
+                    analysis,
+                    &double_tail_pruned_qcoeff,
+                    Av2LossyResidualCandidateKind::RegularDctDoubleTailPruned,
+                )
+            });
+        let mut dc_only_qcoeff = qcoeff;
+        dc_only_qcoeff[1..].fill(0);
+        let dc_only = self.regular_dct_candidate_from_qcoeff_kind(
+            analysis,
+            &dc_only_qcoeff,
+            Av2LossyResidualCandidateKind::RegularDctDcOnly,
+        );
         Av2LossyRegularDctCandidates {
             transform,
             tail_pruned,
+            double_tail_pruned,
+            dc_only,
         }
-    }
-
-    fn regular_dct_dc_only_candidate(
-        &self,
-        analysis: &Av2LossyTxbAnalysis,
-    ) -> Av2LossyQuantizedResidualCandidate {
-        let coefficients = av2_fdct4x4(&analysis.residual);
-        let (mut qcoeff, _) =
-            av2_regular_quantize_dct4x4(&coefficients, self.base_qindex, self.bit_depth);
-        qcoeff[1..].fill(0);
-        self.regular_dct_candidate_from_qcoeff_kind(
-            analysis,
-            &qcoeff,
-            Av2LossyResidualCandidateKind::RegularDctDcOnly,
-        )
     }
 
     fn regular_dct_candidate_from_qcoeff(
@@ -1366,7 +1452,6 @@ impl<'a> Av2LossySubsampledTileState<'a> {
     ) -> usize {
         let candidate = choose_regular_q_lossy_txb(
             self.regular_dct_quantized_residual_candidates(analysis),
-            self.regular_dct_dc_only_candidate(analysis),
             kind,
             self.quant_step(),
         );
@@ -2275,6 +2360,10 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         i32::from(self.base_qindex) << u32::from(self.bit_depth.bits() - 8)
     }
 
+    fn base_qindex(&self) -> u16 {
+        self.base_qindex
+    }
+
     fn record_leaf(
         &self,
         block_size: Av2MvpBlockSize,
@@ -2328,19 +2417,26 @@ fn prune_regular_dct_ac_levels(
     }
 }
 
-fn prune_regular_dct_trailing_unit_ac(qcoeff: &mut [i32; TX4X4_SAMPLES]) -> bool {
+fn prune_regular_dct_trailing_unit_acs(
+    qcoeff: &mut [i32; TX4X4_SAMPLES],
+    max_pruned: usize,
+) -> usize {
+    let mut pruned = 0usize;
     for scan_index in (1..TX4X4_SAMPLES).rev() {
         let pos = TX4X4_SCAN[scan_index];
         match qcoeff[pos].abs() {
             0 => continue,
             1 => {
                 qcoeff[pos] = 0;
-                return true;
+                pruned += 1;
+                if pruned == max_pruned {
+                    return pruned;
+                }
             }
-            _ => return false,
+            _ => return pruned,
         }
     }
-    false
+    pruned
 }
 
 fn regular_dct_ac_prune_threshold(
@@ -2807,6 +2903,8 @@ struct Av2LossyQuantizedResidualCandidate {
 struct Av2LossyRegularDctCandidates {
     transform: Av2LossyQuantizedResidualCandidate,
     tail_pruned: Option<Av2LossyQuantizedResidualCandidate>,
+    double_tail_pruned: Option<Av2LossyQuantizedResidualCandidate>,
+    dc_only: Av2LossyQuantizedResidualCandidate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2816,6 +2914,7 @@ enum Av2LossyResidualCandidateKind {
     Transform,
     RegularDct,
     RegularDctTailPruned,
+    RegularDctDoubleTailPruned,
     RegularDctDcOnly,
 }
 
@@ -2994,6 +3093,7 @@ struct Av2LossyPlaneStats {
     transform: u64,
     regular_dct: u64,
     regular_dct_tail_pruned: u64,
+    regular_dct_double_tail_pruned: u64,
     regular_dct_dc_only: u64,
     chosen_sse: u128,
     source_variance: u128,
@@ -3030,6 +3130,9 @@ impl Av2LossyPlaneStats {
                     Av2LossyResidualCandidateKind::RegularDctTailPruned => {
                         self.regular_dct_tail_pruned += 1;
                     }
+                    Av2LossyResidualCandidateKind::RegularDctDoubleTailPruned => {
+                        self.regular_dct_double_tail_pruned += 1;
+                    }
                     Av2LossyResidualCandidateKind::RegularDctDcOnly => {
                         self.regular_dct_dc_only += 1;
                     }
@@ -3043,7 +3146,7 @@ impl Av2LossyPlaneStats {
     fn print(&self, label: &str) {
         let txbs = u128::from(self.txbs.max(1));
         eprintln!(
-            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_tail_pruned={} regular_dct_dc_only={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
+            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_tail_pruned={} regular_dct_double_tail_pruned={} regular_dct_dc_only={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
             self.txbs,
             self.exact,
             self.exact_zero,
@@ -3054,6 +3157,7 @@ impl Av2LossyPlaneStats {
             self.transform,
             self.regular_dct,
             self.regular_dct_tail_pruned,
+            self.regular_dct_double_tail_pruned,
             self.regular_dct_dc_only,
             self.chosen_sse / txbs,
             self.source_variance / txbs,

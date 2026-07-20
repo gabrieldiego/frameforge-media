@@ -10,10 +10,11 @@ const AV2_STATIC_CDF_INTRABC_USE_BASE: usize = 405;
 const AV2_STATIC_CDF_INTRABC_SKIP_TXFM_BASE: usize = 408;
 const AV2_STATIC_CDF_INTRABC_MODE: usize = 414;
 const AV2_STATIC_CDF_PARTITION_DO_SPLIT_BASE: usize = 415;
-const AV2_STATIC_CDF_INTRA_FSC_MODE_BASE: usize = 479;
-const AV2_STATIC_CDF_INTRA_Y_MODE_IDX_OFFSET_BASE: usize = 503;
-const AV2_STATIC_CDF_INTRA_Y_MODE_IDX_BASE: usize = 506;
-const AV2_STATIC_CDF_INTRA_UV_MODE_IDX_BASE: usize = 509;
+const AV2_STATIC_CDF_PARTITION_RECT_TYPE_BASE: usize = 479;
+const AV2_STATIC_CDF_INTRA_FSC_MODE_BASE: usize = 543;
+const AV2_STATIC_CDF_INTRA_Y_MODE_IDX_OFFSET_BASE: usize = 567;
+const AV2_STATIC_CDF_INTRA_Y_MODE_IDX_BASE: usize = 570;
+const AV2_STATIC_CDF_INTRA_UV_MODE_IDX_BASE: usize = 573;
 
 #[inline(always)]
 fn inter_is_inter_static_cdf_key(ctx: usize) -> usize {
@@ -53,6 +54,11 @@ fn intrabc_skip_txfm_static_cdf_key(ctx: usize) -> usize {
 #[inline(always)]
 fn partition_do_split_static_cdf_key(ctx: usize) -> usize {
     AV2_STATIC_CDF_PARTITION_DO_SPLIT_BASE + ctx
+}
+
+#[inline(always)]
+fn partition_rect_type_static_cdf_key(ctx: usize) -> usize {
+    AV2_STATIC_CDF_PARTITION_RECT_TYPE_BASE + ctx
 }
 
 #[inline(always)]
@@ -461,7 +467,7 @@ pub(crate) fn av2_lossless_mixed_inter_intra_tile_entropy_payload_for_region_wit
     writer.finish()
 }
 
-pub(crate) fn av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
+pub(crate) fn av2_lossy_fixed_inter_intra_tile_entropy_payload_for_region_with_fields(
     region: Av2TileRegion,
     profile: Av2Black444MvpProfile,
     geometry: Av2VideoGeometry,
@@ -470,8 +476,9 @@ pub(crate) fn av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_wit
     source: &[u8],
     reference: &[u8],
     recon: &mut [u8],
-    palette: Option<&Av2LumaPalette444>,
     block_modes: &Av2LosslessInterTileBlockModes,
+    qp: u8,
+    base_qindex: u16,
     record_fields: bool,
 ) -> Av2EntropyPayload {
     let plan = Av2Black444TilePlan::for_region_with_fixed_inter_partition_modes(
@@ -482,25 +489,17 @@ pub(crate) fn av2_lossless_fixed_inter_intra_tile_entropy_payload_for_region_wit
     );
     let mut writer =
         Av2EntropyWriter::with_cdf_updates_and_fields(!profile.disable_cdf_update, record_fields);
-    let mut lossless = Av2LosslessSubsampledTileState::new(
+    let mut lossy = Av2LossySubsampledTileState::new(
         geometry,
         region,
         chroma_format,
         bit_depth,
-        Av2LosslessSubsampledModeSearch::FastScreenContent,
         source,
         recon,
+        qp,
+        base_qindex,
     );
-    plan.write_lossless_mixed_inter_intra_entropy(
-        &mut writer,
-        1,
-        block_modes,
-        &mut lossless,
-        reference,
-        palette,
-        true,
-    );
-    lossless.copy_source_to_recon_region();
+    plan.write_lossy_zero_mv_residual_inter_entropy(&mut writer, 1, block_modes, &mut lossy, reference);
     writer.finish()
 }
 
@@ -563,6 +562,7 @@ pub(crate) enum Av2LosslessInterBlockMode {
     ZeroMv,
     ZeroMvResidual,
     NewMv { row_px: i16, col_px: i16 },
+    NewMvResidual { row_px: i16, col_px: i16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,6 +588,16 @@ impl Av2LosslessInterTileBlockModes {
             blocks_high,
             blocks,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_mode_at(
+        &self,
+        block_x: usize,
+        block_y: usize,
+    ) -> Option<Av2LosslessInterBlockMode> {
+        (block_x < self.blocks_wide && block_y < self.blocks_high)
+            .then_some(self.blocks[block_y * self.blocks_wide + block_x])
     }
 
     fn mode_for_decision(&self, decision: Av2TileDecision) -> Av2LosslessInterBlockMode {
@@ -2435,6 +2445,11 @@ impl Av2Black444TilePlan {
                                     "all-inter skip tile writer received a residual block"
                                 )
                             }
+                            Av2LosslessInterBlockMode::NewMvResidual { .. } => {
+                                unreachable!(
+                                    "all-inter skip tile writer received a NEWMV residual block"
+                                )
+                            }
                             Av2LosslessInterBlockMode::ZeroMv => {
                                 write_inter_globalmv_skip(
                                     writer,
@@ -2497,6 +2512,171 @@ impl Av2Black444TilePlan {
                 | Av2TileDecisionKind::LumaPaletteModeInfo
                 | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::BlackDcResidualCoefficients
+                | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {}
+            }
+        }
+    }
+
+    fn write_lossy_zero_mv_residual_inter_entropy(
+        &self,
+        writer: &mut Av2EntropyWriter,
+        total_refs: usize,
+        block_modes: &Av2LosslessInterTileBlockModes,
+        lossy: &mut Av2LossySubsampledTileState<'_>,
+        reference: &[u8],
+    ) {
+        let mut partition_context =
+            Av2PartitionContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut txb_contexts =
+            Av2TxbEntropyContexts::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut skip_context =
+            Av2IntrabcContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut coded_mi_context =
+            Av2CodedMiContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut palette_cache_context =
+            Av2PaletteColorCacheContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut inter_context =
+            Av2InterModeContext::new(self.visible_rows_mi, self.visible_cols_mi);
+        let mut active_inter_leaf: Option<Av2ActiveInterLeaf> = None;
+        for decision in &self.decisions {
+            match decision.kind {
+                Av2TileDecisionKind::Partition(partition) => {
+                    active_inter_leaf = None;
+                    write_partition(
+                        writer,
+                        *decision,
+                        partition,
+                        &partition_context,
+                        self.visible_rows_mi,
+                        self.visible_cols_mi,
+                    );
+                    if partition == Av2MvpPartition::None {
+                        match block_modes.mode_for_decision(*decision) {
+                            Av2LosslessInterBlockMode::ZeroMvResidual => {
+                                write_inter_globalmv_residual(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                );
+                                write_regular_q_inter_tx_partition_split_8x8(writer, *decision);
+                                skip_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    false,
+                                    false,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    false,
+                                    0,
+                                    0,
+                                );
+                                palette_cache_context.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                active_inter_leaf = Some(Av2ActiveInterLeaf::Residual {
+                                    row: decision.row,
+                                    col: decision.col,
+                                    mv_row_px: 0,
+                                    mv_col_px: 0,
+                                });
+                            }
+                            Av2LosslessInterBlockMode::NewMvResidual { row_px, col_px } => {
+                                write_inter_newmv_residual(
+                                    writer,
+                                    *decision,
+                                    &skip_context,
+                                    &inter_context,
+                                    total_refs,
+                                    row_px,
+                                    col_px,
+                                );
+                                write_regular_q_inter_tx_partition_split_8x8(writer, *decision);
+                                skip_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    false,
+                                    false,
+                                );
+                                inter_context.update_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                    true,
+                                    0,
+                                    true,
+                                    row_px,
+                                    col_px,
+                                );
+                                palette_cache_context.clear_leaf(
+                                    decision.row,
+                                    decision.col,
+                                    decision.block_size,
+                                );
+                                active_inter_leaf = Some(Av2ActiveInterLeaf::Residual {
+                                    row: decision.row,
+                                    col: decision.col,
+                                    mv_row_px: row_px,
+                                    mv_col_px: col_px,
+                                });
+                            }
+                            Av2LosslessInterBlockMode::Intra
+                            | Av2LosslessInterBlockMode::ZeroMv
+                            | Av2LosslessInterBlockMode::NewMv { .. } => {
+                                unreachable!(
+                                    "lossy zero-MV residual tile writer only accepts residual blocks"
+                                )
+                            }
+                        }
+                        partition_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::BlackDcResidualCoefficients => {
+                    if let Some(Av2ActiveInterLeaf::Residual {
+                        mv_row_px,
+                        mv_col_px,
+                        ..
+                    }) = active_inter_leaf_matches(active_inter_leaf, *decision)
+                    {
+                        write_lossy_inter_residual_coefficients(
+                            writer,
+                            *decision,
+                            self.visible_rows_mi,
+                            self.visible_cols_mi,
+                            &mut txb_contexts,
+                            lossy,
+                            reference,
+                            mv_row_px,
+                            mv_col_px,
+                            true,
+                        );
+                        coded_mi_context.update_leaf(
+                            decision.row,
+                            decision.col,
+                            decision.block_size,
+                        );
+                    }
+                }
+                Av2TileDecisionKind::IntrabcFlag(_)
+                | Av2TileDecisionKind::IntrabcCopy { .. }
+                | Av2TileDecisionKind::IntraLumaMode { .. }
+                | Av2TileDecisionKind::IntraChromaMode { .. }
+                | Av2TileDecisionKind::LumaPaletteModeInfo
+                | Av2TileDecisionKind::LumaPaletteColorMap
                 | Av2TileDecisionKind::LumaPaletteResidualCoefficients { .. } => {}
             }
         }
@@ -2643,9 +2823,11 @@ impl Av2Black444TilePlan {
                                     decision.col,
                                     decision.block_size,
                                 );
-                                active_inter_leaf = Some(Av2ActiveInterLeaf::ZeroMvResidual {
+                                active_inter_leaf = Some(Av2ActiveInterLeaf::Residual {
                                     row: decision.row,
                                     col: decision.col,
+                                    mv_row_px: 0,
+                                    mv_col_px: 0,
                                 });
                             }
                             Av2LosslessInterBlockMode::NewMv { row_px, col_px } => {
@@ -2702,6 +2884,11 @@ impl Av2Black444TilePlan {
                                     row: decision.row,
                                     col: decision.col,
                                 });
+                            }
+                            Av2LosslessInterBlockMode::NewMvResidual { .. } => {
+                                unreachable!(
+                                    "lossless mixed inter writer does not accept NEWMV residual blocks"
+                                )
                             }
                         }
                         partition_context.update_leaf(
@@ -2887,7 +3074,11 @@ impl Av2Black444TilePlan {
                     {
                         match active_inter_leaf {
                             Av2ActiveInterLeaf::Skip { .. } => continue,
-                            Av2ActiveInterLeaf::ZeroMvResidual { .. } => {
+                            Av2ActiveInterLeaf::Residual {
+                                mv_row_px,
+                                mv_col_px,
+                                ..
+                            } => {
                                 write_lossless_inter_residual_coefficients(
                                     writer,
                                     *decision,
@@ -2896,8 +3087,8 @@ impl Av2Black444TilePlan {
                                     &mut txb_contexts,
                                     lossless,
                                     reference,
-                                    0,
-                                    0,
+                                    mv_row_px,
+                                    mv_col_px,
                                     use_regular_inter_txb_contexts,
                                 );
                                 coded_mi_context.update_leaf(
@@ -3423,13 +3614,18 @@ impl Av2InterModeContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Av2ActiveInterLeaf {
     Skip { row: usize, col: usize },
-    ZeroMvResidual { row: usize, col: usize },
+    Residual {
+        row: usize,
+        col: usize,
+        mv_row_px: i16,
+        mv_col_px: i16,
+    },
 }
 
 impl Av2ActiveInterLeaf {
     fn origin(self) -> (usize, usize) {
         match self {
-            Self::Skip { row, col } | Self::ZeroMvResidual { row, col } => (row, col),
+            Self::Skip { row, col } | Self::Residual { row, col, .. } => (row, col),
         }
     }
 }
@@ -3583,6 +3779,50 @@ fn write_inter_newmv_skip(
     mv_row_px: i16,
     mv_col_px: i16,
 ) {
+    write_inter_newmv(
+        writer,
+        decision,
+        skip_context,
+        inter_context,
+        total_refs,
+        mv_row_px,
+        mv_col_px,
+        true,
+    );
+}
+
+fn write_inter_newmv_residual(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    skip_context: &Av2IntrabcContext,
+    inter_context: &Av2InterModeContext,
+    total_refs: usize,
+    mv_row_px: i16,
+    mv_col_px: i16,
+) {
+    write_inter_newmv(
+        writer,
+        decision,
+        skip_context,
+        inter_context,
+        total_refs,
+        mv_row_px,
+        mv_col_px,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_inter_newmv(
+    writer: &mut Av2EntropyWriter,
+    decision: Av2TileDecision,
+    skip_context: &Av2IntrabcContext,
+    inter_context: &Av2InterModeContext,
+    total_refs: usize,
+    mv_row_px: i16,
+    mv_col_px: i16,
+    skip_txfm: bool,
+) {
     let intra_inter_ctx = inter_context.intra_inter_ctx(decision.row, decision.col);
     let mut intra_inter_cdf = DEFAULT_INTRA_INTER_CDFS[intra_inter_ctx];
     writer.write_symbol_with_static_cdf_key(
@@ -3599,7 +3839,7 @@ fn write_inter_newmv_skip(
     writer.write_symbol_with_static_cdf_key(
         "tile.inter.skip_txfm",
         inter_skip_txfm_static_cdf_key(skip_ctx),
-        1,
+        usize::from(skip_txfm),
         &mut skip_cdf,
         2,
         false,

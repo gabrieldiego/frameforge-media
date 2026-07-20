@@ -2,7 +2,7 @@ const CDF_PROB_TOP: u32 = 1 << 15;
 const EC_PROB_SHIFT: u32 = 7;
 const AV2_ADAPTIVE_CDF_LOOKUP_CACHE_SIZE: usize = 512;
 const AV2_ADAPTIVE_CDF_NAME_LOOKUP_CACHE_SIZE: usize = 256;
-const AV2_STATIC_CDF_LOOKUP_SIZE: usize = 520;
+const AV2_STATIC_CDF_LOOKUP_SIZE: usize = 640;
 // The forward AV2 pre-carry finalizer delays output while a future carry could
 // still change pending bytes. Each pending word is a 9-bit byte-plus-carry
 // value, so 32 words map to a small 288-bit RTL queue. This is intentionally
@@ -170,6 +170,8 @@ impl Av2EntropyWriter {
         if bits == 0 {
             return;
         }
+        #[cfg(feature = "av2-lossy-stats")]
+        self.trace_literal(name, value, bits);
         // AV2 v1.0.0 Section 4.11.3: L(n) consumes n literal bits through the
         // arithmetic decoder. Encoder-side this mirrors AVM avm_write_literal().
         if self.record_fields {
@@ -199,6 +201,8 @@ impl Av2EntropyWriter {
 
     #[inline(always)]
     pub fn write_literal_bit(&mut self, name: &'static str, value: bool) {
+        #[cfg(feature = "av2-lossy-stats")]
+        self.trace_literal(name, u32::from(value), 1);
         if self.record_fields {
             self.fields.push(Av2EntropyField {
                 name,
@@ -291,7 +295,39 @@ impl Av2EntropyWriter {
         } else {
             None
         };
+        #[cfg(feature = "av2-lossy-stats")]
+        self.trace_static_cdf(name, static_cdf_key, symbol, cdf, nsymbs, adaptive_index);
         self.write_symbol_with_resolved_cdf(name, symbol, cdf, nsymbs, update_cdf, adaptive_index);
+    }
+
+    #[cfg(feature = "av2-lossy-stats")]
+    fn trace_static_cdf(
+        &self,
+        name: &'static str,
+        static_cdf_key: usize,
+        symbol: usize,
+        cdf: &[u16],
+        nsymbs: usize,
+        adaptive_index: Option<usize>,
+    ) {
+        if let Some(mode) = std::env::var_os("FRAMEFORGE_AV2_CDF_TRACE") {
+            if mode == "0" || (mode != "all" && mode != "1" && !name.contains("partition")) {
+                return;
+            }
+            let active_cdf = if let Some(index) = adaptive_index {
+                self.adaptive_cdfs[index].cdf.as_slice()
+            } else {
+                cdf
+            };
+            eprintln!(
+                "FRAMEFORGE_AV2_CDF_TRACE name={} key={} symbol={} nsymbs={} cdf={:?}",
+                name,
+                static_cdf_key,
+                symbol,
+                nsymbs,
+                &active_cdf[..nsymbs + 4],
+            );
+        }
     }
 
     #[inline(always)]
@@ -332,6 +368,8 @@ impl Av2EntropyWriter {
             let fh = active_cdf[symbol] as u32;
             (fl, fh)
         };
+        #[cfg(feature = "av2-lossy-stats")]
+        self.trace_symbol(name, symbol, nsymbs, fl, fh);
         if self.record_fields {
             let fl_inc = if fl < CDF_PROB_TOP {
                 PROB_INC[nsymbs - 2][symbol.saturating_sub(1)]
@@ -612,6 +650,26 @@ impl Av2EntropyWriter {
         self.low = low << d;
         self.rng = rng << d;
         self.cnt = s;
+    }
+
+    #[cfg(feature = "av2-lossy-stats")]
+    fn trace_literal(&self, name: &'static str, value: u32, bits: u8) {
+        if std::env::var_os("FRAMEFORGE_AV2_SYMBOL_TRACE").is_some_and(|value| value != "0") {
+            eprintln!(
+                "{{\"source\":\"ff\",\"code\":\"Literal\",\"name\":\"{}\",\"literal_value\":{},\"bit_count\":{}}}",
+                name, value, bits
+            );
+        }
+    }
+
+    #[cfg(feature = "av2-lossy-stats")]
+    fn trace_symbol(&self, name: &'static str, symbol: usize, nsymbs: usize, fl: u32, fh: u32) {
+        if std::env::var_os("FRAMEFORGE_AV2_SYMBOL_TRACE").is_some_and(|value| value != "0") {
+            eprintln!(
+                "{{\"source\":\"ff\",\"code\":\"Symbol\",\"name\":\"{}\",\"symbol\":{},\"nsymbs\":{},\"fl\":{},\"fh\":{}}}",
+                name, symbol, nsymbs, fl, fh
+            );
+        }
     }
 }
 

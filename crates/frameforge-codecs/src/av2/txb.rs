@@ -21,9 +21,9 @@ const AV2_STATIC_CDF_COEFF_Y_DC_BASE_LF_EOB_CTX0: usize = 360;
 const AV2_STATIC_CDF_COEFF_Y_DC_LOW_RANGE_LF_CTX0: usize = 361;
 const AV2_STATIC_CDF_COEFF_UV_DC_BASE_LF_EOB_CTX0: usize = 362;
 const AV2_STATIC_CDF_COEFF_Y_DC_SIGN_BASE: usize = 370;
-const AV2_STATIC_CDF_TXB_SKIP_Y_INTER_BASE: usize = 400;
-const AV2_STATIC_CDF_EOB_Y_INTER: usize = 416;
-const AV2_STATIC_CDF_LOSSLESS_INTER_TX_TYPE: usize = 417;
+const AV2_STATIC_CDF_TXB_SKIP_Y_INTER_BASE: usize = 584;
+const AV2_STATIC_CDF_EOB_Y_INTER: usize = 600;
+const AV2_STATIC_CDF_INTER_EXT_TX_DCT_IDTX_4X4_BASE: usize = 601;
 
 fn y_txb_skip_static_cdf_key(skip_ctx: u8) -> usize {
     AV2_STATIC_CDF_TXB_SKIP_Y_BASE + usize::from(skip_ctx)
@@ -237,10 +237,11 @@ fn av2_regular_dequantize_dct4x4(
     let mut dqcoeff = [0i32; TX4X4_SAMPLES];
     for (pos, (&level, dst)) in qcoeff.iter().zip(dqcoeff.iter_mut()).enumerate() {
         let rc01 = usize::from(pos != 0);
-        *dst = round_power_of_two_i64(
-            i64::from(level) * i64::from(dequant[rc01]),
+        let abs_dqcoeff = round_power_of_two_i64(
+            i64::from(level.abs()) * i64::from(dequant[rc01]),
             AV2_QUANT_TABLE_BITS,
         ) as i32;
+        *dst = if level < 0 { -abs_dqcoeff } else { abs_dqcoeff };
     }
     dqcoeff
 }
@@ -426,7 +427,7 @@ fn write_luma_inter_residual_txb(
 
     write_y_inter_txb_nonzero(writer, skip_ctx);
     write_eob_y_inter(writer, eob);
-    write_lossless_inter_dct_dct_tx_type(writer);
+    write_regular_inter_dct_dct_tx_type(writer, eob);
 
     for scan_index in (1..eob).rev() {
         let pos = TX4X4_SCAN[scan_index];
@@ -703,12 +704,30 @@ fn write_eob_y_inter(writer: &mut Av2EntropyWriter, eob: usize) {
     }
 }
 
-fn write_lossless_inter_dct_dct_tx_type(writer: &mut Av2EntropyWriter) {
-    let mut cdf = DEFAULT_LOSSLESS_INTER_TX_TYPE_CDF;
+fn regular_inter_tx_type_eob_ctx_4x4(eob: usize) -> usize {
+    debug_assert!((1..=TX4X4_SAMPLES).contains(&eob));
+    // AVM get_lp2tx_ctx() derives the transform-type context from eob - 1 as
+    // a raster last-position value, not from the coefficient scan position.
+    let last = eob - 1;
+    let diag = last % TX4X4_SIZE + last / TX4X4_SIZE;
+    if diag < 2 {
+        1
+    } else if diag > 4 {
+        2
+    } else {
+        0
+    }
+}
+
+fn write_regular_inter_dct_dct_tx_type(writer: &mut Av2EntropyWriter, eob: usize) {
+    let eob_ctx = regular_inter_tx_type_eob_ctx_4x4(eob);
+    let mut cdf = DEFAULT_INTER_EXT_TX_DCT_IDTX_4X4_CDF;
+    // With reduced_tx_set_used=2, inter 4x4 uses EXT_TX_SET_DCT_IDTX:
+    // symbol 1 maps to DCT_DCT and symbol 0 maps to IDTX.
     writer.write_symbol_with_static_cdf_key(
-        "tile.tx_type.lossless_inter_dct_dct",
-        AV2_STATIC_CDF_LOSSLESS_INTER_TX_TYPE,
-        0,
+        "tile.tx_type.inter_reduced_dct_dct",
+        AV2_STATIC_CDF_INTER_EXT_TX_DCT_IDTX_4X4_BASE + eob_ctx,
+        1,
         &mut cdf,
         2,
         false,
