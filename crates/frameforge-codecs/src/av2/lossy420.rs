@@ -584,10 +584,10 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         }
     }
 
-    fn regular_dct_quantized_residual_candidate(
+    fn regular_dct_quantized_residual_candidates(
         &self,
         analysis: &Av2LossyTxbAnalysis,
-    ) -> Av2LossyQuantizedResidualCandidate {
+    ) -> Av2LossyRegularDctCandidates {
         let coefficients = av2_fdct4x4(&analysis.residual);
         let (mut qcoeff, _) =
             av2_regular_quantize_dct4x4(&coefficients, self.base_qindex, self.bit_depth);
@@ -598,7 +598,19 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             self.chroma_format,
             analysis.source_variance,
         );
-        self.regular_dct_candidate_from_qcoeff(analysis, &qcoeff)
+        let transform = self.regular_dct_candidate_from_qcoeff(analysis, &qcoeff);
+        let mut tail_pruned_qcoeff = qcoeff;
+        let tail_pruned = prune_regular_dct_trailing_unit_ac(&mut tail_pruned_qcoeff).then(|| {
+            self.regular_dct_candidate_from_qcoeff_kind(
+                analysis,
+                &tail_pruned_qcoeff,
+                Av2LossyResidualCandidateKind::RegularDctTailPruned,
+            )
+        });
+        Av2LossyRegularDctCandidates {
+            transform,
+            tail_pruned,
+        }
     }
 
     fn regular_dct_dc_only_candidate(
@@ -1353,7 +1365,7 @@ impl<'a> Av2LossySubsampledTileState<'a> {
         kind: Av2CoefficientProxyKind,
     ) -> usize {
         let candidate = choose_regular_q_lossy_txb(
-            self.regular_dct_quantized_residual_candidate(analysis),
+            self.regular_dct_quantized_residual_candidates(analysis),
             self.regular_dct_dc_only_candidate(analysis),
             kind,
             self.quant_step(),
@@ -2316,6 +2328,21 @@ fn prune_regular_dct_ac_levels(
     }
 }
 
+fn prune_regular_dct_trailing_unit_ac(qcoeff: &mut [i32; TX4X4_SAMPLES]) -> bool {
+    for scan_index in (1..TX4X4_SAMPLES).rev() {
+        let pos = TX4X4_SCAN[scan_index];
+        match qcoeff[pos].abs() {
+            0 => continue,
+            1 => {
+                qcoeff[pos] = 0;
+                return true;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn regular_dct_ac_prune_threshold(
     qindex: u16,
     bit_depth: SampleBitDepth,
@@ -2777,11 +2804,18 @@ struct Av2LossyQuantizedResidualCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av2LossyRegularDctCandidates {
+    transform: Av2LossyQuantizedResidualCandidate,
+    tail_pruned: Option<Av2LossyQuantizedResidualCandidate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Av2LossyResidualCandidateKind {
     Spatial,
     RefinedSpatial,
     Transform,
     RegularDct,
+    RegularDctTailPruned,
     RegularDctDcOnly,
 }
 
@@ -2959,6 +2993,7 @@ struct Av2LossyPlaneStats {
     refined_spatial: u64,
     transform: u64,
     regular_dct: u64,
+    regular_dct_tail_pruned: u64,
     regular_dct_dc_only: u64,
     chosen_sse: u128,
     source_variance: u128,
@@ -2992,6 +3027,9 @@ impl Av2LossyPlaneStats {
                     }
                     Av2LossyResidualCandidateKind::Transform => self.transform += 1,
                     Av2LossyResidualCandidateKind::RegularDct => self.regular_dct += 1,
+                    Av2LossyResidualCandidateKind::RegularDctTailPruned => {
+                        self.regular_dct_tail_pruned += 1;
+                    }
                     Av2LossyResidualCandidateKind::RegularDctDcOnly => {
                         self.regular_dct_dc_only += 1;
                     }
@@ -3005,7 +3043,7 @@ impl Av2LossyPlaneStats {
     fn print(&self, label: &str) {
         let txbs = u128::from(self.txbs.max(1));
         eprintln!(
-            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_dc_only={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
+            "av2-lossy-stats {label} txbs={} exact={} exact_zero={} exact_nonzero={} dc_delta={} spatial={} refined_spatial={} transform={} regular_dct={} regular_dct_tail_pruned={} regular_dct_dc_only={} avg_sse={} avg_source_variance={} avg_variance_loss={}",
             self.txbs,
             self.exact,
             self.exact_zero,
@@ -3015,6 +3053,7 @@ impl Av2LossyPlaneStats {
             self.refined_spatial,
             self.transform,
             self.regular_dct,
+            self.regular_dct_tail_pruned,
             self.regular_dct_dc_only,
             self.chosen_sse / txbs,
             self.source_variance / txbs,

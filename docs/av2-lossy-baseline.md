@@ -1601,3 +1601,67 @@ verification/references/av2/avm/build/avmdec --rawvideo -o verification/generate
 cmp verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f.recon verification/generated/instrumentation_tuning/final_shared_margin/SceneComposition_1_420_yuv420p8_qp24_1f_dec.yuv
 make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
 ```
+
+### Tight Tail-Unit AC Pruning
+
+The next residual probe used the superblock bit maps from the transform-aware
+DC checkpoint. Residual syntax still accounted for 85-95% of first-frame
+symbol bits, while mode and partition syntax stayed small. The retained change
+adds one more regular-Q DCT candidate: zero the trailing unit AC coefficient in
+scan order, then keep that candidate only if the normal RD scorer beats the
+unpruned DCT and the per-TXB SSE increase is within a very small
+quantization-scaled guard.
+
+This is a shared rule for all bit depths and chroma formats. The current QP24
+matrix only selects it on the 8-bit rows; 10-bit rows are neutral rather than
+gated out.
+
+Retained first-frame QP24 predictive comparison versus the transform-aware DC
+checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 183,180 | -425 | 50.097775 | +0.016788 |
+| SceneComposition_1_422 | yuv422p8 | 192,608 | -394 | 50.551805 | +0.014231 |
+| screen_wayland_activity_rgb | rgb24 | 541,305 | -372 | 49.729073 | +0.008202 |
+| MissionControlClip1_420 | yuv420p10le | 455,320 | 0 | 48.034375 | +0.000000 |
+| MissionControlClip1_422 | yuv422p10le | 490,809 | 0 | 48.818224 | +0.000000 |
+| MissionControlClip1_444 | yuv444p10le | 541,754 | 0 | 49.648672 | +0.000000 |
+| total | mixed | 2,404,976 | -1,191 | n/a | n/a |
+
+Retained 50-frame QP24 predictive comparison versus the transform-aware DC
+checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF fps | FF PSNR guardrail | ffmpeg/libaom bytes |
+|---|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 5,803,734 | -611 | 15.25 | ~56.585 | 353,820 |
+| SceneComposition_1_422 | yuv422p8 | 6,616,988 | -496 | 13.72 | ~56.794 | 408,009 |
+| screen_wayland_activity_rgb | rgb24 | 4,407,691 | -3,099 | 5.16 | ~53.401 | 434,822 |
+| MissionControlClip1_420 | yuv420p10le | 11,070,971 | 0 | 4.20 | 49.977 | 682,773 |
+| MissionControlClip1_422 | yuv422p10le | 12,488,645 | 0 | 3.45 | 50.867 | 731,234 |
+| MissionControlClip1_444 | yuv444p10le | 14,970,720 | 0 | 2.53 | 51.942 | 777,812 |
+| total | mixed | 55,358,749 | -4,206 | 4.78 | n/a | 3,388,470 |
+
+Instrumentation notes:
+
+| Probe | Result | Decision |
+|---|---|---|
+| Tail-unit candidate with DC-only SSE guard | Scene first frame dropped to 49.238 dB and RGB to 49.473 dB | Rejected: bitrate win was not worth the quality loss |
+| Tail-unit candidate with `qstep / 16` SSE guard | Scene residual symbols -4,421 bits; RGB residual symbols -2,947 bits; 10-bit rows neutral | Retained |
+
+Validation:
+
+```text
+cargo fmt --all
+cargo check -p frameforge-codecs --all-features
+cargo test -p frameforge-codecs --all-features av2_regular_qp -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossy -- --nocapture
+cargo test -p frameforge-codecs --all-features av2_lossless -- --nocapture
+make build AV2_SB_BITS=1 AV2_LOSSY_STATS=1
+manual six-row first-frame QP24 predictive encode with FRAMEFORGE_AV2_SB_BITS and FRAMEFORGE_AV2_LOSSY_STATS
+manual six-row first-frame QP24 predictive ffmpeg PSNR with matched raw reconstruction formats
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+verification/references/av2/avm/build/avmdec --rawvideo -o verification/generated/instrumentation_loop/tail_unit_prune_tight_1f/scene420_yuv420p8_dec.yuv verification/generated/instrumentation_loop/tail_unit_prune_tight_1f/scene420_yuv420p8.obu
+cmp verification/generated/instrumentation_loop/tail_unit_prune_tight_1f/scene420_yuv420p8.recon verification/generated/instrumentation_loop/tail_unit_prune_tight_1f/scene420_yuv420p8_dec.yuv
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_LIMIT=1 VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive
+```

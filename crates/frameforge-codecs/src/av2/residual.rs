@@ -184,7 +184,7 @@ fn write_lossy_luma_txb(
     let analysis = lossy.analyze_txb(plane, x0, y0, mode, context);
     if !mode.use_fsc {
         let candidate = choose_regular_q_lossy_txb(
-            lossy.regular_dct_quantized_residual_candidate(&analysis),
+            lossy.regular_dct_quantized_residual_candidates(&analysis),
             lossy.regular_dct_dc_only_candidate(&analysis),
             Av2CoefficientProxyKind::LumaTransform,
             lossy.quant_step(),
@@ -395,7 +395,7 @@ fn write_lossy_chroma_txb(
     let analysis = lossy.analyze_txb(plane, x0, y0, mode, context);
     if !mode.use_fsc {
         let candidate = choose_regular_q_lossy_txb(
-            lossy.regular_dct_quantized_residual_candidate(&analysis),
+            lossy.regular_dct_quantized_residual_candidates(&analysis),
             lossy.regular_dct_dc_only_candidate(&analysis),
             Av2CoefficientProxyKind::ChromaTransform,
             lossy.quant_step(),
@@ -499,11 +499,12 @@ fn write_lossy_chroma_txb(
 }
 
 fn choose_regular_q_lossy_txb(
-    transform_candidate: Av2LossyQuantizedResidualCandidate,
+    candidates: Av2LossyRegularDctCandidates,
     dc_only_candidate: Av2LossyQuantizedResidualCandidate,
     kind: Av2CoefficientProxyKind,
     quant_step: i32,
 ) -> Av2LossyQuantizedResidualCandidate {
+    let transform_candidate = candidates.transform;
     let transform_rate = coefficient_proxy_score(&transform_candidate.coefficients, kind);
     let transform_score = lossy_txb_score(
         transform_rate,
@@ -511,6 +512,26 @@ fn choose_regular_q_lossy_txb(
         transform_candidate.variance_loss,
         regular_q_rd_quant_step(quant_step),
     );
+    let mut best_candidate = transform_candidate;
+    let mut best_score = transform_score;
+    let max_extra_sse = regular_q_dc_only_max_extra_sse(quant_step);
+    let max_tail_extra_sse = regular_q_tail_pruned_max_extra_sse(quant_step);
+    if let Some(tail_pruned_candidate) = candidates.tail_pruned {
+        let tail_rate = coefficient_proxy_score(&tail_pruned_candidate.coefficients, kind);
+        let tail_score = lossy_txb_score(
+            tail_rate,
+            tail_pruned_candidate.sse,
+            tail_pruned_candidate.variance_loss,
+            regular_q_rd_quant_step(quant_step),
+        );
+        if tail_score < best_score
+            && tail_pruned_candidate.sse
+                <= transform_candidate.sse.saturating_add(max_tail_extra_sse)
+        {
+            best_candidate = tail_pruned_candidate;
+            best_score = tail_score;
+        }
+    }
     let dc_rate = coefficient_proxy_score(&dc_only_candidate.coefficients, kind);
     let dc_score = lossy_txb_score(
         dc_rate,
@@ -518,14 +539,13 @@ fn choose_regular_q_lossy_txb(
         dc_only_candidate.variance_loss,
         regular_q_rd_quant_step(quant_step),
     );
-    let max_extra_sse = regular_q_dc_only_max_extra_sse(quant_step);
-    if dc_score < transform_score
+    if dc_score < best_score
         && dc_only_candidate.sse
             <= transform_candidate.sse.saturating_add(max_extra_sse)
     {
         dc_only_candidate
     } else {
-        transform_candidate
+        best_candidate
     }
 }
 
@@ -727,6 +747,10 @@ fn regular_q_rd_quant_step(quant_step: i32) -> i32 {
 
 fn regular_q_dc_only_max_extra_sse(quant_step: i32) -> usize {
     (quant_step.max(1) as usize).saturating_mul(2)
+}
+
+fn regular_q_tail_pruned_max_extra_sse(quant_step: i32) -> usize {
+    (quant_step.max(1) as usize / 16).max(1)
 }
 
 fn lossy_should_try_ac_quantized(dc_sse: usize, quant_step: i32) -> bool {
