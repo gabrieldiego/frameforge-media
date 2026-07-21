@@ -682,8 +682,12 @@ pub struct Av2EncodeFrameMetrics<'a> {
 impl Av2EncodeRequest {
     pub fn validate(&self) -> Result<(), String> {
         self.geometry.validate_shape()?;
-        validate_av2_input_format(self.format)?;
-        Picture::validate_shape(self.geometry.width, self.geometry.height, self.format)?;
+        Picture::validate_format_shape(
+            self.geometry.width,
+            self.geometry.height,
+            self.format,
+            validate_av2_input_format,
+        )?;
         Ok(())
     }
 }

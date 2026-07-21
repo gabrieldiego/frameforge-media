@@ -52,6 +52,17 @@ impl Picture {
             .validate_geometry(width, height)
             .map_err(|err| err.to_string())
     }
+
+    pub(crate) fn validate_format_shape<T>(
+        width: usize,
+        height: usize,
+        format: PixelFormat,
+        validate_format: impl FnOnce(PixelFormat) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let validated = validate_format(format)?;
+        Self::validate_shape(width, height, format)?;
+        Ok(validated)
+    }
 }
 
 pub(crate) fn read_input_frame<R: Read + ?Sized>(

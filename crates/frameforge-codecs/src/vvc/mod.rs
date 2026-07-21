@@ -95,6 +95,39 @@ pub struct VvcEncodeParams {
     pub frames: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcEncodeRequest {
+    params: VvcEncodeParams,
+    geometry: VvcVideoGeometry,
+    limits: VvcVideoLimits,
+    format: PixelFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcValidatedEncodeRequest {
+    frame_limit: FrameLimit,
+    geometry: VvcVideoGeometry,
+    format: VvcPictureFormat,
+}
+
+impl VvcEncodeRequest {
+    fn validate(self) -> Result<VvcValidatedEncodeRequest, String> {
+        self.geometry.validate_against(self.limits)?;
+        let frame_limit = FrameLimit::from_frame_count(self.params.frames);
+        let format = Picture::validate_format_shape(
+            self.geometry.width,
+            self.geometry.height,
+            self.format,
+            validate_vvc_input_format,
+        )?;
+        Ok(VvcValidatedEncodeRequest {
+            frame_limit,
+            geometry: self.geometry,
+            format,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VvcEncodeOptions {
     pub lossless: bool,
@@ -792,21 +825,17 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     mut progress: Option<&mut dyn FnMut(VvcEncodeProgress)>,
     mut frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
-    geometry.validate_against(limits)?;
-    let frame_limit = FrameLimit::from_frame_count(params.frames);
-    geometry.validate_shape()?;
-    if !format.is_yuv() {
-        return Err(format!("VVC input expects planar YUV format; got {format}"));
+    let request = VvcEncodeRequest {
+        params,
+        geometry,
+        limits,
+        format,
     }
-    validate_vvc_input_format(format)?;
-    Picture::validate_shape(geometry.width, geometry.height, format)?;
+    .validate()?;
+    let geometry = request.geometry;
+    let frame_limit = request.frame_limit;
+    let stream_format = request.format;
     let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
-    let stream_format = VvcPictureFormat {
-        chroma_sampling: format
-            .chroma_sampling()
-            .expect("YUV input has chroma sampling"),
-        bit_depth: format.bit_depth(),
-    };
     if !options.lossless
         && stream_format.chroma_sampling == ChromaSampling::Cs422
         && stream_format.bit_depth.bits() != 8
@@ -1240,11 +1269,12 @@ fn sample_vvc_yuv_frame_at(
         ));
     }
     geometry.validate_shape()?;
-    if !format.is_yuv() {
-        return Err(format!("VVC input expects planar YUV format; got {format}"));
-    }
-    validate_vvc_input_format(format)?;
-    Picture::validate_shape(geometry.width, geometry.height, format)?;
+    let stream_format = Picture::validate_format_shape(
+        geometry.width,
+        geometry.height,
+        format,
+        validate_vvc_input_format,
+    )?;
     let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
     let expected_len = frame_len * params.frames;
     if input.len() != expected_len {
@@ -1294,12 +1324,7 @@ fn sample_vvc_yuv_frame_at(
 
     Ok(VvcSampledFrame {
         geometry,
-        format: VvcPictureFormat {
-            chroma_sampling: format
-                .chroma_sampling()
-                .expect("YUV input has chroma sampling"),
-            bit_depth: format.bit_depth(),
-        },
+        format: stream_format,
         luma,
         cb,
         cr,
@@ -1315,14 +1340,19 @@ fn validate_vvc_exact_frame_count(params: VvcEncodeParams) -> Result<FrameLimit,
     Ok(frame_limit)
 }
 
-fn validate_vvc_input_format(format: PixelFormat) -> Result<(), String> {
+fn validate_vvc_input_format(format: PixelFormat) -> Result<VvcPictureFormat, String> {
     let Some(chroma_sampling) = format.chroma_sampling() else {
         return Err(format!("VVC input expects planar YUV format; got {format}"));
     };
     match chroma_sampling {
-        ChromaSampling::Cs420 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
-        ChromaSampling::Cs422 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
-        ChromaSampling::Cs444 if vvc_bit_depth_is_supported(format.bit_depth()) => Ok(()),
+        ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444
+            if vvc_bit_depth_is_supported(format.bit_depth()) =>
+        {
+            Ok(VvcPictureFormat {
+                chroma_sampling,
+                bit_depth: format.bit_depth(),
+            })
+        }
         ChromaSampling::Cs420 => Err(format!(
             "VVC 4:2:0 input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
