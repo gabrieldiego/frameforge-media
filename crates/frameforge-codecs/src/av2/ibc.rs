@@ -1,10 +1,10 @@
 use super::palette::Av2LumaPalette444;
-use super::planar::Av2PlanarYuvLayout;
+use super::planar::{chroma_subsample_x, chroma_subsample_y, Av2PlanarYuvLayout};
 use super::tile::{
     av2_luma_palette_leaf_order_for_region, av2_mvp_8x8_leaf_order_for_region, Av2MvpLeafRegion,
 };
 use super::{Av2ChromaFormat, Av2VideoGeometry};
-use crate::picture::{Picture, PixelFormat, SampleBitDepth};
+use crate::picture::{PlanarYuvGeometry, SampleBitDepth};
 
 pub(crate) const AV2_IBC_HASH_BLOCK_SIZE: usize = 8;
 const AV2_IBC_TILE_SIZE: usize = 64;
@@ -278,12 +278,17 @@ fn build_local_ibc(
             "AV2 palette IBC expects 4:4:4 input"
         );
     }
-    let format = PixelFormat::planar_yuv(chroma_format.chroma_sampling(), bit_depth);
-    let expected_len = Picture::expected_len(geometry.width, geometry.height, format);
-    if frame.len() != expected_len {
+    let layout = PlanarYuvGeometry::new(
+        geometry.width,
+        geometry.height,
+        chroma_format.chroma_sampling(),
+        bit_depth,
+    )?;
+    if frame.len() != layout.frame_len() {
         return Err(format!(
-            "AV2 {:?} IBC input length mismatch: expected {expected_len} byte(s), got {}",
+            "AV2 {:?} IBC input length mismatch: expected {} byte(s), got {}",
             chroma_format,
+            layout.frame_len(),
             frame.len()
         ));
     }
@@ -832,19 +837,18 @@ fn hash_planar_yuv_8x8(
     x0: usize,
     y0: usize,
 ) -> u32 {
-    let y_len = geometry.width * geometry.height;
-    let sub_x = match chroma_format {
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
-        Av2ChromaFormat::Yuv444 => 1,
-    };
-    let sub_y = match chroma_format {
-        Av2ChromaFormat::Yuv420 => 2,
-        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
-    };
-    let c_width = geometry.width / sub_x;
-    let c_height = geometry.height / sub_y;
-    let c_len = c_width * c_height;
-    let bytes_per_sample = bit_depth.bytes_per_sample();
+    let layout = PlanarYuvGeometry::for_validated_shape(
+        geometry.width,
+        geometry.height,
+        chroma_format.chroma_sampling(),
+        bit_depth,
+    );
+    let y_len = layout.luma_samples();
+    let sub_x = chroma_subsample_x(chroma_format);
+    let sub_y = chroma_subsample_y(chroma_format);
+    let c_width = layout.chroma_width();
+    let c_len = layout.chroma_samples();
+    let bytes_per_sample = layout.bytes_per_sample();
     let y_bytes = y_len * bytes_per_sample;
     let c_bytes = c_len * bytes_per_sample;
     let mut hash = AV2_IBC_HASH_OFFSET;

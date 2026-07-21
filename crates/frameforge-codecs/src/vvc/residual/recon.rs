@@ -1,4 +1,4 @@
-use crate::picture::ChromaSampling;
+use crate::picture::{ChromaSampling, PlanarYuvGeometry};
 
 use super::super::{
     vvc_chroma_420_transform_nodes, vvc_neutral_sample, VvcCodingTreeNode, VvcCtuCabacOp,
@@ -33,8 +33,14 @@ fn reconstruct_vvc_residual_frame_420(
     quantized: VvcQuantizedColor,
     partition_params: VvcCtuPartitionParams,
 ) -> Vec<VvcSample> {
+    let layout = PlanarYuvGeometry::for_validated_shape(
+        frame.geometry.width,
+        frame.geometry.height,
+        frame.format.chroma_sampling,
+        frame.format.bit_depth,
+    );
     let neutral = vvc_neutral_sample(frame.format.bit_depth);
-    let mut luma = vec![neutral; frame.geometry.luma_samples()];
+    let mut luma = vec![neutral; layout.luma_samples()];
     let mut tu_idx = 0;
     for op in VvcCtuCabacOp::yuv420_ctu_partition(partition_params) {
         let VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } = op else {
@@ -60,8 +66,9 @@ fn reconstruct_vvc_residual_frame_420(
         tu_idx += 1;
     }
 
-    let chroma_len = frame.geometry.luma_samples() / 4;
-    let chroma_width = frame.geometry.width / 2;
+    let chroma_len = layout.chroma_samples();
+    let chroma_width = layout.chroma_width();
+    let chroma_height = layout.chroma_height();
     let mut cb = vec![neutral; chroma_len];
     let mut cr = vec![neutral; chroma_len];
     for (tu_idx, node) in vvc_chroma_420_transform_nodes(partition_params.shape())
@@ -122,10 +129,10 @@ fn reconstruct_vvc_residual_frame_420(
         );
     }
 
-    let mut out = Vec::with_capacity(frame.geometry.luma_samples() + chroma_len * 2);
+    let mut out = Vec::with_capacity(layout.luma_samples() + chroma_len * 2);
     out.extend_from_slice(&luma);
-    out.extend_from_slice(&cb[..chroma_width * (frame.geometry.height / 2)]);
-    out.extend_from_slice(&cr[..chroma_width * (frame.geometry.height / 2)]);
+    out.extend_from_slice(&cb[..chroma_width * chroma_height]);
+    out.extend_from_slice(&cr[..chroma_width * chroma_height]);
     out
 }
 

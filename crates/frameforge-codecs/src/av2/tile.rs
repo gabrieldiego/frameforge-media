@@ -17,7 +17,8 @@ use crate::av2::palette::{
     Av2LumaModeSyntax, Av2LumaPalette444, Av2LumaPaletteRegion, AV2_LUMA_PALETTE_BLOCK_SIZE,
     AV2_LUMA_PALETTE_MAX_COLORS, AV2_LUMA_PALETTE_MIN_COLORS,
 };
-use crate::picture::SampleBitDepth;
+use crate::av2::planar::{chroma_subsample_x, chroma_subsample_y};
+use crate::picture::{PlanarYuvGeometry, SampleBitDepth};
 include!("cdfs.rs");
 include!("block_layout.rs");
 include!("tile_payload.rs");

@@ -10,7 +10,9 @@ use std::io::{Cursor, Read, Write};
 
 use crate::instrumentation::CountingWriter;
 use crate::picture::{
-    read_input_frame, ChromaSampling, FrameLimit, Picture, PixelFormat, SampleBitDepth,
+    chroma_subsample_x as planar_chroma_subsample_x,
+    chroma_subsample_y as planar_chroma_subsample_y, read_input_frame, ChromaSampling, FrameLimit,
+    Picture, PixelFormat, PlanarYuvGeometry, SampleBitDepth,
 };
 use frameforge_core::{read_planar_sample, write_planar_sample};
 
@@ -269,19 +271,11 @@ impl VvcVideoGeometry {
 }
 
 pub(in crate::vvc) fn chroma_subsample_x(chroma_sampling: ChromaSampling) -> usize {
-    match chroma_sampling {
-        ChromaSampling::Monochrome => 1,
-        ChromaSampling::Cs420 | ChromaSampling::Cs422 => 2,
-        ChromaSampling::Cs444 => 1,
-    }
+    planar_chroma_subsample_x(chroma_sampling)
 }
 
 pub(in crate::vvc) fn chroma_subsample_y(chroma_sampling: ChromaSampling) -> usize {
-    match chroma_sampling {
-        ChromaSampling::Monochrome => 1,
-        ChromaSampling::Cs420 => 2,
-        ChromaSampling::Cs422 | ChromaSampling::Cs444 => 1,
-    }
+    planar_chroma_subsample_y(chroma_sampling)
 }
 
 fn coded_canvas_dimension(value: usize) -> usize {
@@ -494,19 +488,27 @@ fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
 
 impl VvcSampledFrame {
     fn solid(color: VvcSampledColor) -> Self {
+        let geometry = VvcVideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let format = VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs420,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
+        };
+        let layout = PlanarYuvGeometry::for_validated_shape(
+            geometry.width,
+            geometry.height,
+            format.chroma_sampling,
+            format.bit_depth,
+        );
         Self {
-            geometry: VvcVideoGeometry {
-                width: 8,
-                height: 8,
-            },
-            format: VvcPictureFormat {
-                chroma_sampling: ChromaSampling::Cs420,
-                bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
-            },
-            luma: vec![color.y; 64],
-            cb: vec![color.u; 16],
-            cr: vec![color.v; 16],
-            chroma_len: 16,
+            geometry,
+            format,
+            luma: vec![color.y; layout.luma_samples()],
+            cb: vec![color.u; layout.chroma_samples()],
+            cr: vec![color.v; layout.chroma_samples()],
+            chroma_len: layout.chroma_samples(),
         }
     }
 
@@ -527,11 +529,17 @@ impl VvcSampledFrame {
     }
 
     fn decoder_compat_frame(self) -> Self {
-        let chroma_len = self.geometry.luma_samples() / 4;
         let format = VvcPictureFormat {
             chroma_sampling: ChromaSampling::Cs420,
             bit_depth: self.format.bit_depth,
         };
+        let layout = PlanarYuvGeometry::for_validated_shape(
+            self.geometry.width,
+            self.geometry.height,
+            format.chroma_sampling,
+            format.bit_depth,
+        );
+        let chroma_len = layout.chroma_samples();
         if self.format.chroma_sampling == ChromaSampling::Cs420 {
             return Self {
                 geometry: self.geometry,
@@ -836,7 +844,13 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     let geometry = request.geometry;
     let frame_limit = request.frame_limit;
     let stream_format = request.format;
-    let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
+    let stream_layout = PlanarYuvGeometry::new(
+        geometry.width,
+        geometry.height,
+        stream_format.chroma_sampling,
+        stream_format.bit_depth,
+    )?;
+    let frame_len = stream_layout.frame_len();
     if !options.lossless
         && stream_format.chroma_sampling == ChromaSampling::Cs422
         && stream_format.bit_depth.bits() != 8
@@ -1042,7 +1056,19 @@ fn vvc_ctu_regions(geometry: VvcVideoGeometry) -> impl Iterator<Item = VvcCtuReg
 }
 
 fn extract_vvc_ctu_frame(frame: &VvcSampledFrame, region: VvcCtuRegion) -> VvcSampledFrame {
-    let mut luma = vec![0; region.geometry.luma_samples()];
+    let ctu_layout = PlanarYuvGeometry::for_validated_shape(
+        region.geometry.width,
+        region.geometry.height,
+        frame.format.chroma_sampling,
+        frame.format.bit_depth,
+    );
+    let frame_layout = PlanarYuvGeometry::for_validated_shape(
+        frame.geometry.width,
+        frame.geometry.height,
+        frame.format.chroma_sampling,
+        frame.format.bit_depth,
+    );
+    let mut luma = vec![0; ctu_layout.luma_samples()];
     for y in 0..region.geometry.height {
         let src = (region.origin_y + y) * frame.geometry.width + region.origin_x;
         let dst = y * region.geometry.width;
@@ -1052,10 +1078,10 @@ fn extract_vvc_ctu_frame(frame: &VvcSampledFrame, region: VvcCtuRegion) -> VvcSa
 
     let subsample_x = chroma_subsample_x(frame.format.chroma_sampling);
     let subsample_y = chroma_subsample_y(frame.format.chroma_sampling);
-    let chroma_width = region.geometry.width / subsample_x;
-    let chroma_height = region.geometry.height / subsample_y;
-    let chroma_len = chroma_width * chroma_height;
-    let source_chroma_width = frame.geometry.width / subsample_x;
+    let chroma_width = ctu_layout.chroma_width();
+    let chroma_height = ctu_layout.chroma_height();
+    let chroma_len = ctu_layout.chroma_samples();
+    let source_chroma_width = frame_layout.chroma_width();
     let source_origin_x = region.origin_x / subsample_x;
     let source_origin_y = region.origin_y / subsample_y;
     let neutral = vvc_neutral_sample(frame.format.bit_depth);
@@ -1080,15 +1106,19 @@ fn extract_vvc_ctu_frame(frame: &VvcSampledFrame, region: VvcCtuRegion) -> VvcSa
 
 impl VvcReconstructionFrame {
     fn new_neutral(geometry: VvcVideoGeometry, format: VvcPictureFormat) -> Self {
-        let chroma_len = (geometry.width / chroma_subsample_x(format.chroma_sampling))
-            * (geometry.height / chroma_subsample_y(format.chroma_sampling));
+        let layout = PlanarYuvGeometry::for_validated_shape(
+            geometry.width,
+            geometry.height,
+            format.chroma_sampling,
+            format.bit_depth,
+        );
         let neutral = vvc_neutral_sample(format.bit_depth);
         Self {
             geometry,
             format,
-            luma: vec![neutral; geometry.luma_samples()],
-            cb: vec![neutral; chroma_len],
-            cr: vec![neutral; chroma_len],
+            luma: vec![neutral; layout.luma_samples()],
+            cb: vec![neutral; layout.chroma_samples()],
+            cr: vec![neutral; layout.chroma_samples()],
         }
     }
 
@@ -1143,9 +1173,13 @@ impl VvcReconstructionFrame {
     }
 
     fn into_yuv(self) -> Vec<u8> {
-        let format = PixelFormat::planar_yuv(self.format.chroma_sampling, self.format.bit_depth);
-        let frame_len = Picture::expected_len(self.geometry.width, self.geometry.height, format);
-        let mut output = vec![0; frame_len];
+        let layout = PlanarYuvGeometry::for_validated_shape(
+            self.geometry.width,
+            self.geometry.height,
+            self.format.chroma_sampling,
+            self.format.bit_depth,
+        );
+        let mut output = vec![0; layout.frame_len()];
         let mut sample_idx = 0;
         for sample in self.luma.into_iter().chain(self.cb).chain(self.cr) {
             write_planar_sample(&mut output, sample_idx, sample, self.format.bit_depth)
@@ -1246,7 +1280,13 @@ fn sample_vvc_yuv_frame_at(
         format,
         validate_vvc_input_format,
     )?;
-    let frame_len = Picture::expected_len(geometry.width, geometry.height, format);
+    let layout = PlanarYuvGeometry::new(
+        geometry.width,
+        geometry.height,
+        stream_format.chroma_sampling,
+        stream_format.bit_depth,
+    )?;
+    let frame_len = layout.frame_len();
     let expected_len = frame_len * params.frames;
     if input.len() != expected_len {
         return Err(format!(
@@ -1259,9 +1299,9 @@ fn sample_vvc_yuv_frame_at(
         ));
     }
     let frame_base = frame_len * frame_idx;
-    let frame_sample_base = frame_base / format.bytes_per_sample();
+    let frame_sample_base = frame_base / layout.bytes_per_sample();
 
-    let luma_samples = geometry.luma_samples();
+    let luma_samples = layout.luma_samples();
     let mut luma = vec![0; luma_samples];
     for (idx, sample) in luma.iter_mut().take(luma_samples).enumerate() {
         *sample = read_planar_sample(input, frame_sample_base + idx, format.bit_depth())
@@ -1270,9 +1310,7 @@ fn sample_vvc_yuv_frame_at(
     }
 
     let u_offset = luma_samples;
-    let chroma_plane_samples = format
-        .chroma_plane_samples(geometry.width, geometry.height)
-        .ok_or_else(|| format!("VVC input expects chroma samples; got {format}"))?;
+    let chroma_plane_samples = layout.chroma_samples();
     let v_offset = u_offset + chroma_plane_samples;
     let mut cb = vec![0; chroma_plane_samples];
     let mut cr = vec![0; chroma_plane_samples];

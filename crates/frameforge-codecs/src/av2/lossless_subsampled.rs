@@ -73,11 +73,17 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             ),
             "AV2 planar lossless state expects 4:2:0, 4:2:2, or 4:4:4 input"
         );
-        let y_len = geometry.width * geometry.height;
-        let c_width = geometry.width / chroma_subsample_x(chroma_format);
-        let c_height = geometry.height / chroma_subsample_y(chroma_format);
-        let c_len = c_width * c_height;
-        let expected_len = (y_len + 2 * c_len) * bit_depth.bytes_per_sample();
+        let layout = PlanarYuvGeometry::for_validated_shape(
+            geometry.width,
+            geometry.height,
+            chroma_format.chroma_sampling(),
+            bit_depth,
+        );
+        let y_len = layout.luma_samples();
+        let c_width = layout.chroma_width();
+        let c_height = layout.chroma_height();
+        let c_len = layout.chroma_samples();
+        let expected_len = layout.frame_len();
         assert_eq!(
             source.len(),
             expected_len,
@@ -2428,20 +2434,6 @@ enum Av2LosslessPlane {
     Y,
     U,
     V,
-}
-
-fn chroma_subsample_x(chroma_format: Av2ChromaFormat) -> usize {
-    match chroma_format {
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
-        Av2ChromaFormat::Yuv444 => 1,
-    }
-}
-
-fn chroma_subsample_y(chroma_format: Av2ChromaFormat) -> usize {
-    match chroma_format {
-        Av2ChromaFormat::Yuv420 => 2,
-        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
-    }
 }
 
 fn read_validated_planar_sample(

@@ -104,11 +104,17 @@ impl<'a> Av2LossySubsampledTileState<'a> {
     ) -> Self {
         assert!(qp > 0, "AV2 lossy QP must be non-zero");
         assert!(base_qindex > 0, "AV2 regular lossy qindex must be non-zero");
-        let y_len = geometry.width * geometry.height;
-        let c_width = geometry.width / chroma_subsample_x(chroma_format);
-        let c_height = geometry.height / chroma_subsample_y(chroma_format);
-        let c_len = c_width * c_height;
-        let expected_len = (y_len + 2 * c_len) * bit_depth.bytes_per_sample();
+        let layout = PlanarYuvGeometry::for_validated_shape(
+            geometry.width,
+            geometry.height,
+            chroma_format.chroma_sampling(),
+            bit_depth,
+        );
+        let y_len = layout.luma_samples();
+        let c_width = layout.chroma_width();
+        let c_height = layout.chroma_height();
+        let c_len = layout.chroma_samples();
+        let expected_len = layout.frame_len();
         assert_eq!(
             source.len(),
             expected_len,

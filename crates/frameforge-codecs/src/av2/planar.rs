@@ -1,5 +1,8 @@
 use super::{Av2ChromaFormat, Av2VideoGeometry};
-use crate::picture::{Picture, PixelFormat, SampleBitDepth};
+use crate::picture::{
+    chroma_subsample_x as planar_chroma_subsample_x,
+    chroma_subsample_y as planar_chroma_subsample_y, PlanarYuvGeometry, SampleBitDepth,
+};
 
 const AV2_PLANAR_HASH_PRIME: u64 = 0x1000_0000_01b3;
 
@@ -26,32 +29,23 @@ impl Av2PlanarYuvLayout {
         ) {
             return Err(format!("AV2 planar YUV does not support {chroma_format:?}"));
         }
-        let sub_x = chroma_subsample_x(chroma_format);
-        let sub_y = chroma_subsample_y(chroma_format);
-        if geometry.width % sub_x != 0 || geometry.height % sub_y != 0 {
-            return Err(format!(
-                "AV2 {:?} dimensions must be divisible by {}x{}, got {}x{}",
-                chroma_format, sub_x, sub_y, geometry.width, geometry.height
-            ));
-        }
-        let chroma_width = geometry.width / sub_x;
-        let chroma_height = geometry.height / sub_y;
-        let bytes_per_sample = bit_depth.bytes_per_sample();
-        let y_bytes = geometry.width * geometry.height * bytes_per_sample;
-        let c_bytes = chroma_width * chroma_height * bytes_per_sample;
-        let expected_len = Picture::expected_len(
+        let layout = PlanarYuvGeometry::new(
             geometry.width,
             geometry.height,
-            PixelFormat::planar_yuv(chroma_format.chroma_sampling(), bit_depth),
-        );
+            chroma_format.chroma_sampling(),
+            bit_depth,
+        )?;
+        let bytes_per_sample = layout.bytes_per_sample();
+        let y_bytes = layout.luma_samples() * bytes_per_sample;
+        let c_bytes = layout.chroma_samples() * bytes_per_sample;
         Ok(Self {
             geometry,
             chroma_format,
-            chroma_width,
+            chroma_width: layout.chroma_width(),
             bytes_per_sample,
             y_bytes,
             c_bytes,
-            expected_len,
+            expected_len: layout.frame_len(),
         })
     }
 
@@ -299,17 +293,11 @@ impl Av2PlanarYuvLayout {
 }
 
 pub(crate) fn chroma_subsample_x(chroma_format: Av2ChromaFormat) -> usize {
-    match chroma_format {
-        Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 => 2,
-        Av2ChromaFormat::Yuv444 => 1,
-    }
+    planar_chroma_subsample_x(chroma_format.chroma_sampling())
 }
 
 pub(crate) fn chroma_subsample_y(chroma_format: Av2ChromaFormat) -> usize {
-    match chroma_format {
-        Av2ChromaFormat::Yuv420 => 2,
-        Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444 => 1,
-    }
+    planar_chroma_subsample_y(chroma_format.chroma_sampling())
 }
 
 fn plane_regions_equal_between(
