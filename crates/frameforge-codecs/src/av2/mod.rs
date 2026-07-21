@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 
 use crate::picture::{ChromaSampling, Picture, PixelFormat, SampleBitDepth};
 
@@ -350,6 +350,24 @@ pub struct Av2VideoGeometry {
     pub height: usize,
 }
 
+impl Av2VideoGeometry {
+    fn validate_shape(self) -> Result<(), String> {
+        if self.width < 8 || self.height < 8 {
+            return Err(format!(
+                "AV2 geometry expects at least 8x8 visible pictures; got {}x{}",
+                self.width, self.height
+            ));
+        }
+        if !self.width.is_multiple_of(8) || !self.height.is_multiple_of(8) {
+            return Err(format!(
+                "AV2 geometry currently requires dimensions in 8-pixel steps; got {}x{}",
+                self.width, self.height
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Av2TileLayout {
     regions: Vec<Av2TileRegion>,
@@ -633,6 +651,7 @@ fn ceil_log2_usize(value: usize) -> u8 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Av2EncodeParams {
+    /// Number of frames to encode. Zero means read complete frames until EOF.
     pub frames: usize,
 }
 
@@ -660,18 +679,9 @@ pub struct Av2EncodeFrameMetrics<'a> {
 
 impl Av2EncodeRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.geometry.width == 0 || self.geometry.height == 0 {
-            return Err("AV2 encode expects positive dimensions".to_string());
-        }
-        if self.params.frames == 0 {
-            return Err("AV2 encode expects at least one frame".to_string());
-        }
-        if !self.format.is_yuv() && self.format != PixelFormat::Rgb24 {
-            return Err(format!(
-                "AV2 encode expects planar YUV or rgb24 input; got {}",
-                self.format
-            ));
-        }
+        self.geometry.validate_shape()?;
+        validate_av2_input_format(self.format)?;
+        Picture::validate_shape(self.geometry.width, self.geometry.height, self.format)?;
         Ok(())
     }
 }
@@ -774,7 +784,6 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     options: Av2EncodeOptions,
     mut frame_metrics: Option<&mut dyn for<'a> FnMut(Av2EncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
-    request.validate()?;
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
@@ -791,17 +800,14 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     let mut predictive_started = false;
     let mut predictive_reference: Option<Vec<u8>> = None;
     let mut predictive_reconstruction: Option<Vec<u8>> = None;
-    for frame_index in 0..request.params.frames {
+    let mut frame_index = 0usize;
+    while request.params.frames == 0 || frame_index < request.params.frames {
         #[cfg(feature = "av2-sb-bit-profile")]
         sb_bits::set_current_frame(frame_index);
         let mut source_frame = vec![0; source_expected_len];
-        input.read_exact(&mut source_frame).map_err(|err| {
-            format!(
-                "failed to read AV2 MVP input frame {} of {}: {err}",
-                frame_index + 1,
-                request.params.frames
-            )
-        })?;
+        if !read_av2_input_frame(input, &mut source_frame, frame_index, request.params.frames)? {
+            break;
+        }
         let coded_frame: Vec<u8>;
         let frame = if rgb_identity {
             coded_frame = rgb24_to_planar_gbr(&source_frame, geometry);
@@ -885,6 +891,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                     reconstruction,
                 });
             }
+            frame_index += 1;
             continue;
         }
         if stream_format.chroma_format == Av2ChromaFormat::Yuv422 && options.qp.is_none() {
@@ -991,6 +998,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                     reconstruction,
                 });
             }
+            frame_index += 1;
             continue;
         }
         if options.predictive {
@@ -1033,8 +1041,51 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 reconstruction,
             });
         }
+        frame_index += 1;
     }
     Ok(())
+}
+
+fn read_av2_input_frame(
+    input: &mut dyn Read,
+    frame: &mut [u8],
+    frame_index: usize,
+    requested_frames: usize,
+) -> Result<bool, String> {
+    if requested_frames != 0 {
+        input.read_exact(frame).map_err(|err| {
+            format!(
+                "failed to read AV2 MVP input frame {} of {}: {err}",
+                frame_index + 1,
+                requested_frames
+            )
+        })?;
+        return Ok(true);
+    }
+
+    let mut filled = 0usize;
+    while filled < frame.len() {
+        match input.read(&mut frame[filled..]) {
+            Ok(0) if filled == 0 => return Ok(false),
+            Ok(0) => {
+                return Err(format!(
+                    "failed to read complete AV2 MVP input frame {}: EOF after {} of {} byte(s)",
+                    frame_index + 1,
+                    filled,
+                    frame.len()
+                ));
+            }
+            Ok(read) => filled += read,
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read AV2 MVP input frame {}: {err}",
+                    frame_index + 1
+                ));
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn rgb24_to_planar_gbr(frame: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {
@@ -2157,7 +2208,6 @@ pub fn av2_mvp_444_trace_jsonl_for_frame(
     frame: &[u8],
     request: Av2EncodeRequest,
 ) -> Result<String, String> {
-    request.validate()?;
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
@@ -2188,7 +2238,6 @@ pub fn av2_mvp_444_ibc_stats_json_for_frame(
     frame: &[u8],
     request: Av2EncodeRequest,
 ) -> Result<String, String> {
-    request.validate()?;
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
@@ -2266,7 +2315,6 @@ pub fn av2_mvp_444_ibc_stats_json_for_frame(
 }
 
 pub fn av2_black_444_trace_jsonl(request: Av2EncodeRequest) -> Result<String, String> {
-    request.validate()?;
     let geometry = validate_fixed_black_444_request(request)?;
     av2_mvp_444_trace_jsonl_for_mode(
         geometry,
@@ -2518,7 +2566,10 @@ pub fn av2_black_64x64_444_reconstruction() -> Vec<u8> {
 }
 
 pub fn av2_black_444_reconstruction(geometry: Av2VideoGeometry) -> Option<Vec<u8>> {
-    validate_fixed_black_444_geometry(geometry).map(av2_black_444_reconstruction_for_geometry)
+    geometry
+        .validate_shape()
+        .ok()
+        .map(|()| av2_black_444_reconstruction_for_geometry(geometry))
 }
 
 fn av2_black_444_reconstruction_for_geometry(geometry: Av2VideoGeometry) -> Vec<u8> {
@@ -2575,22 +2626,21 @@ fn validate_mvp_444_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometr
 }
 
 fn validate_mvp_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometry, String> {
-    if Av2StreamFormat::from_pixel_format(request.format).is_none() {
-        return Err(
-            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, yuv444p8/10, and rgb24 streams at 8-pixel geometry"
-                .to_string(),
-        );
-    }
-    validate_fixed_black_444_geometry(request.geometry)
-        .ok_or_else(|| "AV2 MVP encoder only supports dimensions in 8-pixel steps".to_string())
+    request.validate()?;
+    Ok(request.geometry)
 }
 
-fn validate_fixed_black_444_geometry(geometry: Av2VideoGeometry) -> Option<Av2VideoGeometry> {
-    let supported = geometry.width >= 8
-        && geometry.height >= 8
-        && geometry.width % 8 == 0
-        && geometry.height % 8 == 0;
-    supported.then_some(geometry)
+fn validate_av2_input_format(format: PixelFormat) -> Result<Av2StreamFormat, String> {
+    if !format.is_yuv() && format != PixelFormat::Rgb24 {
+        return Err(format!(
+            "AV2 input expects planar YUV or rgb24 format; got {format}"
+        ));
+    }
+    Av2StreamFormat::from_pixel_format(format).ok_or_else(|| {
+        format!(
+            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, yuv444p8/10, and rgb24 streams; got {format}"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -3917,6 +3967,23 @@ mod tests {
     }
 
     #[test]
+    fn av2_rejects_non_mi_aligned_request_shape() {
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry: Av2VideoGeometry {
+                width: 64,
+                height: 60,
+            },
+            format: PixelFormat::Yuv420p8,
+        };
+
+        let err = request
+            .validate()
+            .expect_err("height must be 8-pixel aligned");
+        assert!(err.contains("8-pixel steps"), "{err}");
+    }
+
+    #[test]
     fn av2_rgb24_repack_uses_planar_gbr_identity_order() {
         let geometry = Av2VideoGeometry {
             width: 2,
@@ -4096,6 +4163,47 @@ mod tests {
         ));
         assert_eq!(output, expected_output);
         assert_eq!(recon, input);
+    }
+
+    #[test]
+    fn av2_zero_frames_streams_complete_frames_until_eof() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 0 },
+            geometry,
+            format: PixelFormat::Yuv444p8,
+        };
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+        let first = vec![0; frame_len];
+        let mut second = vec![0; frame_len];
+        for sample in second.iter_mut().take(geometry.width * geometry.height) {
+            *sample = 31;
+        }
+        let mut input = first.clone();
+        input.extend_from_slice(&second);
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+        let mut metrics_frame_count = Vec::new();
+        let mut metrics = |metrics: Av2EncodeFrameMetrics<'_>| {
+            metrics_frame_count.push(metrics.frame_count);
+        };
+
+        av2_encode_fixed_black_444_with_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Some(&mut metrics),
+        )
+        .expect("AV2 zero-frame request should stream until EOF");
+
+        assert!(!output.is_empty());
+        assert_eq!(recon, input);
+        assert_eq!(metrics_frame_count, vec![0, 0]);
     }
 
     #[test]
@@ -5532,7 +5640,7 @@ mod tests {
     }
 
     #[test]
-    fn av2_rejects_zero_frames() {
+    fn av2_accepts_zero_frames_as_unbounded_input() {
         let request = Av2EncodeRequest {
             params: Av2EncodeParams { frames: 0 },
             geometry: Av2VideoGeometry {
@@ -5542,7 +5650,7 @@ mod tests {
             format: PixelFormat::Yuv420p8,
         };
 
-        assert!(request.validate().is_err());
+        assert!(request.validate().is_ok());
     }
 
     #[test]
