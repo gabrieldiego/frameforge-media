@@ -1,8 +1,11 @@
 mod prediction;
 mod quant;
+#[cfg(test)]
 mod recon;
 mod syntax;
 pub(super) mod transform;
+
+use super::VvcSample;
 
 #[cfg(test)]
 mod tests;
@@ -24,8 +27,9 @@ pub(super) use prediction::{
     predict_vvc_luma_dc_block_into, VvcDcPredictionScratch,
 };
 pub use quant::quantize_vvc_color;
-pub(super) use quant::quantize_vvc_frame;
 pub(super) use quant::quantize_vvc_frame_lossless_residual;
+pub(super) use quant::{quantize_vvc_frame, quantize_vvc_frame_with_reconstruction};
+#[cfg(test)]
 pub(super) use recon::reconstruct_vvc_residual_frame;
 pub(super) use syntax::{
     VvcResidualCabacEncoder, VvcResidualCabacOptions, VvcResidualCabacSymbolStream,
@@ -52,6 +56,12 @@ pub struct VvcQuantizedColor {
     pub(super) cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     pub(super) cb_rem: u8,
     pub(super) cr_rem: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VvcQuantizedResidualFrame {
+    pub(super) quantized: VvcQuantizedColor,
+    pub(super) reconstruction_yuv: Vec<VvcSample>,
 }
 
 #[cfg(test)]

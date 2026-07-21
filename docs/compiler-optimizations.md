@@ -1122,6 +1122,80 @@ make validate-geometry-sweep
 
 Both checks passed after this checkpoint.
 
+### VVC Carried Residual Reconstruction
+
+Checkpoint: `vvc-carried-reconstruction`.
+
+Change retained:
+
+- VVC lossy residual quantization now returns the reconstructed CTU samples it
+  already produced for closed-loop prediction.
+- The streaming encoder consumes that carried reconstruction instead of running
+  a second prediction and inverse-transform pass from the same coefficients.
+- The explicit reconstruction helper remains test-only, with a regression test
+  proving the carried reconstruction matches the old explicit path.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-carried-reconstruction \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-fixed-active-scan.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.76 | 0.77 | +1.3% | 0 | 0 |
+| lossy | 0.71 | 0.76 | +7.0% | 0 | 0 |
+
+All rows were byte-identical to `vvc-fixed-active-scan`; lossless rows
+remained exact and lossy PSNR was unchanged. The gain is concentrated in the
+subsampled lossy residual rows because 4:4:4 currently routes through the
+palette path.
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-carried-reconstruction.md
+```
+
+AV2 sanity command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-after-vvc-carried-reconstruction \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/av2-after-vvc-fixed-active-scan.json
+```
+
+AV2 sanity result:
+
+| Mode | Bytes | FPS | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|
+| lossless+predictive | 83,531,302 | 9.03 | 0 | 0 |
+| qp=24+predictive | 41,098,794 | 3.82 | 0 | 0 |
+
+All AV2 rows remained byte-identical and PSNR-identical to the baseline. The
+cross-codec report was written to:
+
+```text
+verification/generated/encode_matrix/av2-after-vvc-carried-reconstruction.md
+```
+
+Additional validation:
+
+```sh
+make test
+make validate-geometry-sweep
+```
+
+Both checks passed after this checkpoint.
+
 ## References
 
 - Cargo profile settings:

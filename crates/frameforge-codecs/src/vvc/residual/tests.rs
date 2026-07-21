@@ -290,6 +290,44 @@ fn vvc_420_chroma_ac_residual_preserves_visible_chroma_variation() {
 }
 
 #[test]
+fn vvc_quantized_frame_reconstruction_matches_explicit_reconstruction() {
+    let mut luma = vec![0; 32 * 24];
+    let mut cb = vec![0; 16 * 12];
+    let mut cr = vec![0; 16 * 12];
+    for y in 0..24 {
+        for x in 0..32 {
+            luma[y * 32 + x] = 32 + ((x * 5 + y * 3) % 192) as u16;
+        }
+    }
+    for y in 0..12 {
+        for x in 0..16 {
+            cb[y * 16 + x] = 48 + ((x * 11 + y * 7) % 128) as u16;
+            cr[y * 16 + x] = 64 + ((x * 3 + y * 13) % 128) as u16;
+        }
+    }
+    let frame = VvcSampledFrame {
+        geometry: VvcVideoGeometry {
+            width: 32,
+            height: 24,
+        },
+        format: VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs420,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
+        },
+        luma,
+        cb,
+        cr,
+        chroma_len: 16 * 12,
+    };
+
+    let quantized = quantize_vvc_frame_with_reconstruction(&frame);
+    let params =
+        vvc_ctu_partition_params(frame.geometry, quantized.quantized).expect("32x24 CTU params");
+    let explicit = reconstruct_vvc_residual_frame(&frame, quantized.quantized, params);
+    assert_eq!(quantized.reconstruction_yuv, explicit);
+}
+
+#[test]
 fn vvc_chroma_quantization_keeps_black_neutral_and_nonzero_colored() {
     assert_eq!(quantize_vvc_chroma(0, 0), 16);
     assert_eq!(reconstruct_vvc_chroma(16), 0);

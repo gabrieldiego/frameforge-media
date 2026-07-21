@@ -10,8 +10,9 @@ use super::{
     inverse_transform_vvc_luma_quantized_block_into, predict_vvc_chroma_dc_block_into,
     predict_vvc_luma_dc_block_into, quantize_vvc_chroma_residual_greedy,
     quantize_vvc_chroma_sample, quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
-    VvcDcPredictionScratch, VvcInverseTransformScratch, VvcQuantizedColor, MAX_VVC_CHROMA_TUS,
-    MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
+    VvcDcPredictionScratch, VvcInverseTransformScratch, VvcQuantizedColor,
+    VvcQuantizedResidualFrame, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
+    VVC_CHROMA_AC_POSITIONS_4X4,
 };
 
 pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
@@ -19,6 +20,12 @@ pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
 }
 
 pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantizedColor {
+    quantize_vvc_frame_with_reconstruction(frame).quantized
+}
+
+pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
+    frame: &VvcSampledFrame,
+) -> VvcQuantizedResidualFrame {
     let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
@@ -202,28 +209,36 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
         quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.u, frame.format.bit_depth));
     let cr_rem =
         quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.v, frame.format.bit_depth));
-    let reconstructed_cb = reconstruct_vvc_chroma(cb_rem);
-    let reconstructed_cr = reconstruct_vvc_chroma(cr_rem);
-    VvcQuantizedColor {
-        y: reconstructed_luma
-            .first()
-            .copied()
-            .map(|sample| vvc_downshift_sample_to_u8(sample, frame.format.bit_depth))
-            .unwrap_or(128),
-        u: reconstructed_cb,
-        v: reconstructed_cr,
-        luma_tu_remainders,
-        luma_tu_negative,
-        luma_tu_dc_levels,
-        luma_tu_ac_levels,
-        luma_tu_count,
-        chroma_tu_count,
-        cb_tu_dc_levels,
-        cr_tu_dc_levels,
-        cb_tu_ac_levels,
-        cr_tu_ac_levels,
-        cb_rem,
-        cr_rem,
+    let quantized_cb = reconstruct_vvc_chroma(cb_rem);
+    let quantized_cr = reconstruct_vvc_chroma(cr_rem);
+    let mut reconstruction_yuv =
+        Vec::with_capacity(frame.geometry.luma_samples() + frame.chroma_len * 2);
+    reconstruction_yuv.extend_from_slice(&reconstructed_luma);
+    reconstruction_yuv.extend_from_slice(&reconstructed_cb);
+    reconstruction_yuv.extend_from_slice(&reconstructed_cr);
+    VvcQuantizedResidualFrame {
+        quantized: VvcQuantizedColor {
+            y: reconstructed_luma
+                .first()
+                .copied()
+                .map(|sample| vvc_downshift_sample_to_u8(sample, frame.format.bit_depth))
+                .unwrap_or(128),
+            u: quantized_cb,
+            v: quantized_cr,
+            luma_tu_remainders,
+            luma_tu_negative,
+            luma_tu_dc_levels,
+            luma_tu_ac_levels,
+            luma_tu_count,
+            chroma_tu_count,
+            cb_tu_dc_levels,
+            cr_tu_dc_levels,
+            cb_tu_ac_levels,
+            cr_tu_ac_levels,
+            cb_rem,
+            cr_rem,
+        },
+        reconstruction_yuv,
     }
 }
 

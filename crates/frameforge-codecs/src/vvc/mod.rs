@@ -59,10 +59,10 @@ pub use residual::quantize_vvc_color;
 #[cfg(test)]
 use residual::VVC_LUMA_DC_BASE;
 use residual::{
-    quantize_vvc_frame, quantize_vvc_frame_lossless_residual, reconstruct_vvc_residual_frame,
-    VvcQuantizedColor, VvcResidualCabacOptions, VvcResidualComponent, MAX_VVC_CHROMA_TUS,
-    MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
-    VVC_LUMA_AC_COEFFS_PER_TU,
+    quantize_vvc_frame, quantize_vvc_frame_lossless_residual,
+    quantize_vvc_frame_with_reconstruction, VvcQuantizedColor, VvcResidualCabacOptions,
+    VvcResidualComponent, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
+    VVC_CHROMA_AC_POSITIONS_4X4, VVC_LUMA_AC_COEFFS_PER_TU,
 };
 #[cfg(test)]
 use residual::{VvcResidualCabacEncoder, VvcResidualCtxConfig, VvcResidualPass1State};
@@ -945,35 +945,22 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 let mut ctu_frame = VvcSampledFrame::scratch(source_frame.format);
                 for region in vvc_ctu_regions(geometry) {
                     copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
-                    let quantized = if lossless_residual {
-                        quantize_vvc_frame_lossless_residual(&ctu_frame)
+                    let (quantized, ctu_recon_yuv) = if lossless_residual {
+                        (quantize_vvc_frame_lossless_residual(&ctu_frame), None)
                     } else {
-                        quantize_vvc_frame(&ctu_frame)
+                        let quantized = quantize_vvc_frame_with_reconstruction(&ctu_frame);
+                        (quantized.quantized, Some(quantized.reconstruction_yuv))
                     };
-                    let luma_max_leaf_size = if lossless_residual {
-                        VVC_LOSSLESS_LUMA_LEAF_SIZE
-                    } else {
-                        VVC_CURRENT_MAX_LUMA_LEAF_SIZE
-                    };
-                    let partition_params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
-                        ctu_frame.geometry,
-                        quantized,
-                        luma_max_leaf_size,
-                        ctu_frame.format.chroma_sampling,
-                    )
-                    .ok_or_else(|| {
-                        format!(
-                            "VVC reconstruction has no generated CTU path for coded CTU geometry {}x{}",
-                            ctu_frame.geometry.coded_width(),
-                            ctu_frame.geometry.coded_height()
-                        )
-                    })?;
                     if lossless_residual {
                         frame_recon.copy_ctu_frame(region, &ctu_frame)?;
                     } else {
-                        let ctu_recon =
-                            reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params);
-                        frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+                        frame_recon.copy_ctu_yuv(
+                            region,
+                            &ctu_frame,
+                            ctu_recon_yuv
+                                .as_deref()
+                                .expect("lossy residual CTU carries reconstructed samples"),
+                        )?;
                     }
                     write_annex_b_to(
                         &mut frame_bitstream,
