@@ -1,11 +1,13 @@
+#[cfg(test)]
 use super::super::VvcSample;
-use super::{
-    VvcQuantizedTransformBlock, VvcTransformComponent, VvcTuTransformBlock,
-    VVC_CHROMA_AC_POSITIONS_4X4,
-};
+use super::{VvcQuantizedTransformBlock, VVC_CHROMA_AC_POSITIONS_4X4};
+#[cfg(test)]
+use super::{VvcTransformComponent, VvcTuTransformBlock};
 use crate::picture::SampleBitDepth;
 
+#[cfg(test)]
 pub(in crate::vvc) const VVC_LUMA_DC_BASE: i16 = 114;
+#[cfg(test)]
 pub(in crate::vvc) const VVC_CHROMA_DC_BASE: i16 = 128;
 const VVC_LUMA_DC_NUM: i32 = 5;
 const VVC_LUMA_DC_DEN: i32 = 16;
@@ -62,6 +64,7 @@ const VVC_DCT2_32_AC_ROWS_1_TO_3: [[i32; 32]; 3] = [
     ],
 ];
 
+#[cfg(test)]
 pub(in crate::vvc) fn transform_vvc_tu(
     component: VvcTransformComponent,
     width: u16,

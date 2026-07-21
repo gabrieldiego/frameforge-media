@@ -58,6 +58,12 @@ fn vvc_transform_accepts_8x8_luma_and_4x4_chroma_tus() {
     let cb_transform = transform_vvc_tu(VvcTransformComponent::ChromaCb, 4, 4, &cb);
     assert_eq!(cb_transform.dc_coeff, -8);
     assert_eq!(cb_transform.ac_coeffs[4], -120);
+
+    let mut cr = vec![128; 4 * 4];
+    cr[10] = 255;
+    let cr_transform = transform_vvc_tu(VvcTransformComponent::ChromaCr, 4, 4, &cr);
+    assert_eq!(cr_transform.dc_coeff, 8);
+    assert_eq!(cr_transform.ac_coeffs[9], 119);
 }
 
 #[test]

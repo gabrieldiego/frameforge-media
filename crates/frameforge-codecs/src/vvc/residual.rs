@@ -7,13 +7,14 @@ pub(super) mod transform;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(super) use transform::quantize_vvc_chroma;
 pub(super) use transform::{
     inverse_transform_vvc_chroma_residual_levels, inverse_transform_vvc_luma_residual_levels,
     quantize_vvc_chroma_residual_greedy, quantize_vvc_chroma_sample,
-    quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma, transform_vvc_tu,
-    VVC_CHROMA_DC_BASE, VVC_LUMA_DC_BASE,
+    quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
+};
+#[cfg(test)]
+pub(super) use transform::{
+    quantize_vvc_chroma, transform_vvc_tu, VVC_CHROMA_DC_BASE, VVC_LUMA_DC_BASE,
 };
 
 pub(super) use prediction::{
@@ -51,6 +52,7 @@ pub struct VvcQuantizedColor {
     pub(super) cr_rem: u8,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VvcTransformComponent {
     Luma,
@@ -58,6 +60,7 @@ pub(super) enum VvcTransformComponent {
     ChromaCr,
 }
 
+#[cfg(test)]
 impl VvcTransformComponent {
     pub(super) const fn dc_base(self) -> i16 {
         match self {
@@ -67,6 +70,7 @@ impl VvcTransformComponent {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VvcTuTransformBlock {
     pub(super) component: VvcTransformComponent,
@@ -99,7 +103,6 @@ impl VvcResidualComponent {
     }
 }
 
-pub(super) const VVC_CHROMA_TU_SIZE: usize = 4;
 pub(super) const VVC_LUMA_AC_COEFFS_PER_TU: usize = 15;
 pub(super) const VVC_CHROMA_AC_COEFFS_PER_TU: usize = VVC_LUMA_AC_COEFFS_PER_TU;
 pub(super) const VVC_CHROMA_AC_POSITIONS_4X4: [(usize, usize); VVC_CHROMA_AC_COEFFS_PER_TU] = [

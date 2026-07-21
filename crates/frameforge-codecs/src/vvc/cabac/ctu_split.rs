@@ -83,6 +83,189 @@ pub(in crate::vvc) fn vvc_chroma_transform_nodes(
     nodes
 }
 
+pub(in crate::vvc) fn vvc_luma_transform_nodes(
+    shape: VvcCtuPartitionShape,
+    max_leaf_size: u16,
+) -> Vec<VvcCodingTreeNode> {
+    let tree_type = match shape.chroma_sampling {
+        ChromaSampling::Cs444 => VvcTreeType::SingleTree,
+        ChromaSampling::Monochrome | ChromaSampling::Cs420 | ChromaSampling::Cs422 => {
+            VvcTreeType::DualTreeLuma
+        }
+    };
+    let mut nodes = Vec::new();
+    append_visible_luma_transform_nodes(
+        &mut nodes,
+        VvcCodingTreeNode::root(shape.root_width, shape.root_height, tree_type),
+        shape.visible_width,
+        shape.visible_height,
+        max_leaf_size,
+    );
+    nodes
+}
+
+fn append_visible_luma_transform_nodes(
+    nodes: &mut Vec<VvcCodingTreeNode>,
+    node: VvcCodingTreeNode,
+    visible_width: u16,
+    visible_height: u16,
+    max_leaf_size: u16,
+) {
+    if !node.intersects_visible(visible_width, visible_height) {
+        return;
+    }
+    if node.fits_visible(visible_width, visible_height)
+        && VvcCtuCabacOp::luma_leaf_allowed(node, max_leaf_size)
+    {
+        nodes.push(node);
+        return;
+    }
+
+    if !node.fits_visible(visible_width, visible_height) {
+        append_implicit_boundary_luma_transform_children(
+            nodes,
+            node,
+            visible_width,
+            visible_height,
+            max_leaf_size,
+        );
+        return;
+    }
+
+    debug_assert!(node.width > max_leaf_size || node.height > max_leaf_size);
+    if node.mtt_depth > 0 {
+        append_visible_luma_mtt_transform_nodes(
+            nodes,
+            node,
+            visible_width,
+            visible_height,
+            max_leaf_size,
+        );
+        return;
+    }
+    let split = VvcCtuCabacOp::luma_split_availability(node, visible_width, visible_height);
+    if !split.allow_qt {
+        append_visible_luma_mtt_transform_nodes(
+            nodes,
+            node,
+            visible_width,
+            visible_height,
+            max_leaf_size,
+        );
+        return;
+    }
+    for child_idx in 0..4 {
+        append_visible_luma_transform_nodes(
+            nodes,
+            node.qt_child(child_idx),
+            visible_width,
+            visible_height,
+            max_leaf_size,
+        );
+    }
+}
+
+fn append_visible_luma_mtt_transform_nodes(
+    nodes: &mut Vec<VvcCodingTreeNode>,
+    node: VvcCodingTreeNode,
+    visible_width: u16,
+    visible_height: u16,
+    max_leaf_size: u16,
+) {
+    let vertical =
+        node.width > max_leaf_size && (node.height <= max_leaf_size || node.width >= node.height);
+    for child_idx in 0..2 {
+        append_visible_luma_transform_nodes(
+            nodes,
+            node.mtt_child_with_boundary_depth_offset(
+                vertical,
+                child_idx,
+                visible_width,
+                visible_height,
+            ),
+            visible_width,
+            visible_height,
+            max_leaf_size,
+        );
+    }
+}
+
+fn append_implicit_boundary_luma_transform_children(
+    nodes: &mut Vec<VvcCodingTreeNode>,
+    node: VvcCodingTreeNode,
+    visible_width: u16,
+    visible_height: u16,
+    max_leaf_size: u16,
+) {
+    let bottom_left_in_pic = node.x < visible_width && node.y + node.height - 1 < visible_height;
+    let top_right_in_pic = node.x + node.width - 1 < visible_width && node.y < visible_height;
+    let split = VvcCtuCabacOp::luma_split_availability(node, visible_width, visible_height);
+    if !bottom_left_in_pic && !top_right_in_pic {
+        for child_idx in 0..4 {
+            append_visible_luma_transform_nodes(
+                nodes,
+                node.qt_child(child_idx),
+                visible_width,
+                visible_height,
+                max_leaf_size,
+            );
+        }
+    } else if !bottom_left_in_pic
+        && top_right_in_pic
+        && VvcCtuCabacOp::boundary_qt_preferred(node, max_leaf_size)
+    {
+        for child_idx in 0..4 {
+            append_visible_luma_transform_nodes(
+                nodes,
+                node.qt_child(child_idx),
+                visible_width,
+                visible_height,
+                max_leaf_size,
+            );
+        }
+    } else if !bottom_left_in_pic && split.allow_bt_horizontal {
+        for child_idx in 0..2 {
+            append_visible_luma_transform_nodes(
+                nodes,
+                node.mtt_child_with_boundary_depth_offset(
+                    false,
+                    child_idx,
+                    visible_width,
+                    visible_height,
+                ),
+                visible_width,
+                visible_height,
+                max_leaf_size,
+            );
+        }
+    } else if !top_right_in_pic && split.allow_bt_vertical {
+        for child_idx in 0..2 {
+            append_visible_luma_transform_nodes(
+                nodes,
+                node.mtt_child_with_boundary_depth_offset(
+                    true,
+                    child_idx,
+                    visible_width,
+                    visible_height,
+                ),
+                visible_width,
+                visible_height,
+                max_leaf_size,
+            );
+        }
+    } else {
+        for child_idx in 0..4 {
+            append_visible_luma_transform_nodes(
+                nodes,
+                node.qt_child(child_idx),
+                visible_width,
+                visible_height,
+                max_leaf_size,
+            );
+        }
+    }
+}
+
 fn append_chroma_visible_qt_subtree(
     nodes: &mut Vec<VvcCodingTreeNode>,
     node: VvcCodingTreeNode,

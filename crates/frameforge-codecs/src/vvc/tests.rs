@@ -825,6 +825,51 @@ fn vvc_ctu_partition_params_cover_all_8_sample_geometries_up_to_64() {
 }
 
 #[test]
+fn vvc_luma_transform_nodes_match_cabac_luma_leaves() {
+    let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
+    for chroma_sampling in [ChromaSampling::Cs420, ChromaSampling::Cs422] {
+        for geometry in [
+            VvcVideoGeometry {
+                width: 64,
+                height: 64,
+            },
+            VvcVideoGeometry {
+                width: 64,
+                height: 56,
+            },
+            VvcVideoGeometry {
+                width: 24,
+                height: 64,
+            },
+            VvcVideoGeometry {
+                width: 16,
+                height: 24,
+            },
+        ] {
+            let params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+                geometry,
+                black,
+                VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+                chroma_sampling,
+            )
+            .expect("partition parameters");
+            let cabac_luma_nodes: Vec<_> = VvcCtuCabacOp::yuv420_ctu_partition(params)
+                .into_iter()
+                .filter_map(|op| match op {
+                    VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                vvc_luma_transform_nodes(params.shape(), VVC_CURRENT_MAX_LUMA_LEAF_SIZE),
+                cabac_luma_nodes,
+                "{chroma_sampling:?} {geometry:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn vvc_contexts_derive_split_probability_from_init_tables() {
     let mut ctx = VvcCabacContexts::new();
     let split0 = &ctx.split_flag[0];
@@ -1441,7 +1486,12 @@ fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
             VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
             _ => None,
         })
+        .copied()
         .collect();
+    assert_eq!(
+        vvc_luma_transform_nodes(params.shape(), VVC_LOSSLESS_LUMA_LEAF_SIZE),
+        leaves
+    );
 
     assert_eq!(leaves.len(), 256);
     assert!(leaves

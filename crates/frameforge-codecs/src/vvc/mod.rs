@@ -23,9 +23,10 @@ mod palette;
 mod residual;
 mod syntax;
 use cabac::{
-    encode_ctu_partition_body, vvc_chroma_transform_nodes, VvcCabacContext, VvcCabacContexts,
-    VvcCabacDumpContextEvent, VvcCabacDumpSymbol, VvcCabacEncoder, VvcCodingTreeNode,
-    VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape, VvcLastSigCoeffPrefixCtxInput,
+    encode_ctu_partition_body, vvc_chroma_transform_nodes, vvc_luma_transform_nodes,
+    VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
+    VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
+    VvcLastSigCoeffPrefixCtxInput,
 };
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
@@ -528,12 +529,18 @@ impl VvcSampledFrame {
         }
     }
 
-    fn to_yuv_samples(&self) -> Vec<VvcSample> {
-        let mut out = Vec::with_capacity(self.luma.len() + self.cb.len() + self.cr.len());
-        out.extend_from_slice(&self.luma);
-        out.extend_from_slice(&self.cb);
-        out.extend_from_slice(&self.cr);
-        out
+    fn scratch(format: VvcPictureFormat) -> Self {
+        Self {
+            geometry: VvcVideoGeometry {
+                width: 0,
+                height: 0,
+            },
+            format,
+            luma: Vec::new(),
+            cb: Vec::new(),
+            cr: Vec::new(),
+            chroma_len: 0,
+        }
     }
 
     fn decoder_compat_frame(self) -> Self {
@@ -915,8 +922,9 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
 
             let frame_recon_yuv = if stream_format.chroma_sampling == ChromaSampling::Cs444 {
                 let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
+                let mut ctu_frame = VvcSampledFrame::scratch(stream_format);
                 for region in vvc_ctu_regions(geometry) {
-                    let ctu_frame = extract_vvc_ctu_frame(&source_frame, region);
+                    copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
                     let ctu_recon = palette::vvc_palette_444_reconstruction_yuv(&ctu_frame);
                     frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
                     write_annex_b_to(
@@ -932,11 +940,11 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 }
                 frame_recon.into_yuv()
             } else {
-                let compat_frame = source_frame.clone();
                 let mut frame_recon =
-                    VvcReconstructionFrame::new_neutral(geometry, compat_frame.format);
+                    VvcReconstructionFrame::new_neutral(geometry, source_frame.format);
+                let mut ctu_frame = VvcSampledFrame::scratch(source_frame.format);
                 for region in vvc_ctu_regions(geometry) {
-                    let ctu_frame = extract_vvc_ctu_frame(&compat_frame, region);
+                    copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
                     let quantized = if lossless_residual {
                         quantize_vvc_frame_lossless_residual(&ctu_frame)
                     } else {
@@ -960,12 +968,13 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             ctu_frame.geometry.coded_height()
                         )
                     })?;
-                    let ctu_recon = if lossless_residual {
-                        ctu_frame.to_yuv_samples()
+                    if lossless_residual {
+                        frame_recon.copy_ctu_frame(region, &ctu_frame)?;
                     } else {
-                        reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params)
-                    };
-                    frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+                        let ctu_recon =
+                            reconstruct_vvc_residual_frame(&ctu_frame, quantized, partition_params);
+                        frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+                    }
                     write_annex_b_to(
                         &mut frame_bitstream,
                         &[if lossless_residual {
@@ -1052,7 +1061,11 @@ fn vvc_ctu_regions(geometry: VvcVideoGeometry) -> impl Iterator<Item = VvcCtuReg
     })
 }
 
-fn extract_vvc_ctu_frame(frame: &VvcSampledFrame, region: VvcCtuRegion) -> VvcSampledFrame {
+fn copy_vvc_ctu_frame_into(
+    frame: &VvcSampledFrame,
+    region: VvcCtuRegion,
+    ctu_frame: &mut VvcSampledFrame,
+) {
     let ctu_layout = PlanarYuvGeometry::for_validated_shape(
         region.geometry.width,
         region.geometry.height,
@@ -1065,11 +1078,14 @@ fn extract_vvc_ctu_frame(frame: &VvcSampledFrame, region: VvcCtuRegion) -> VvcSa
         frame.format.chroma_sampling,
         frame.format.bit_depth,
     );
-    let mut luma = vec![0; ctu_layout.luma_samples()];
+    ctu_frame.geometry = region.geometry;
+    ctu_frame.format = frame.format;
+    ctu_frame.chroma_len = ctu_layout.chroma_samples();
+    ctu_frame.luma.resize(ctu_layout.luma_samples(), 0);
     for y in 0..region.geometry.height {
         let src = (region.origin_y + y) * frame.geometry.width + region.origin_x;
         let dst = y * region.geometry.width;
-        luma[dst..dst + region.geometry.width]
+        ctu_frame.luma[dst..dst + region.geometry.width]
             .copy_from_slice(&frame.luma[src..src + region.geometry.width]);
     }
 
@@ -1077,27 +1093,17 @@ fn extract_vvc_ctu_frame(frame: &VvcSampledFrame, region: VvcCtuRegion) -> VvcSa
     let subsample_y = chroma_subsample_y(frame.format.chroma_sampling);
     let chroma_width = ctu_layout.chroma_width();
     let chroma_height = ctu_layout.chroma_height();
-    let chroma_len = ctu_layout.chroma_samples();
     let source_chroma_width = frame_layout.chroma_width();
     let source_origin_x = region.origin_x / subsample_x;
     let source_origin_y = region.origin_y / subsample_y;
     let neutral = vvc_neutral_sample(frame.format.bit_depth);
-    let mut cb = vec![neutral; chroma_len];
-    let mut cr = vec![neutral; chroma_len];
+    ctu_frame.cb.resize(ctu_frame.chroma_len, neutral);
+    ctu_frame.cr.resize(ctu_frame.chroma_len, neutral);
     for y in 0..chroma_height {
         let src = (source_origin_y + y) * source_chroma_width + source_origin_x;
         let dst = y * chroma_width;
-        cb[dst..dst + chroma_width].copy_from_slice(&frame.cb[src..src + chroma_width]);
-        cr[dst..dst + chroma_width].copy_from_slice(&frame.cr[src..src + chroma_width]);
-    }
-
-    VvcSampledFrame {
-        geometry: region.geometry,
-        format: frame.format,
-        luma,
-        cb,
-        cr,
-        chroma_len,
+        ctu_frame.cb[dst..dst + chroma_width].copy_from_slice(&frame.cb[src..src + chroma_width]);
+        ctu_frame.cr[dst..dst + chroma_width].copy_from_slice(&frame.cr[src..src + chroma_width]);
     }
 }
 
@@ -1164,6 +1170,44 @@ impl VvcReconstructionFrame {
                 .copy_from_slice(&ctu_yuv[cb_offset + src..cb_offset + src + ctu_chroma_width]);
             self.cr[dst..dst + ctu_chroma_width]
                 .copy_from_slice(&ctu_yuv[cr_offset + src..cr_offset + src + ctu_chroma_width]);
+        }
+
+        Ok(())
+    }
+
+    fn copy_ctu_frame(
+        &mut self,
+        region: VvcCtuRegion,
+        ctu_frame: &VvcSampledFrame,
+    ) -> Result<(), String> {
+        if ctu_frame.format.chroma_sampling != self.format.chroma_sampling {
+            return Err(format!(
+                "VVC reconstruction CTU format mismatch: frame {:?}, CTU {:?}",
+                self.format.chroma_sampling, ctu_frame.format.chroma_sampling
+            ));
+        }
+
+        for y in 0..ctu_frame.geometry.height {
+            let src = y * ctu_frame.geometry.width;
+            let dst = (region.origin_y + y) * self.geometry.width + region.origin_x;
+            self.luma[dst..dst + ctu_frame.geometry.width]
+                .copy_from_slice(&ctu_frame.luma[src..src + ctu_frame.geometry.width]);
+        }
+
+        let subsample_x = chroma_subsample_x(self.format.chroma_sampling);
+        let subsample_y = chroma_subsample_y(self.format.chroma_sampling);
+        let frame_chroma_width = self.geometry.width / subsample_x;
+        let ctu_chroma_width = ctu_frame.geometry.width / subsample_x;
+        let ctu_chroma_height = ctu_frame.geometry.height / subsample_y;
+        let dst_origin_x = region.origin_x / subsample_x;
+        let dst_origin_y = region.origin_y / subsample_y;
+        for y in 0..ctu_chroma_height {
+            let src = y * ctu_chroma_width;
+            let dst = (dst_origin_y + y) * frame_chroma_width + dst_origin_x;
+            self.cb[dst..dst + ctu_chroma_width]
+                .copy_from_slice(&ctu_frame.cb[src..src + ctu_chroma_width]);
+            self.cr[dst..dst + ctu_chroma_width]
+                .copy_from_slice(&ctu_frame.cr[src..src + ctu_chroma_width]);
         }
 
         Ok(())

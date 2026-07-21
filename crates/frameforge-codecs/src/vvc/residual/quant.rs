@@ -1,16 +1,15 @@
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
-    vvc_neutral_sample, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcPictureFormat,
-    VvcSample, VvcSampledColor, VvcSampledFrame, VvcVideoGeometry, VVC_CTU_SIZE,
+    vvc_luma_transform_nodes, vvc_neutral_sample, VvcCodingTreeNode, VvcCtuPartitionShape,
+    VvcPictureFormat, VvcSample, VvcSampledColor, VvcSampledFrame, VvcVideoGeometry, VVC_CTU_SIZE,
     VVC_CURRENT_MAX_LUMA_LEAF_SIZE, VVC_LOSSLESS_LUMA_LEAF_SIZE,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node, inverse_transform_vvc_chroma_residual_levels,
     predict_vvc_chroma_dc_block, predict_vvc_luma_dc_block, quantize_vvc_chroma_residual_greedy,
     quantize_vvc_chroma_sample, quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
-    transform_vvc_tu, VvcQuantizedColor, VvcQuantizedTransformBlock, VvcTransformComponent,
-    VvcTuTransformBlock, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
-    VVC_CHROMA_AC_POSITIONS_4X4, VVC_CHROMA_TU_SIZE,
+    VvcQuantizedColor, VvcQuantizedTransformBlock, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
+    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
 };
 
 pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
@@ -44,17 +43,11 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             frame.format.bit_depth,
         );
         let samples = residual_luma_tu_at(
-            &frame,
+            frame,
             usize::from(node.x),
             usize::from(node.y),
             usize::from(node.width),
             usize::from(node.height),
-        );
-        let _observed_luma_transform = transform_vvc_tu(
-            VvcTransformComponent::Luma,
-            node.width,
-            node.height,
-            &samples,
         );
         let residuals: Vec<i16> = samples
             .iter()
@@ -194,8 +187,6 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
         chroma_tu_count += 1;
     }
 
-    let chroma_transforms = transform_vvc_chroma_default_tus(&frame);
-    let _observed_chroma_dc = (chroma_transforms.cb.dc_coeff, chroma_transforms.cr.dc_coeff);
     let color = frame.sampled_color();
     let cb_rem =
         quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.u, frame.format.bit_depth));
@@ -262,7 +253,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             frame.format.bit_depth,
         );
         let samples = residual_luma_tu_at(
-            &frame,
+            frame,
             usize::from(node.x),
             usize::from(node.y),
             usize::from(node.width),
@@ -431,68 +422,13 @@ fn lossless_chroma_ac_levels(
 fn chroma_partition_shape(
     geometry: VvcVideoGeometry,
     chroma_sampling: crate::picture::ChromaSampling,
-) -> super::super::VvcCtuPartitionShape {
-    VvcCtuPartitionParams {
-        root_width: VVC_CTU_SIZE,
-        root_height: VVC_CTU_SIZE,
-        visible_width: geometry.coded_width(),
-        visible_height: geometry.coded_height(),
+) -> VvcCtuPartitionShape {
+    VvcCtuPartitionShape {
+        root_width: VVC_CTU_SIZE as u16,
+        root_height: VVC_CTU_SIZE as u16,
+        visible_width: geometry.coded_width() as u16,
+        visible_height: geometry.coded_height() as u16,
         chroma_sampling,
-        luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
-        chroma_tu_count: 0,
-        luma_tu_count: 0,
-        luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
-        luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
-        luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
-        luma_tu_ac_levels: [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
-        cb_dc_abs_level: 0,
-        cb_dc_negative: false,
-        cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
-        cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
-        cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-        cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-    }
-    .shape()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VvcChromaTransformDefaults {
-    cb: VvcTuTransformBlock,
-    cr: VvcTuTransformBlock,
-}
-
-fn transform_vvc_chroma_default_tus(frame: &VvcSampledFrame) -> VvcChromaTransformDefaults {
-    let cb_samples = residual_chroma_tu_at(
-        &frame.cb,
-        frame.geometry,
-        frame.format,
-        0,
-        0,
-        VVC_CHROMA_TU_SIZE,
-        VVC_CHROMA_TU_SIZE,
-    );
-    let cr_samples = residual_chroma_tu_at(
-        &frame.cr,
-        frame.geometry,
-        frame.format,
-        0,
-        0,
-        VVC_CHROMA_TU_SIZE,
-        VVC_CHROMA_TU_SIZE,
-    );
-    VvcChromaTransformDefaults {
-        cb: transform_vvc_tu(
-            VvcTransformComponent::ChromaCb,
-            VVC_CHROMA_TU_SIZE as u16,
-            VVC_CHROMA_TU_SIZE as u16,
-            &cb_samples,
-        ),
-        cr: transform_vvc_tu(
-            VvcTransformComponent::ChromaCr,
-            VVC_CHROMA_TU_SIZE as u16,
-            VVC_CHROMA_TU_SIZE as u16,
-            &cr_samples,
-        ),
     }
 }
 
@@ -508,33 +444,10 @@ fn vvc_luma_tu_nodes_with_leaf_size(
     chroma_sampling: crate::picture::ChromaSampling,
     luma_max_leaf_size: u16,
 ) -> Vec<VvcCodingTreeNode> {
-    let params = VvcCtuPartitionParams {
-        root_width: VVC_CTU_SIZE,
-        root_height: VVC_CTU_SIZE,
-        visible_width: geometry.coded_width(),
-        visible_height: geometry.coded_height(),
-        chroma_sampling,
+    vvc_luma_transform_nodes(
+        chroma_partition_shape(geometry, chroma_sampling),
         luma_max_leaf_size,
-        chroma_tu_count: 0,
-        luma_tu_count: 0,
-        luma_tu_abs_levels: [0; MAX_VVC_LUMA_TUS],
-        luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
-        luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
-        luma_tu_ac_levels: [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
-        cb_dc_abs_level: 0,
-        cb_dc_negative: false,
-        cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
-        cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
-        cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-        cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-    };
-    VvcCtuCabacOp::yuv420_ctu_partition(params)
-        .into_iter()
-        .filter_map(|op| match op {
-            VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
-            _ => None,
-        })
-        .collect()
+    )
 }
 
 fn quantized_luma_coeff_levels(

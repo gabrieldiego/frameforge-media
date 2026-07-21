@@ -821,6 +821,64 @@ gap. Next VVC work should focus on mode decisions and residual coding for
 4:2:0 and 4:2:2 rather than treating the old non-native 4:2:2 byte counts as a
 valid target.
 
+### VVC CTU Traversal Cleanup
+
+Checkpoint: `vvc-direct-luma-nodes`.
+
+Changes retained:
+
+- VVC residual quantization now uses a luma transform-node walker instead of
+  constructing a full CABAC-op vector and filtering luma leaves.
+- Quantization constructs `VvcCtuPartitionShape` directly when only traversal
+  shape is needed, avoiding large zeroed partition-parameter arrays.
+- The streaming encoder reuses one scratch CTU frame per input frame and
+  removes the full-frame clone on the residual path.
+- Obsolete lossy transform observation helpers are test-only or removed, so the
+  release path does not compute discarded transforms.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-direct-luma-nodes \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-parity-native-422-dc-search.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.70 | 0.71 | +1.4% | 0 | 0 |
+| lossy | 0.63 | 0.65 | +3.2% | 0 | 0 |
+
+All rows were byte-identical to `vvc-parity-native-422-dc-search`; lossless
+rows remained exact and lossy PSNR was unchanged. The largest positive row was
+the high-depth 4:2:0 lossy case, which moved from 0.53 fps to 0.57 fps in this
+matrix run.
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-direct-luma-nodes.md
+```
+
+AV2 sanity command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-after-vvc-direct-luma-nodes \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/av2-shared-pixel-metrics-check.json
+```
+
+Result: all 12 AV2 rows were byte-identical to
+`av2-shared-pixel-metrics-check`. Totals were 83,531,302 bytes at 8.99 fps for
+`lossless+predictive` and 41,098,794 bytes at 3.82 fps for
+`qp=24+predictive`.
+
 ## References
 
 - Cargo profile settings:
