@@ -803,70 +803,88 @@ impl VvcCabacContexts {
         ctx: VvcCabacContext,
         bin: bool,
     ) {
-        cabac.context_bin_count += 1;
-        let model = match ctx {
-            VvcCabacContext::SplitFlag(idx) => &self.split_flag[idx as usize],
-            VvcCabacContext::SplitQtFlag(idx) => &self.split_qt_flag[idx as usize],
-            VvcCabacContext::MttSplitCuVerticalFlag(idx) => {
-                &self.mtt_split_cu_vertical_flag[idx as usize]
+        let record_dump = cabac.records_dump();
+        let trace = vvc_cabac_trace_enabled();
+        if record_dump || trace {
+            if record_dump {
+                cabac.context_bin_count += 1;
             }
-            VvcCabacContext::MttSplitCuBinaryFlag(idx) => {
-                &self.mtt_split_cu_binary_flag[idx as usize]
+            let model = match ctx {
+                VvcCabacContext::SplitFlag(idx) => &self.split_flag[idx as usize],
+                VvcCabacContext::SplitQtFlag(idx) => &self.split_qt_flag[idx as usize],
+                VvcCabacContext::MttSplitCuVerticalFlag(idx) => {
+                    &self.mtt_split_cu_vertical_flag[idx as usize]
+                }
+                VvcCabacContext::MttSplitCuBinaryFlag(idx) => {
+                    &self.mtt_split_cu_binary_flag[idx as usize]
+                }
+                VvcCabacContext::MultiRefLineIdx(idx) => &self.multi_ref_line_idx[idx as usize],
+                VvcCabacContext::IntraLumaMpmFlag => &self.intra_luma_mpm_flag,
+                VvcCabacContext::IntraLumaPlanarFlag(idx) => {
+                    &self.intra_luma_planar_flag[idx as usize]
+                }
+                VvcCabacContext::CclmModeFlag => &self.cclm_mode_flag,
+                VvcCabacContext::IntraChromaPredMode(idx) => {
+                    &self.intra_chroma_pred_mode[idx as usize]
+                }
+                VvcCabacContext::QtCbfY(idx) => &self.qt_cbf_y[idx as usize],
+                VvcCabacContext::QtCbfCb(idx) => &self.qt_cbf_cb[idx as usize],
+                VvcCabacContext::QtCbfCr(idx) => &self.qt_cbf_cr[idx as usize],
+                VvcCabacContext::TransformSkipFlag(idx) => &self.transform_skip_flag[idx as usize],
+                VvcCabacContext::BdpcmMode(idx) => &self.bdpcm_mode[idx as usize],
+                VvcCabacContext::MtsIdx(idx) => &self.mts_idx[idx as usize],
+                VvcCabacContext::CuSkipFlag(idx) => &self.cu_skip_flag[idx as usize],
+                VvcCabacContext::PredModeIbcFlag(idx) => &self.pred_mode_ibc_flag[idx as usize],
+                VvcCabacContext::GeneralMergeFlag(idx) => &self.general_merge_flag[idx as usize],
+                VvcCabacContext::AbsMvdGreater0Flag(idx) => {
+                    &self.abs_mvd_greater0_flag[idx as usize]
+                }
+                VvcCabacContext::AbsMvdGreater1Flag(idx) => {
+                    &self.abs_mvd_greater1_flag[idx as usize]
+                }
+                VvcCabacContext::CuCodedFlag(idx) => &self.cu_coded_flag[idx as usize],
+                VvcCabacContext::LastSigCoeffXPrefix(idx) => {
+                    &self.last_sig_coeff_x_prefix[idx as usize]
+                }
+                VvcCabacContext::LastSigCoeffYPrefix(idx) => {
+                    &self.last_sig_coeff_y_prefix[idx as usize]
+                }
+                VvcCabacContext::SbCodedFlag(idx) => &self.sb_coded_flag[idx as usize],
+                VvcCabacContext::SigCoeffFlag(idx) => &self.sig_coeff_flag[idx as usize],
+                VvcCabacContext::ParLevelFlag(idx) => &self.par_level_flag[idx as usize],
+                VvcCabacContext::AbsLevelGtxFlag(idx) => &self.abs_level_gtx_flag[idx as usize],
+                VvcCabacContext::CoeffSignFlag(idx) => &self.coeff_sign_flag[idx as usize],
+                VvcCabacContext::PredModePltFlag => &self.pred_mode_plt_flag,
+                VvcCabacContext::PaletteTransposeFlag => &self.palette_transpose_flag,
+                VvcCabacContext::CopyAbovePaletteIndicesFlag => {
+                    &self.copy_above_palette_indices_flag
+                }
+                VvcCabacContext::RunCopyFlag(idx) => &self.run_copy_flag[idx as usize],
+            };
+            if record_dump {
+                if let Some(ctx_id) = ctx.rtl_context_id() {
+                    cabac
+                        .semantic_symbols
+                        .push(VvcCabacDumpSymbol::bin_ctx(bin, ctx_id));
+                    cabac.context_events.push(VvcCabacDumpContextEvent {
+                        ctx_id,
+                        bin,
+                        range: cabac.range as u16,
+                        lps: model.lps(cabac.range),
+                        mps: model.mps(),
+                    });
+                }
             }
-            VvcCabacContext::MultiRefLineIdx(idx) => &self.multi_ref_line_idx[idx as usize],
-            VvcCabacContext::IntraLumaMpmFlag => &self.intra_luma_mpm_flag,
-            VvcCabacContext::IntraLumaPlanarFlag(idx) => &self.intra_luma_planar_flag[idx as usize],
-            VvcCabacContext::CclmModeFlag => &self.cclm_mode_flag,
-            VvcCabacContext::IntraChromaPredMode(idx) => &self.intra_chroma_pred_mode[idx as usize],
-            VvcCabacContext::QtCbfY(idx) => &self.qt_cbf_y[idx as usize],
-            VvcCabacContext::QtCbfCb(idx) => &self.qt_cbf_cb[idx as usize],
-            VvcCabacContext::QtCbfCr(idx) => &self.qt_cbf_cr[idx as usize],
-            VvcCabacContext::TransformSkipFlag(idx) => &self.transform_skip_flag[idx as usize],
-            VvcCabacContext::BdpcmMode(idx) => &self.bdpcm_mode[idx as usize],
-            VvcCabacContext::MtsIdx(idx) => &self.mts_idx[idx as usize],
-            VvcCabacContext::CuSkipFlag(idx) => &self.cu_skip_flag[idx as usize],
-            VvcCabacContext::PredModeIbcFlag(idx) => &self.pred_mode_ibc_flag[idx as usize],
-            VvcCabacContext::GeneralMergeFlag(idx) => &self.general_merge_flag[idx as usize],
-            VvcCabacContext::AbsMvdGreater0Flag(idx) => &self.abs_mvd_greater0_flag[idx as usize],
-            VvcCabacContext::AbsMvdGreater1Flag(idx) => &self.abs_mvd_greater1_flag[idx as usize],
-            VvcCabacContext::CuCodedFlag(idx) => &self.cu_coded_flag[idx as usize],
-            VvcCabacContext::LastSigCoeffXPrefix(idx) => {
-                &self.last_sig_coeff_x_prefix[idx as usize]
+            if trace {
+                eprintln!(
+                    "FF_CABAC {:?} range={} lps={} mps={} bin={}",
+                    ctx,
+                    cabac.range,
+                    model.lps(cabac.range),
+                    u8::from(model.mps()),
+                    u8::from(bin)
+                );
             }
-            VvcCabacContext::LastSigCoeffYPrefix(idx) => {
-                &self.last_sig_coeff_y_prefix[idx as usize]
-            }
-            VvcCabacContext::SbCodedFlag(idx) => &self.sb_coded_flag[idx as usize],
-            VvcCabacContext::SigCoeffFlag(idx) => &self.sig_coeff_flag[idx as usize],
-            VvcCabacContext::ParLevelFlag(idx) => &self.par_level_flag[idx as usize],
-            VvcCabacContext::AbsLevelGtxFlag(idx) => &self.abs_level_gtx_flag[idx as usize],
-            VvcCabacContext::CoeffSignFlag(idx) => &self.coeff_sign_flag[idx as usize],
-            VvcCabacContext::PredModePltFlag => &self.pred_mode_plt_flag,
-            VvcCabacContext::PaletteTransposeFlag => &self.palette_transpose_flag,
-            VvcCabacContext::CopyAbovePaletteIndicesFlag => &self.copy_above_palette_indices_flag,
-            VvcCabacContext::RunCopyFlag(idx) => &self.run_copy_flag[idx as usize],
-        };
-        if let Some(ctx_id) = ctx.rtl_context_id() {
-            cabac
-                .semantic_symbols
-                .push(VvcCabacDumpSymbol::bin_ctx(bin, ctx_id));
-            cabac.context_events.push(VvcCabacDumpContextEvent {
-                ctx_id,
-                bin,
-                range: cabac.range as u16,
-                lps: model.lps(cabac.range),
-                mps: model.mps(),
-            });
-        }
-        if std::env::var_os("FRAMEFORGE_CABAC_TRACE").is_some() {
-            eprintln!(
-                "FF_CABAC {:?} range={} lps={} mps={} bin={}",
-                ctx,
-                cabac.range,
-                model.lps(cabac.range),
-                u8::from(model.mps()),
-                u8::from(bin)
-            );
         }
         match ctx {
             VvcCabacContext::SplitFlag(idx) => self.split_flag[idx as usize].encode(cabac, bin),
@@ -945,6 +963,13 @@ impl VvcCabacContexts {
             }
         }
     }
+}
+
+fn vvc_cabac_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("FRAMEFORGE_CABAC_TRACE").is_some_and(|value| value != "0")
+    })
 }
 
 #[derive(Debug, Clone)]

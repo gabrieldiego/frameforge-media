@@ -196,7 +196,7 @@ rustc -vV
 Example workflow:
 
 ```sh
-PGO_DIR=/tmp/frameforge-pgo
+PGO_DIR=verification/generated/profiling/pgo
 HOST_TARGET=x86_64-unknown-linux-gnu
 LLVM_PROFDATA="$HOME/.rustup/toolchains/$(rustup show active-toolchain | cut -d' ' -f1)/lib/rustlib/$HOST_TARGET/bin/llvm-profdata"
 
@@ -208,7 +208,8 @@ RUSTFLAGS="-Cprofile-generate=$PGO_DIR" \
   --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale"
 
 ./target/$HOST_TARGET/release/ff encode input_640x360_30_1f_yuv444p8.yuv \
-  --encode av2:/tmp/frameforge-pgo-av2.obu --recon /tmp/frameforge-pgo-av2.yuv
+  --encode av2:verification/generated/profiling/frameforge-pgo-av2.obu \
+  --recon verification/generated/profiling/frameforge-pgo-av2.yuv
 
 "$LLVM_PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"
 
@@ -313,7 +314,8 @@ RUSTFLAGS="-Cdebuginfo=1 -Cforce-frame-pointers=yes -Csymbol-mangling-version=v0
   make build
 
 perf record -F 99 --call-graph fp -- ./ff encode input_640x360_30_1f_yuv444p8.yuv \
-  --encode av2:/tmp/frameforge-profile.obu --recon /tmp/frameforge-profile.yuv
+  --encode av2:verification/generated/profiling/frameforge-profile.obu \
+  --recon verification/generated/profiling/frameforge-profile.yuv
 perf report
 ```
 
@@ -1195,6 +1197,96 @@ make validate-geometry-sweep
 ```
 
 Both checks passed after this checkpoint.
+
+## VVC Lean CABAC Events
+
+Checkpoint: `vvc-cabac-lean-events`.
+
+The VVC CABAC writer used to collect CABAC dump symbols, semantic symbols,
+context events, and bin-engine events on every normal encode. Those vectors are
+only needed for explicit CABAC dump and test paths, but release encodes paid for
+per-bin pushes, repeated context model lookups, and debug trace environment
+checks. The writer now records those vectors only when constructed through the
+dump-enabled path; normal encode uses the same arithmetic state machine and
+emits identical bits without the analysis bookkeeping. The two CABAC trace
+environment flags are cached once with `OnceLock`.
+
+This change also adds compile-gated VVC stage timing:
+
+```sh
+make build VVC_STATS=1
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_stage_scene420_lossless_1f.jsonl \
+  ./ff encode /media/gabriel/storage/YUV/aomctc/b2_scc/SceneComposition_1.y4m \
+  --frames 1 \
+  --encode vvc:verification/generated/profiling/vvc_stage_scene420_lossless_1f.vvc \
+  --recon verification/generated/profiling/vvc_stage_scene420_lossless_1f_recon.yuv \
+  --set lossless
+python3 scripts/summarize_encoder_instrumentation.py \
+  --vvc-stats scene420_lossless/frameforge=verification/generated/profiling/vvc_stage_scene420_lossless_1f.jsonl
+```
+
+Normal builds do not compile this instrumentation. Generated traces and
+profiling artifacts should stay under `verification/generated/`.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-cabac-lean-events \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-carried-reconstruction.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.77 | 1.65 | +114.3% | 0 | 0 |
+| lossy | 0.76 | 1.00 | +31.6% | 0 | 0 |
+
+All rows were byte-identical to `vvc-carried-reconstruction`; lossless rows
+remained exact and lossy PSNR was unchanged.
+
+First-frame VVC stage traces on `SceneComposition_1_420` after the CABAC event
+cleanup showed:
+
+| Case | Top stage | Time share | Notes |
+|---|---|---:|---|
+| lossless | `ctu_entropy_write` | 74.8% | residual extraction is now secondary at 20.0% |
+| lossy | `ctu_quantize` | 71.0% | entropy write is secondary at 25.0% |
+
+The next VVC parity work should split by path: entropy-symbol/CABAC
+specialization for lossless and transform/quantization/reconstruction
+specialization for lossy.
+
+AV2 sanity command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-after-vvc-cabac-lean-events \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/av2-after-vvc-carried-reconstruction.json
+```
+
+AV2 sanity result:
+
+| Mode | Bytes | FPS | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|
+| lossless+predictive | 83,531,302 | 8.60 | 0 | 0 |
+| qp=24+predictive | 41,098,794 | 3.67 | 0 | 0 |
+
+Additional validation:
+
+```sh
+cargo test -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs --features "vvc vvc-stats"
+make test
+make validate-geometry-sweep
+```
+
+All checks passed after this checkpoint.
 
 ## References
 

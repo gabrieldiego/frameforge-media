@@ -85,6 +85,7 @@ pub(in crate::vvc) struct VvcCabacEncoder {
     pub(in crate::vvc) context_events: Vec<VvcCabacDumpContextEvent>,
     pub(in crate::vvc) context_bin_count: usize,
     pub(in crate::vvc) bin_engine_events: Vec<VvcCabacDumpBinEngineEvent>,
+    record_dump: bool,
     pub(in crate::vvc) low: u32,
     pub(in crate::vvc) range: u32,
     pub(in crate::vvc) buffered_byte: u32,
@@ -94,6 +95,14 @@ pub(in crate::vvc) struct VvcCabacEncoder {
 
 impl VvcCabacEncoder {
     pub(in crate::vvc) fn new() -> Self {
+        Self::with_dump_recording(false)
+    }
+
+    pub(in crate::vvc) fn new_with_dump() -> Self {
+        Self::with_dump_recording(true)
+    }
+
+    fn with_dump_recording(record_dump: bool) -> Self {
         Self {
             bits: Vec::new(),
             dump_symbols: Vec::new(),
@@ -101,12 +110,17 @@ impl VvcCabacEncoder {
             context_events: Vec::new(),
             context_bin_count: 0,
             bin_engine_events: Vec::new(),
+            record_dump,
             low: 0,
             range: 0,
             buffered_byte: 0,
             num_buffered_bytes: 0,
             bits_left: 0,
         }
+    }
+
+    pub(in crate::vvc) fn records_dump(&self) -> bool {
+        self.record_dump
     }
 
     pub(in crate::vvc) fn start(&mut self) {
@@ -118,11 +132,14 @@ impl VvcCabacEncoder {
     }
 
     pub(in crate::vvc) fn encode_bin(&mut self, bin: bool, event: VvcCtxEvent) {
-        self.dump_symbols
-            .push(VvcCabacDumpSymbol::bin_ctx_direct(bin, event));
-        let low_in = self.low;
-        let range_in = self.range as u16;
-        let bits_left_in = self.bits_left as u8;
+        let record_dump = self.record_dump;
+        let (low_in, range_in, bits_left_in) = if record_dump {
+            self.dump_symbols
+                .push(VvcCabacDumpSymbol::bin_ctx_direct(bin, event));
+            (self.low, self.range as u16, self.bits_left as u8)
+        } else {
+            (0, 0, 0)
+        };
         let lps = event.lps as u32;
         self.range -= lps;
         if bin != event.mps {
@@ -141,58 +158,67 @@ impl VvcCabacEncoder {
             self.range <<= num_bits;
         }
         let write_out = self.bits_left < 12;
-        self.bin_engine_events.push(VvcCabacDumpBinEngineEvent {
-            kind: VvcCabacDumpSymbol::BIN_CTX,
-            bin,
-            lps: event.lps,
-            mps: event.mps,
-            low_in,
-            range_in,
-            bits_left_in,
-            low_out: self.low,
-            range_out: self.range as u16,
-            bits_left_out: self.bits_left as u8,
-            write_out,
-        });
+        if record_dump {
+            self.bin_engine_events.push(VvcCabacDumpBinEngineEvent {
+                kind: VvcCabacDumpSymbol::BIN_CTX,
+                bin,
+                lps: event.lps,
+                mps: event.mps,
+                low_in,
+                range_in,
+                bits_left_in,
+                low_out: self.low,
+                range_out: self.range as u16,
+                bits_left_out: self.bits_left as u8,
+                write_out,
+            });
+        }
         if write_out {
             self.write_out();
         }
     }
 
     pub(in crate::vvc) fn encode_bin_ep(&mut self, bin: bool) {
-        self.dump_symbols.push(VvcCabacDumpSymbol::bin_ep(bin));
-        self.semantic_symbols.push(VvcCabacDumpSymbol::bin_ep(bin));
-        let low_in = self.low;
-        let range_in = self.range as u16;
-        let bits_left_in = self.bits_left as u8;
+        let record_dump = self.record_dump;
+        let (low_in, range_in, bits_left_in) = if record_dump {
+            self.dump_symbols.push(VvcCabacDumpSymbol::bin_ep(bin));
+            self.semantic_symbols.push(VvcCabacDumpSymbol::bin_ep(bin));
+            (self.low, self.range as u16, self.bits_left as u8)
+        } else {
+            (0, 0, 0)
+        };
         self.low <<= 1;
         if bin {
             self.low += self.range;
         }
         self.bits_left -= 1;
-        self.bin_engine_events.push(VvcCabacDumpBinEngineEvent {
-            kind: VvcCabacDumpSymbol::BIN_EP,
-            bin,
-            lps: 0,
-            mps: false,
-            low_in,
-            range_in,
-            bits_left_in,
-            low_out: self.low,
-            range_out: self.range as u16,
-            bits_left_out: self.bits_left as u8,
-            write_out: self.bits_left < 12,
-        });
+        if record_dump {
+            self.bin_engine_events.push(VvcCabacDumpBinEngineEvent {
+                kind: VvcCabacDumpSymbol::BIN_EP,
+                bin,
+                lps: 0,
+                mps: false,
+                low_in,
+                range_in,
+                bits_left_in,
+                low_out: self.low,
+                range_out: self.range as u16,
+                bits_left_out: self.bits_left as u8,
+                write_out: self.bits_left < 12,
+            });
+        }
         if self.bits_left < 12 {
             self.write_out();
         }
     }
 
     pub(in crate::vvc) fn encode_bins_ep(&mut self, bins: u32, num_bins: u32) {
-        self.dump_symbols
-            .push(VvcCabacDumpSymbol::bins_ep(bins, num_bins));
-        self.semantic_symbols
-            .push(VvcCabacDumpSymbol::bins_ep(bins, num_bins));
+        if self.record_dump {
+            self.dump_symbols
+                .push(VvcCabacDumpSymbol::bins_ep(bins, num_bins));
+            self.semantic_symbols
+                .push(VvcCabacDumpSymbol::bins_ep(bins, num_bins));
+        }
         if self.range == 256 {
             self.encode_aligned_bins_ep(bins, num_bins);
             return;
@@ -245,11 +271,14 @@ impl VvcCabacEncoder {
     }
 
     pub(in crate::vvc) fn encode_bin_trm(&mut self, bin: bool) {
-        self.dump_symbols.push(VvcCabacDumpSymbol::bin_trm(bin));
-        self.semantic_symbols.push(VvcCabacDumpSymbol::bin_trm(bin));
-        let low_in = self.low;
-        let range_in = self.range as u16;
-        let bits_left_in = self.bits_left as u8;
+        let record_dump = self.record_dump;
+        let (low_in, range_in, bits_left_in) = if record_dump {
+            self.dump_symbols.push(VvcCabacDumpSymbol::bin_trm(bin));
+            self.semantic_symbols.push(VvcCabacDumpSymbol::bin_trm(bin));
+            (self.low, self.range as u16, self.bits_left as u8)
+        } else {
+            (0, 0, 0)
+        };
         self.range -= 2;
         if bin {
             self.low += self.range;
@@ -262,19 +291,21 @@ impl VvcCabacEncoder {
             self.bits_left -= 1;
         }
         let write_out = self.bits_left < 12;
-        self.bin_engine_events.push(VvcCabacDumpBinEngineEvent {
-            kind: VvcCabacDumpSymbol::BIN_TRM,
-            bin,
-            lps: 0,
-            mps: false,
-            low_in,
-            range_in,
-            bits_left_in,
-            low_out: self.low,
-            range_out: self.range as u16,
-            bits_left_out: self.bits_left as u8,
-            write_out,
-        });
+        if record_dump {
+            self.bin_engine_events.push(VvcCabacDumpBinEngineEvent {
+                kind: VvcCabacDumpSymbol::BIN_TRM,
+                bin,
+                lps: 0,
+                mps: false,
+                low_in,
+                range_in,
+                bits_left_in,
+                low_out: self.low,
+                range_out: self.range as u16,
+                bits_left_out: self.bits_left as u8,
+                write_out,
+            });
+        }
         if write_out {
             self.write_out();
         }

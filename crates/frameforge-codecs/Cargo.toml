@@ -15,6 +15,7 @@ av2 = []
 av2-lossy-stats = ["av2"]
 av2-sb-bit-profile = ["av2"]
 vvc = []
+vvc-stats = ["vvc"]
 
 [lints]
 workspace = true

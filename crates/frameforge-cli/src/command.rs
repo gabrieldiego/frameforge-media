@@ -1463,6 +1463,7 @@ fn kind_name(kind: StageKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1479,7 +1480,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time before UNIX epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("frameforge_media_{name}_{unique}.{extension}"))
+        let dir = std::env::current_dir()
+            .expect("current working directory")
+            .join("target/frameforge-test-output");
+        fs::create_dir_all(&dir).expect("create test output directory");
+        dir.join(format!("frameforge_media_{name}_{unique}.{extension}"))
     }
 
     fn write_y4m(path: &Path, header: &str, frames: &[Vec<u8>]) {

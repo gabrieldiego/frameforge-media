@@ -7,8 +7,12 @@
 //! before FrameForge can encode arbitrary input pictures.
 
 use std::io::{Cursor, Read, Write};
+#[cfg(feature = "vvc-stats")]
+use std::time::Instant;
 
 use crate::instrumentation::CountingWriter;
+#[cfg(feature = "vvc-stats")]
+use crate::instrumentation::JsonlInstrumentationSink;
 use crate::picture::{
     chroma_subsample_x as planar_chroma_subsample_x,
     chroma_subsample_y as planar_chroma_subsample_y, read_input_frame, ChromaSampling, FrameLimit,
@@ -153,6 +157,114 @@ pub struct VvcEncodeFrameMetrics<'a> {
     pub bitstream_bytes: usize,
     pub source: &'a [u8],
     pub reconstruction: &'a [u8],
+}
+
+#[cfg(feature = "vvc-stats")]
+struct VvcStatsSink {
+    sink: Option<JsonlInstrumentationSink>,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcStatsSink {
+    fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            sink: JsonlInstrumentationSink::append_from_env("FRAMEFORGE_VVC_STATS")
+                .map_err(|err| err.to_string())?,
+        })
+    }
+
+    fn write_frame(&mut self, frame: &VvcFrameStats) -> Result<(), String> {
+        let Some(sink) = self.sink.as_mut() else {
+            return Ok(());
+        };
+        sink.write_json_line(&frame.to_json_line())
+            .map_err(|err| err.to_string())?;
+        sink.flush().map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+struct VvcFrameStats {
+    frame_idx: usize,
+    width: usize,
+    height: usize,
+    chroma_sampling: ChromaSampling,
+    bit_depth: SampleBitDepth,
+    lossless: bool,
+    ctu_count: usize,
+    bitstream_bytes: usize,
+    stages: Vec<VvcStageStats>,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcFrameStats {
+    fn new(
+        frame_idx: usize,
+        geometry: VvcVideoGeometry,
+        format: VvcPictureFormat,
+        lossless: bool,
+    ) -> Self {
+        Self {
+            frame_idx,
+            width: geometry.width,
+            height: geometry.height,
+            chroma_sampling: format.chroma_sampling,
+            bit_depth: format.bit_depth,
+            lossless,
+            ctu_count: vvc_picture_ctu_count(geometry),
+            bitstream_bytes: 0,
+            stages: Vec::new(),
+        }
+    }
+
+    fn add_elapsed(&mut self, name: &'static str, start: Instant) {
+        self.add_stage(name, start.elapsed().as_nanos() as u64, 1);
+    }
+
+    fn add_stage(&mut self, name: &'static str, nanos: u64, count: u64) {
+        if let Some(stage) = self.stages.iter_mut().find(|stage| stage.name == name) {
+            stage.nanos += nanos;
+            stage.count += count;
+        } else {
+            self.stages.push(VvcStageStats { name, nanos, count });
+        }
+    }
+
+    fn set_bitstream_bytes(&mut self, bitstream_bytes: usize) {
+        self.bitstream_bytes = bitstream_bytes;
+    }
+
+    fn to_json_line(&self) -> String {
+        let mut json = format!(
+            "{{\"kind\":\"frameforge.vvc.stats.v1\",\"frame_index\":{},\"width\":{},\"height\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"ctu_count\":{},\"bitstream_bytes\":{},\"stages\":[",
+            self.frame_idx,
+            self.width,
+            self.height,
+            self.chroma_sampling,
+            self.bit_depth.bits(),
+            self.lossless,
+            self.ctu_count,
+            self.bitstream_bytes
+        );
+        for (index, stage) in self.stages.iter().enumerate() {
+            if index > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                "{{\"name\":\"{}\",\"ns\":{},\"count\":{}}}",
+                stage.name, stage.nanos, stage.count
+            ));
+        }
+        json.push_str("]}");
+        json
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+struct VvcStageStats {
+    name: &'static str,
+    nanos: u64,
+    count: u64,
 }
 
 /// Luma coded-picture dimensions are rounded to this granularity before SPS/PPS
@@ -897,10 +1009,22 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         ],
     )?;
 
+    #[cfg(feature = "vvc-stats")]
+    let mut vvc_stats = VvcStatsSink::from_env()?;
+
     let mut frame_buf = vec![0; frame_len];
     let mut frame_idx = 0usize;
     while frame_limit.should_read(frame_idx) {
-        if !read_input_frame(input, &mut frame_buf, frame_idx, frame_limit, "VVC input")? {
+        #[cfg(feature = "vvc-stats")]
+        let mut frame_stats =
+            VvcFrameStats::new(frame_idx, geometry, stream_format, options.lossless);
+        #[cfg(feature = "vvc-stats")]
+        let stage_start = Instant::now();
+        let frame_available =
+            read_input_frame(input, &mut frame_buf, frame_idx, frame_limit, "VVC input")?;
+        #[cfg(feature = "vvc-stats")]
+        frame_stats.add_elapsed("read_frame", stage_start);
+        if !frame_available {
             break;
         }
         if let Some(progress) = progress.as_deref_mut() {
@@ -909,24 +1033,46 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 frame_count: frame_limit.metric_count(),
             });
         }
+        #[cfg(feature = "vvc-stats")]
+        let stage_start = Instant::now();
         let source_frame =
             sample_vvc_yuv_frame(&frame_buf, VvcEncodeParams { frames: 1 }, geometry, format)?;
+        #[cfg(feature = "vvc-stats")]
+        frame_stats.add_elapsed("sample_frame", stage_start);
         let (frame_recon_yuv, frame_bitstream_bytes) = {
             let mut frame_bitstream = CountingWriter::new(bitstream);
             if vvc_picture_ctu_count(geometry) > 1 {
+                #[cfg(feature = "vvc-stats")]
+                let stage_start = Instant::now();
                 write_annex_b_to(
                     &mut frame_bitstream,
                     &[vvc_picture_header_unit(frame_idx, slice_config)],
                 )?;
+                #[cfg(feature = "vvc-stats")]
+                frame_stats.add_elapsed("picture_header_write", stage_start);
             }
 
             let frame_recon_yuv = if stream_format.chroma_sampling == ChromaSampling::Cs444 {
                 let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
                 let mut ctu_frame = VvcSampledFrame::scratch(stream_format);
                 for region in vvc_ctu_regions(geometry) {
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_copy_source", stage_start);
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     let ctu_recon = palette::vvc_palette_444_reconstruction_yuv(&ctu_frame);
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_palette_reconstruct", stage_start);
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_recon_copy", stage_start);
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     write_annex_b_to(
                         &mut frame_bitstream,
                         &[palette::vvc_palette_444_ctu_slice_unit(
@@ -937,20 +1083,37 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             slice_config,
                         )?],
                     )?;
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_entropy_write", stage_start);
                 }
-                frame_recon.into_yuv()
+                #[cfg(feature = "vvc-stats")]
+                let stage_start = Instant::now();
+                let yuv = frame_recon.into_yuv();
+                #[cfg(feature = "vvc-stats")]
+                frame_stats.add_elapsed("frame_recon_finalize", stage_start);
+                yuv
             } else {
                 let mut frame_recon =
                     VvcReconstructionFrame::new_neutral(geometry, source_frame.format);
                 let mut ctu_frame = VvcSampledFrame::scratch(source_frame.format);
                 for region in vvc_ctu_regions(geometry) {
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_copy_source", stage_start);
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     let (quantized, ctu_recon_yuv) = if lossless_residual {
                         (quantize_vvc_frame_lossless_residual(&ctu_frame), None)
                     } else {
                         let quantized = quantize_vvc_frame_with_reconstruction(&ctu_frame);
                         (quantized.quantized, Some(quantized.reconstruction_yuv))
                     };
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_quantize", stage_start);
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     if lossless_residual {
                         frame_recon.copy_ctu_frame(region, &ctu_frame)?;
                     } else {
@@ -962,6 +1125,10 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                                 .expect("lossy residual CTU carries reconstructed samples"),
                         )?;
                     }
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_recon_copy", stage_start);
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
                     write_annex_b_to(
                         &mut frame_bitstream,
                         &[if lossless_residual {
@@ -985,17 +1152,32 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             )?
                         }],
                     )?;
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_entropy_write", stage_start);
                 }
-                frame_recon.into_yuv()
+                #[cfg(feature = "vvc-stats")]
+                let stage_start = Instant::now();
+                let yuv = frame_recon.into_yuv();
+                #[cfg(feature = "vvc-stats")]
+                frame_stats.add_elapsed("frame_recon_finalize", stage_start);
+                yuv
             };
             (frame_recon_yuv, frame_bitstream.bytes_written())
         };
+        #[cfg(feature = "vvc-stats")]
+        frame_stats.set_bitstream_bytes(frame_bitstream_bytes);
         if let Some(writer) = reconstruction.as_deref_mut() {
+            #[cfg(feature = "vvc-stats")]
+            let stage_start = Instant::now();
             writer.write_all(&frame_recon_yuv).map_err(|err| {
                 format!("failed to write VVC reconstruction frame {frame_idx}: {err}")
             })?;
+            #[cfg(feature = "vvc-stats")]
+            frame_stats.add_elapsed("write_reconstruction", stage_start);
         }
         if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
+            #[cfg(feature = "vvc-stats")]
+            let stage_start = Instant::now();
             frame_metrics(VvcEncodeFrameMetrics {
                 frame_idx,
                 frame_count: frame_limit.metric_count(),
@@ -1003,7 +1185,11 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 source: &frame_buf,
                 reconstruction: &frame_recon_yuv,
             });
+            #[cfg(feature = "vvc-stats")]
+            frame_stats.add_elapsed("frame_metrics", stage_start);
         }
+        #[cfg(feature = "vvc-stats")]
+        vvc_stats.write_frame(&frame_stats)?;
         frame_idx += 1;
     }
 
@@ -1797,7 +1983,7 @@ fn vvc_ctu_partition_cabac_dump(
     debug_assert!((8..=64).contains(&params.root_height));
     debug_assert!(params.visible_width >= 8 && params.visible_height >= 8);
 
-    let mut cabac = VvcCabacEncoder::new();
+    let mut cabac = VvcCabacEncoder::new_with_dump();
     cabac.start();
     encode_ctu_partition_body(&mut cabac, params, slice_config);
     cabac.encode_bin_trm(true);

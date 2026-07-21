@@ -47,6 +47,22 @@ class SbRow:
     categories: dict[str, int]
 
 
+@dataclass(frozen=True)
+class VvcStageRow:
+    case: str
+    source: str
+    frame_index: int
+    width: int
+    height: int
+    chroma_sampling: str
+    bit_depth: int
+    lossless: bool
+    bitstream_bytes: int
+    stage: str
+    nanos: int
+    count: int
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -74,6 +90,13 @@ def main() -> int:
         help="stderr log containing gated FRAMEFORGE_AV2_LOSSY_STATS lines",
     )
     parser.add_argument(
+        "--vvc-stats",
+        action="append",
+        default=[],
+        metavar="[CASE/]SOURCE=PATH",
+        help="VVC stage timing JSONL from FRAMEFORGE_VVC_STATS",
+    )
+    parser.add_argument(
         "--baseline-source",
         default="frameforge",
         help="source name used as the numerator for pairwise SB ratios",
@@ -84,13 +107,15 @@ def main() -> int:
     sb_specs = [parse_spec(value) for value in args.sb_bits]
     field_specs = [parse_spec(value) for value in args.field_trace]
     lossy_specs = [parse_spec(value) for value in args.lossy_stats_log]
+    vvc_specs = [parse_spec(value) for value in args.vvc_stats]
 
-    if not sb_specs and not field_specs and not lossy_specs:
+    if not sb_specs and not field_specs and not lossy_specs and not vvc_specs:
         parser.error("at least one instrumentation input is required")
 
     sb_rows = [row for spec in sb_specs for row in read_sb_rows(spec)]
     field_rows = [row for spec in field_specs for row in read_field_rows(spec)]
     lossy_rows = [row for spec in lossy_specs for row in read_lossy_stats_rows(spec)]
+    vvc_rows = [row for spec in vvc_specs for row in read_vvc_stage_rows(spec)]
 
     if sb_rows:
         print_sb_summary(sb_rows)
@@ -100,6 +125,8 @@ def main() -> int:
         print_field_summary(field_rows, args.top)
     if lossy_rows:
         print_lossy_stats_summary(lossy_rows)
+    if vvc_rows:
+        print_vvc_stage_summary(vvc_rows, args.top)
     return 0
 
 
@@ -322,6 +349,74 @@ def print_lossy_stats_summary(rows: list[tuple[str, str, str, dict[str, int]]]) 
     for (case, source, label), values in sorted(totals.items()):
         summary = ", ".join(f"{key}={value}" for key, value in sorted(values.items()))
         print(f"| {case} | {source} | `{label}` | {summary} |")
+    print()
+
+
+def read_vvc_stage_rows(spec: TraceSpec) -> list[VvcStageRow]:
+    rows = []
+    for record in read_jsonl(spec.path):
+        if record.get("kind") != "frameforge.vvc.stats.v1":
+            continue
+        source = spec.source or str(record.get("source") or spec.path.stem)
+        for stage in record.get("stages", []):
+            rows.append(
+                VvcStageRow(
+                    case=spec.case,
+                    source=source,
+                    frame_index=int(record.get("frame_index", 0)),
+                    width=int(record.get("width", 0)),
+                    height=int(record.get("height", 0)),
+                    chroma_sampling=str(record.get("chroma_sampling", "")),
+                    bit_depth=int(record.get("bit_depth", 0)),
+                    lossless=bool(record.get("lossless", False)),
+                    bitstream_bytes=int(record.get("bitstream_bytes", 0)),
+                    stage=str(stage.get("name", "")),
+                    nanos=int(stage.get("ns", 0)),
+                    count=int(stage.get("count", 0)),
+                )
+            )
+    return rows
+
+
+def print_vvc_stage_summary(rows: list[VvcStageRow], top: int) -> None:
+    totals: dict[tuple[str, str, str], list[int]] = defaultdict(lambda: [0, 0])
+    total_nanos_by_case: dict[tuple[str, str], int] = defaultdict(int)
+    frame_totals: dict[tuple[str, str], set[int]] = defaultdict(set)
+    bytes_by_case: dict[tuple[str, str], int] = defaultdict(int)
+    byte_frames: set[tuple[str, str, int]] = set()
+    for row in rows:
+        key = (row.case, row.source, row.stage)
+        totals[key][0] += row.nanos
+        totals[key][1] += row.count
+        total_nanos_by_case[(row.case, row.source)] += row.nanos
+        frame_totals[(row.case, row.source)].add(row.frame_index)
+        frame_key = (row.case, row.source, row.frame_index)
+        if frame_key not in byte_frames:
+            bytes_by_case[(row.case, row.source)] += row.bitstream_bytes
+            byte_frames.add(frame_key)
+
+    print("## VVC Stage Timing Summary")
+    print("| Case | Source | Stage | Count | Time ms | Share | Avg us/call |")
+    print("|---|---|---|---:|---:|---:|---:|")
+    sorted_rows = sorted(totals.items(), key=lambda item: item[1][0], reverse=True)
+    for (case, source, stage), (nanos, count) in sorted_rows[:top]:
+        total_nanos = total_nanos_by_case[(case, source)]
+        share = nanos * 100.0 / total_nanos if total_nanos else 0.0
+        avg_us = nanos / count / 1000.0 if count else 0.0
+        print(
+            f"| {case} | {source} | `{stage}` | {count} | {nanos / 1_000_000.0:.3f} | "
+            f"{share:.1f}% | {avg_us:.3f} |"
+        )
+    print()
+
+    print("## VVC Stage Trace Totals")
+    print("| Case | Source | Frames | Encoded bytes | Timed ms |")
+    print("|---|---|---:|---:|---:|")
+    for case, source in sorted(total_nanos_by_case):
+        print(
+            f"| {case} | {source} | {len(frame_totals[(case, source)])} | "
+            f"{bytes_by_case[(case, source)]} | {total_nanos_by_case[(case, source)] / 1_000_000.0:.3f} |"
+        )
     print()
 
 

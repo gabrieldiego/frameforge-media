@@ -189,7 +189,7 @@ impl VvcCtuCabacGenerator {
     }
 
     pub(in crate::vvc) fn emit(&mut self, cabac: &mut VvcCabacEncoder, op: VvcCtuCabacOp) {
-        if std::env::var_os("FRAMEFORGE_CABAC_OP_TRACE").is_some() {
+        if vvc_cabac_op_trace_enabled() {
             eprintln!("FF_CABAC_OP {op:?}");
         }
         match op {
@@ -888,4 +888,11 @@ impl VvcCtuCabacGenerator {
         }
         node.width >= node.height
     }
+}
+
+fn vvc_cabac_op_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("FRAMEFORGE_CABAC_OP_TRACE").is_some_and(|value| value != "0")
+    })
 }

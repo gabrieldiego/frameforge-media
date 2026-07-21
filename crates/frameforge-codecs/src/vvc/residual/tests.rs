@@ -578,7 +578,7 @@ fn vvc_residual_ac_symbol_stream_uses_spec_context_derivations() {
         .any(|symbol| matches!(symbol, VvcResidualCabacSymbol::CoeffSignPattern { .. })));
 
     let mut contexts = VvcCabacContexts::new();
-    let mut cabac = VvcCabacEncoder::new();
+    let mut cabac = VvcCabacEncoder::new_with_dump();
     cabac.start();
     let mut residual =
         VvcResidualCabacEncoder::new(&mut contexts, vvc_test_slice_config().residual_options());

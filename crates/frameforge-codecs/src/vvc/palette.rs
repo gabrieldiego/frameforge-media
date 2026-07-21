@@ -85,7 +85,7 @@ pub fn vvc_palette_444_cabac_dump_json(
         ));
     }
 
-    let cabac = vvc_palette_444_cabac_encoder(&frame);
+    let cabac = vvc_palette_444_cabac_encoder_with_dump(&frame);
     let semantic_symbols = cabac.semantic_symbols.clone();
     let cabac_bits = cabac.finish();
     let cabac_bytes = bits_to_padded_bytes(&cabac_bits);
@@ -572,7 +572,21 @@ fn vvc_palette_444_cabac_bits(frame: &VvcSampledFrame) -> Vec<bool> {
 }
 
 fn vvc_palette_444_cabac_encoder(frame: &VvcSampledFrame) -> VvcCabacEncoder {
+    vvc_palette_444_cabac_encoder_with_dump_recording(frame, false)
+}
+
+fn vvc_palette_444_cabac_encoder_with_dump(frame: &VvcSampledFrame) -> VvcCabacEncoder {
+    vvc_palette_444_cabac_encoder_with_dump_recording(frame, true)
+}
+
+fn vvc_palette_444_cabac_encoder_with_dump_recording(
+    frame: &VvcSampledFrame,
+    record_dump: bool,
+) -> VvcCabacEncoder {
     let mut cabac = VvcCabacEncoder::new();
+    if record_dump {
+        cabac = VvcCabacEncoder::new_with_dump();
+    }
     let mut ctx = VvcCabacContexts::with_slice_qp(VVC_PALETTE_LOSSLESS_SLICE_QP);
     let mut predictor_mode = VvcPalettePredictorMode::SignalNewEntry;
     let mut ibc_search = VvcIbcHashSearch::new();
@@ -600,7 +614,7 @@ fn vvc_palette_444_cabac_encoder(frame: &VvcSampledFrame) -> VvcCabacEncoder {
 
 #[cfg(test)]
 pub(super) fn vvc_palette_444_cabac_context_bins(frame: &VvcSampledFrame) -> Vec<(u16, bool)> {
-    vvc_palette_444_cabac_encoder(frame)
+    vvc_palette_444_cabac_encoder_with_dump(frame)
         .context_events
         .into_iter()
         .map(|event| (event.ctx_id, event.bin))

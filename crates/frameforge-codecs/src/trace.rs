@@ -107,7 +107,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("frameforge-trace-{unique}.jsonl"));
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target/frameforge-test-output");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("frameforge-trace-{unique}.jsonl"));
 
         {
             let mut sink = TraceSink::create(&path).unwrap();

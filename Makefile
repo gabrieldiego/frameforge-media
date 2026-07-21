@@ -4,11 +4,14 @@ PRODUCT_FEATURES ?= codec-av2 codec-vvc filter-pattern filter-identity filter-cr
 CARGO_FEATURES ?= all
 AV2_SB_BITS ?= 0
 AV2_LOSSY_STATS ?= 0
+VVC_STATS ?= 0
 AV2_SB_BITS_FEATURE := $(if $(filter 1 true yes,$(AV2_SB_BITS)),frameforge-codecs/av2-sb-bit-profile,)
 AV2_LOSSY_STATS_FEATURE := $(if $(filter 1 true yes,$(AV2_LOSSY_STATS)),frameforge-codecs/av2-lossy-stats,)
+VVC_STATS_FEATURE := $(if $(filter 1 true yes,$(VVC_STATS)),frameforge-codecs/vvc-stats,)
 AV2_ANALYSIS_FEATURES := $(strip $(AV2_SB_BITS_FEATURE) $(AV2_LOSSY_STATS_FEATURE))
+VVC_ANALYSIS_FEATURES := $(strip $(VVC_STATS_FEATURE))
 CARGO_BASE_FEATURES := $(if $(filter all,$(strip $(CARGO_FEATURES))),$(PRODUCT_FEATURES),$(strip $(CARGO_FEATURES)))
-CARGO_FLAGS := $(if $(strip $(CARGO_BASE_FEATURES)),--features "$(CARGO_BASE_FEATURES)",) $(if $(strip $(AV2_ANALYSIS_FEATURES)),--features "$(AV2_ANALYSIS_FEATURES)",)
+CARGO_FLAGS := $(if $(strip $(CARGO_BASE_FEATURES)),--features "$(CARGO_BASE_FEATURES)",) $(if $(strip $(AV2_ANALYSIS_FEATURES)),--features "$(AV2_ANALYSIS_FEATURES)",) $(if $(strip $(VVC_ANALYSIS_FEATURES)),--features "$(VVC_ANALYSIS_FEATURES)",)
 PROFILE ?=
 GPROF_RUSTFLAGS ?= -C debuginfo=2 -C force-frame-pointers=yes -C symbol-mangling-version=v0 -C codegen-units=1 -C lto=no -C link-arg=-pg
 GPROF_TARGET_DIR ?= target/gprof
@@ -124,6 +127,7 @@ help:
 		'  make build            Build release CLI and copy it to ./ff' \
 		'                         Set AV2_SB_BITS=1 to compile AV2 per-superblock bit JSONL support' \
 		'                         Set AV2_LOSSY_STATS=1 to compile AV2 lossy mode/TXB stats' \
+		'                         Set VVC_STATS=1 to compile VVC stage timing JSONL support' \
 		'  make build PROFILE=gprof' \
 		'                         Build gprof sampling-friendly ./ff-gprof under target/gprof' \
 		'  make profile-av2-i-lossless' \
