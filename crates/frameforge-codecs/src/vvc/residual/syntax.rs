@@ -26,6 +26,7 @@ impl<'a> VvcResidualCabacEncoder<'a> {
         Self { contexts, options }
     }
 
+    #[cfg(test)]
     fn emit_residual_symbol(
         &mut self,
         cabac: &mut VvcCabacEncoder,
@@ -467,11 +468,148 @@ pub(in crate::vvc) enum VvcResidualCabacSymbol {
     },
 }
 
+trait VvcResidualSymbolSink {
+    fn last_sig_coeff_x_prefix(&mut self, bin_idx: u8, bin: bool);
+    fn last_sig_coeff_y_prefix(&mut self, bin_idx: u8, bin: bool);
+    fn sb_coded_flag(&mut self, x_s: u8, y_s: u8, coded: bool);
+    fn sig_coeff_flag(&mut self, x: u8, y: u8, significant: bool);
+    fn par_level_flag(&mut self, x: u8, y: u8, par_level: bool);
+    fn abs_level_gtx_flag(&mut self, x: u8, y: u8, gtx_idx: u8, greater_than: bool);
+    fn abs_remainder(&mut self, x: u8, y: u8, value: u32, rice_param: u8);
+    fn bypass_abs_level(&mut self, x: u8, y: u8, value: u32, rice_param: u8);
+    fn coeff_sign_pattern(&mut self, bits: u32, count: u8);
+}
+
+impl VvcResidualSymbolSink for Vec<VvcResidualCabacSymbol> {
+    fn last_sig_coeff_x_prefix(&mut self, bin_idx: u8, bin: bool) {
+        self.push(VvcResidualCabacSymbol::LastSigCoeffXPrefix { bin_idx, bin });
+    }
+
+    fn last_sig_coeff_y_prefix(&mut self, bin_idx: u8, bin: bool) {
+        self.push(VvcResidualCabacSymbol::LastSigCoeffYPrefix { bin_idx, bin });
+    }
+
+    fn sb_coded_flag(&mut self, x_s: u8, y_s: u8, coded: bool) {
+        self.push(VvcResidualCabacSymbol::SbCodedFlag { x_s, y_s, coded });
+    }
+
+    fn sig_coeff_flag(&mut self, x: u8, y: u8, significant: bool) {
+        self.push(VvcResidualCabacSymbol::SigCoeffFlag { x, y, significant });
+    }
+
+    fn par_level_flag(&mut self, x: u8, y: u8, par_level: bool) {
+        self.push(VvcResidualCabacSymbol::ParLevelFlag { x, y, par_level });
+    }
+
+    fn abs_level_gtx_flag(&mut self, x: u8, y: u8, gtx_idx: u8, greater_than: bool) {
+        self.push(VvcResidualCabacSymbol::AbsLevelGtxFlag {
+            x,
+            y,
+            gtx_idx,
+            greater_than,
+        });
+    }
+
+    fn abs_remainder(&mut self, x: u8, y: u8, value: u32, rice_param: u8) {
+        self.push(VvcResidualCabacSymbol::AbsRemainder {
+            x,
+            y,
+            value,
+            rice_param,
+        });
+    }
+
+    fn bypass_abs_level(&mut self, x: u8, y: u8, value: u32, rice_param: u8) {
+        self.push(VvcResidualCabacSymbol::BypassAbsLevel {
+            x,
+            y,
+            value,
+            rice_param,
+        });
+    }
+
+    fn coeff_sign_pattern(&mut self, bits: u32, count: u8) {
+        self.push(VvcResidualCabacSymbol::CoeffSignPattern { bits, count });
+    }
+}
+
+struct VvcResidualDirectSymbolSink<'a, 'b, 'c> {
+    encoder: &'a mut VvcResidualCabacEncoder<'b>,
+    cabac: &'a mut VvcCabacEncoder,
+    state: &'c VvcResidualPass1State,
+}
+
+impl VvcResidualSymbolSink for VvcResidualDirectSymbolSink<'_, '_, '_> {
+    fn last_sig_coeff_x_prefix(&mut self, bin_idx: u8, bin: bool) {
+        self.encoder.emit_last_sig_coeff_prefix_bin(
+            self.cabac,
+            self.state.config.component,
+            true,
+            self.state.config.log2_zo_tb_width,
+            bin_idx,
+            bin,
+        );
+    }
+
+    fn last_sig_coeff_y_prefix(&mut self, bin_idx: u8, bin: bool) {
+        self.encoder.emit_last_sig_coeff_prefix_bin(
+            self.cabac,
+            self.state.config.component,
+            false,
+            self.state.config.log2_zo_tb_height,
+            bin_idx,
+            bin,
+        );
+    }
+
+    fn sb_coded_flag(&mut self, x_s: u8, y_s: u8, coded: bool) {
+        self.encoder
+            .emit_sb_coded_flag(self.cabac, self.state, x_s, y_s, coded);
+    }
+
+    fn sig_coeff_flag(&mut self, x: u8, y: u8, significant: bool) {
+        self.encoder
+            .emit_sig_coeff_flag(self.cabac, self.state, x, y, significant);
+    }
+
+    fn par_level_flag(&mut self, x: u8, y: u8, par_level: bool) {
+        self.encoder
+            .emit_par_level_flag(self.cabac, self.state, x, y, par_level);
+    }
+
+    fn abs_level_gtx_flag(&mut self, x: u8, y: u8, gtx_idx: u8, greater_than: bool) {
+        self.encoder
+            .emit_abs_level_gtx_flag(self.cabac, self.state, x, y, gtx_idx, greater_than);
+    }
+
+    fn abs_remainder(&mut self, _x: u8, _y: u8, value: u32, rice_param: u8) {
+        self.cabac.encode_rem_abs_ep(value, u32::from(rice_param));
+    }
+
+    fn bypass_abs_level(&mut self, _x: u8, _y: u8, value: u32, rice_param: u8) {
+        self.cabac.encode_rem_abs_ep(value, u32::from(rice_param));
+    }
+
+    fn coeff_sign_pattern(&mut self, bits: u32, count: u8) {
+        self.cabac.encode_bins_ep(bits, u32::from(count));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcResidualCabacSymbolStream {
     pub(in crate::vvc) config: VvcResidualCtxConfig,
     pub(in crate::vvc) pass1_state: VvcResidualPass1State,
     pub(in crate::vvc) symbols: Vec<VvcResidualCabacSymbol>,
+}
+
+struct VvcResidualCoefficientPlan {
+    #[cfg(test)]
+    config: VvcResidualCtxConfig,
+    pass1_state: VvcResidualPass1State,
+    scan: [VvcScanPosition; 16],
+    last_scan_pos: usize,
+    width: usize,
+    height: usize,
 }
 
 impl VvcResidualPass1State {
@@ -683,6 +821,7 @@ impl VvcResidualPass1State {
 }
 
 impl VvcResidualCabacSymbolStream {
+    #[cfg(test)]
     pub(in crate::vvc) fn luma_coefficients(
         log2_tb_width: u8,
         log2_tb_height: u8,
@@ -696,6 +835,7 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::vvc) fn luma_transform_skip_coefficients(
         log2_tb_width: u8,
         log2_tb_height: u8,
@@ -710,6 +850,8 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(in crate::vvc) fn luma_bdpcm_transform_skip_coefficients(
         log2_tb_width: u8,
         log2_tb_height: u8,
@@ -725,6 +867,8 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(in crate::vvc) fn chroma_coefficients(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -738,6 +882,8 @@ impl VvcResidualCabacSymbolStream {
         Self::coefficients(component, log2_tb_width, log2_tb_height, coeff_levels)
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(in crate::vvc) fn chroma_transform_skip_coefficients(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -757,6 +903,8 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(in crate::vvc) fn chroma_bdpcm_transform_skip_coefficients(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -777,6 +925,130 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    pub(in crate::vvc) fn emit_luma_coefficients(
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_coefficients(
+            VvcResidualComponent::Luma,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_luma_transform_skip_coefficients(
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_coefficients_with_transform_skip(
+            VvcResidualComponent::Luma,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            true,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_luma_bdpcm_transform_skip_coefficients(
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_coefficients_with_tool_flags(
+            VvcResidualComponent::Luma,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            true,
+            true,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_chroma_coefficients(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        debug_assert!(matches!(
+            component,
+            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
+        ));
+        Self::emit_coefficients(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_chroma_transform_skip_coefficients(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        debug_assert!(matches!(
+            component,
+            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
+        ));
+        Self::emit_coefficients_with_transform_skip(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            true,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_chroma_bdpcm_transform_skip_coefficients(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        debug_assert!(matches!(
+            component,
+            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
+        ));
+        Self::emit_coefficients_with_tool_flags(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            true,
+            true,
+            encoder,
+            cabac,
+        );
+    }
+
+    #[cfg(test)]
     fn coefficients(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -792,6 +1064,7 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    #[cfg(test)]
     fn coefficients_with_transform_skip(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -809,6 +1082,83 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
+    fn emit_coefficients(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_coefficients_with_transform_skip(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            false,
+            encoder,
+            cabac,
+        );
+    }
+
+    fn emit_coefficients_with_transform_skip(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        transform_skip: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_coefficients_with_tool_flags(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            transform_skip,
+            false,
+            encoder,
+            cabac,
+        );
+    }
+
+    fn emit_coefficients_with_tool_flags(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        transform_skip: bool,
+        bdpcm: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        let plan = Self::coefficient_plan_with_tool_flags(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            transform_skip,
+            bdpcm,
+        );
+        encoder.emit_default_tool_control_hooks(cabac, &plan.pass1_state);
+        let mut sink = VvcResidualDirectSymbolSink {
+            encoder,
+            cabac,
+            state: &plan.pass1_state,
+        };
+        Self::append_coefficient_symbols(
+            &mut sink,
+            coeff_levels,
+            log2_tb_width,
+            log2_tb_height,
+            plan.width,
+            plan.height,
+            &plan.scan,
+            plan.last_scan_pos,
+        );
+    }
+
+    #[cfg(test)]
     fn coefficients_with_tool_flags(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -817,6 +1167,41 @@ impl VvcResidualCabacSymbolStream {
         transform_skip: bool,
         bdpcm: bool,
     ) -> Self {
+        let plan = Self::coefficient_plan_with_tool_flags(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeff_levels,
+            transform_skip,
+            bdpcm,
+        );
+        let mut symbols = Vec::new();
+        Self::append_coefficient_symbols(
+            &mut symbols,
+            coeff_levels,
+            log2_tb_width,
+            log2_tb_height,
+            plan.width,
+            plan.height,
+            &plan.scan,
+            plan.last_scan_pos,
+        );
+
+        Self {
+            config: plan.config,
+            pass1_state: plan.pass1_state,
+            symbols,
+        }
+    }
+
+    fn coefficient_plan_with_tool_flags(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeff_levels: &[i16],
+        transform_skip: bool,
+        bdpcm: bool,
+    ) -> VvcResidualCoefficientPlan {
         // H.266 7.3.11.11 residual_coding() first codes the last significant
         // coefficient position and then walks earlier scan positions with
         // sig_coeff_flag and level/sign syntax. VTM's CoeffCodingContext uses
@@ -862,9 +1247,31 @@ impl VvcResidualCabacSymbolStream {
         }
         pass1_state.set_sb_coded(0, 0, coeff_levels.iter().any(|level| *level != 0));
 
-        let mut symbols = Vec::new();
-        Self::append_last_sig_coeff_prefix(&mut symbols, true, log2_tb_width, last_x);
-        Self::append_last_sig_coeff_prefix(&mut symbols, false, log2_tb_height, last_y);
+        VvcResidualCoefficientPlan {
+            #[cfg(test)]
+            config,
+            pass1_state,
+            scan,
+            last_scan_pos,
+            width,
+            height,
+        }
+    }
+
+    fn append_coefficient_symbols<S: VvcResidualSymbolSink>(
+        symbols: &mut S,
+        coeff_levels: &[i16],
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        width: usize,
+        height: usize,
+        scan: &[VvcScanPosition; 16],
+        last_scan_pos: usize,
+    ) {
+        let last_x = scan[last_scan_pos].x as u8;
+        let last_y = scan[last_scan_pos].y as u8;
+        Self::append_last_sig_coeff_prefix(symbols, true, log2_tb_width, last_x);
+        Self::append_last_sig_coeff_prefix(symbols, false, log2_tb_height, last_y);
 
         let mut remainder_symbols = Vec::new();
         let mut bypass_symbols = Vec::new();
@@ -886,12 +1293,12 @@ impl VvcResidualCabacSymbolStream {
             let abs_level = level.unsigned_abs();
             let significant = abs_level != 0;
             if num_nonzero != 0 || next_scan_pos != infer_sig_pos {
-                symbols.push(VvcResidualCabacSymbol::SigCoeffFlag { x, y, significant });
+                symbols.sig_coeff_flag(x, y, significant);
                 rem_reg_bins -= 1;
             }
             if significant {
                 num_nonzero += 1;
-                Self::append_regular_level_symbols(&mut symbols, x, y, abs_level);
+                Self::append_regular_level_symbols(symbols, x, y, abs_level);
                 rem_reg_bins -= regular_level_bin_count(abs_level);
                 if abs_level > 3 {
                     first_pos_2nd_pass =
@@ -915,7 +1322,7 @@ impl VvcResidualCabacSymbolStream {
                         x,
                         y,
                         value: u32::from((abs_level - 4) >> 1),
-                        rice_param: derive_rice_param(scan_pos, coeff_levels, width, &scan, 4),
+                        rice_param: derive_rice_param(scan_pos, coeff_levels, width, scan, 4),
                     });
                 }
             }
@@ -926,7 +1333,7 @@ impl VvcResidualCabacSymbolStream {
                 let pos = scan[scan_pos];
                 let level = coeff_levels[pos.raster_index];
                 let abs_level = level.unsigned_abs();
-                let rice_param = derive_rice_param(scan_pos, coeff_levels, width, &scan, 0);
+                let rice_param = derive_rice_param(scan_pos, coeff_levels, width, scan, 0);
                 let zero_pos = go_rice_zero_position(residual_state, rice_param);
                 let rem_value = if abs_level == 0 {
                     zero_pos
@@ -952,24 +1359,19 @@ impl VvcResidualCabacSymbolStream {
         // bins for the subblock. If the regular-bin budget is exhausted, the
         // remaining dec_abs_level values are bypass-coded before the grouped
         // coefficient signs. See VTM CABACWriter::residual_coding_subblock().
-        symbols.extend(remainder_symbols);
-        symbols.extend(bypass_symbols);
-        if sign_count > 0 {
-            symbols.push(VvcResidualCabacSymbol::CoeffSignPattern {
-                bits: sign_bits,
-                count: sign_count,
-            });
+        for symbol in remainder_symbols {
+            Self::append_delayed_symbol(symbols, symbol);
         }
-
-        Self {
-            config,
-            pass1_state,
-            symbols,
+        for symbol in bypass_symbols {
+            Self::append_delayed_symbol(symbols, symbol);
+        }
+        if sign_count > 0 {
+            symbols.coeff_sign_pattern(sign_bits, sign_count);
         }
     }
 
-    fn append_last_sig_coeff_prefix(
-        symbols: &mut Vec<VvcResidualCabacSymbol>,
+    fn append_last_sig_coeff_prefix<S: VvcResidualSymbolSink>(
+        symbols: &mut S,
         x_prefix: bool,
         log2_tb_size: u8,
         prefix: u8,
@@ -978,28 +1380,22 @@ impl VvcResidualCabacSymbolStream {
         assert!(prefix <= cmax);
         for bin_idx in 0..prefix {
             if x_prefix {
-                symbols.push(VvcResidualCabacSymbol::LastSigCoeffXPrefix { bin_idx, bin: true });
+                symbols.last_sig_coeff_x_prefix(bin_idx, true);
             } else {
-                symbols.push(VvcResidualCabacSymbol::LastSigCoeffYPrefix { bin_idx, bin: true });
+                symbols.last_sig_coeff_y_prefix(bin_idx, true);
             }
         }
         if prefix < cmax {
             if x_prefix {
-                symbols.push(VvcResidualCabacSymbol::LastSigCoeffXPrefix {
-                    bin_idx: prefix,
-                    bin: false,
-                });
+                symbols.last_sig_coeff_x_prefix(prefix, false);
             } else {
-                symbols.push(VvcResidualCabacSymbol::LastSigCoeffYPrefix {
-                    bin_idx: prefix,
-                    bin: false,
-                });
+                symbols.last_sig_coeff_y_prefix(prefix, false);
             }
         }
     }
 
-    fn append_regular_level_symbols(
-        symbols: &mut Vec<VvcResidualCabacSymbol>,
+    fn append_regular_level_symbols<S: VvcResidualSymbolSink>(
+        symbols: &mut S,
         x: u8,
         y: u8,
         abs_level: u16,
@@ -1007,27 +1403,64 @@ impl VvcResidualCabacSymbolStream {
         // H.266 7.3.11.11 residual_coding_subblock regular-pass order: gt1,
         // parity, gt2. Remainder and sign bypass bins are collected and
         // emitted after this pass for the whole subblock.
-        symbols.push(VvcResidualCabacSymbol::AbsLevelGtxFlag {
-            x,
-            y,
-            gtx_idx: 0,
-            greater_than: abs_level > 1,
-        });
+        symbols.abs_level_gtx_flag(x, y, 0, abs_level > 1);
         if abs_level > 1 {
-            symbols.push(VvcResidualCabacSymbol::ParLevelFlag {
-                x,
-                y,
-                par_level: (abs_level & 1) != 0,
-            });
-            symbols.push(VvcResidualCabacSymbol::AbsLevelGtxFlag {
-                x,
-                y,
-                gtx_idx: 1,
-                greater_than: abs_level > 3,
-            });
+            symbols.par_level_flag(x, y, (abs_level & 1) != 0);
+            symbols.abs_level_gtx_flag(x, y, 1, abs_level > 3);
         }
     }
 
+    fn append_delayed_symbol<S: VvcResidualSymbolSink>(
+        symbols: &mut S,
+        symbol: VvcResidualCabacSymbol,
+    ) {
+        match symbol {
+            VvcResidualCabacSymbol::LastSigCoeffXPrefix { bin_idx, bin } => {
+                symbols.last_sig_coeff_x_prefix(bin_idx, bin);
+            }
+            VvcResidualCabacSymbol::LastSigCoeffYPrefix { bin_idx, bin } => {
+                symbols.last_sig_coeff_y_prefix(bin_idx, bin);
+            }
+            VvcResidualCabacSymbol::SbCodedFlag { x_s, y_s, coded } => {
+                symbols.sb_coded_flag(x_s, y_s, coded);
+            }
+            VvcResidualCabacSymbol::SigCoeffFlag { x, y, significant } => {
+                symbols.sig_coeff_flag(x, y, significant);
+            }
+            VvcResidualCabacSymbol::ParLevelFlag { x, y, par_level } => {
+                symbols.par_level_flag(x, y, par_level);
+            }
+            VvcResidualCabacSymbol::AbsLevelGtxFlag {
+                x,
+                y,
+                gtx_idx,
+                greater_than,
+            } => {
+                symbols.abs_level_gtx_flag(x, y, gtx_idx, greater_than);
+            }
+            VvcResidualCabacSymbol::AbsRemainder {
+                x,
+                y,
+                value,
+                rice_param,
+            } => {
+                symbols.abs_remainder(x, y, value, rice_param);
+            }
+            VvcResidualCabacSymbol::BypassAbsLevel {
+                x,
+                y,
+                value,
+                rice_param,
+            } => {
+                symbols.bypass_abs_level(x, y, value, rice_param);
+            }
+            VvcResidualCabacSymbol::CoeffSignPattern { bits, count } => {
+                symbols.coeff_sign_pattern(bits, count);
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(in crate::vvc) fn emit(
         &self,
         encoder: &mut VvcResidualCabacEncoder<'_>,

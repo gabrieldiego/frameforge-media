@@ -1288,6 +1288,83 @@ make validate-geometry-sweep
 
 All checks passed after this checkpoint.
 
+## VVC Direct Residual Symbol Emission
+
+Checkpoint: `vvc-residual-callback-sink`.
+
+Change retained:
+
+- Normal VVC residual entropy coding now emits residual CABAC syntax directly
+  while deriving it, instead of always building a `VvcResidualCabacSymbolStream`
+  and then replaying it.
+- The old symbol-stream constructors and replay path remain available to tests,
+  so residual syntax expectations are still checked against recorded symbols.
+- Direct residual emission uses typed sink callbacks for last-position,
+  significance, level, remainder, and sign syntax, avoiding enum construction
+  and dispatch in the normal encoder path.
+- The regular CTU residual path and the 4:4:4 palette/IBC residual helpers now
+  both use direct residual emission.
+
+Rejected probe:
+
+- A fixed-array pass-1 residual state removed per-TU state allocation, but the
+  six-vector matrix showed mixed fps rows after tightening the arrays to the
+  active context footprint. The gain was not clean enough to retain.
+
+Profiling note:
+
+- After `vvc-cabac-lean-events`, 40-run first-frame gprof on
+  `SceneComposition_1_420` lossless still showed residual symbol construction
+  and replay as a major entropy-side cost: `coefficients_with_tool_flags` plus
+  `emit` accounted for about 15.5% self time before direct emission.
+- After direct emission, the residual replay hotspot disappeared; the next
+  durable hotspots are CABAC probability/context encode, DC prediction, and
+  residual context derivation.
+
+Matrix commands:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-direct-residual-symbols \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-cabac-lean-events.json
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-residual-callback-sink \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-direct-residual-symbols.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`, combined from the
+previous committed checkpoint:
+
+| Mode | `vvc-cabac-lean-events` FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 1.65 | 1.85 | +12.1% | 0 | 0 |
+| lossy | 1.00 | 1.13 | +13.0% | 0 | 0 |
+
+All rows were byte-identical across the retained runs; lossless rows remained
+exact and lossy PSNR was unchanged. The full retained generated reports were
+written to:
+
+```text
+verification/generated/encode_matrix/vvc-direct-residual-symbols.md
+verification/generated/encode_matrix/vvc-residual-callback-sink.md
+```
+
+Additional validation:
+
+```sh
+cargo test -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs --features "vvc vvc-stats"
+make test
+make validate-geometry-sweep
+```
+
+All checks passed after this checkpoint.
+
 ## References
 
 - Cargo profile settings:

@@ -891,30 +891,33 @@ fn append_vvc_bdpcm_444_8x8_cu(
 
     let mut encoder = VvcResidualCabacEncoder::new(ctx, slice_config.residual_options());
     if residual.cbf_y {
-        VvcResidualCabacSymbolStream::luma_bdpcm_transform_skip_coefficients(
+        VvcResidualCabacSymbolStream::emit_luma_bdpcm_transform_skip_coefficients(
             3,
             3,
             &residual.y_coeffs,
+            &mut encoder,
+            cabac,
         )
-        .emit(&mut encoder, cabac);
     }
     if residual.cbf_cb {
-        VvcResidualCabacSymbolStream::chroma_bdpcm_transform_skip_coefficients(
+        VvcResidualCabacSymbolStream::emit_chroma_bdpcm_transform_skip_coefficients(
             VvcResidualComponent::ChromaCb,
             3,
             3,
             &residual.cb_coeffs,
+            &mut encoder,
+            cabac,
         )
-        .emit(&mut encoder, cabac);
     }
     if residual.cbf_cr {
-        VvcResidualCabacSymbolStream::chroma_bdpcm_transform_skip_coefficients(
+        VvcResidualCabacSymbolStream::emit_chroma_bdpcm_transform_skip_coefficients(
             VvcResidualComponent::ChromaCr,
             3,
             3,
             &residual.cr_coeffs,
+            &mut encoder,
+            cabac,
         )
-        .emit(&mut encoder, cabac);
     }
 }
 
@@ -945,26 +948,33 @@ fn append_vvc_ibc_444_8x8_cu_residual(
 
     let mut encoder = VvcResidualCabacEncoder::new(ctx, slice_config.residual_options());
     if residual.cbf_y {
-        VvcResidualCabacSymbolStream::luma_transform_skip_coefficients(3, 3, &residual.y_coeffs)
-            .emit(&mut encoder, cabac);
+        VvcResidualCabacSymbolStream::emit_luma_transform_skip_coefficients(
+            3,
+            3,
+            &residual.y_coeffs,
+            &mut encoder,
+            cabac,
+        );
     }
     if residual.cbf_cb {
-        VvcResidualCabacSymbolStream::chroma_transform_skip_coefficients(
+        VvcResidualCabacSymbolStream::emit_chroma_transform_skip_coefficients(
             VvcResidualComponent::ChromaCb,
             3,
             3,
             &residual.cb_coeffs,
+            &mut encoder,
+            cabac,
         )
-        .emit(&mut encoder, cabac);
     }
     if residual.cbf_cr {
-        VvcResidualCabacSymbolStream::chroma_transform_skip_coefficients(
+        VvcResidualCabacSymbolStream::emit_chroma_transform_skip_coefficients(
             VvcResidualComponent::ChromaCr,
             3,
             3,
             &residual.cr_coeffs,
+            &mut encoder,
+            cabac,
         )
-        .emit(&mut encoder, cabac);
     }
 }
 
