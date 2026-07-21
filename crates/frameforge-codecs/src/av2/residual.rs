@@ -879,7 +879,7 @@ fn lossy_quality_rd_quant_step(quant_step: i32) -> i32 {
 
 fn regular_q_rd_quant_step(quant_step: i32) -> i32 {
     let _ = quant_step;
-    2
+    4
 }
 
 fn regular_q_dc_only_max_extra_sse(quant_step: i32) -> usize {

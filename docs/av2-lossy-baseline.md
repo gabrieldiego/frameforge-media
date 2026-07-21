@@ -1869,3 +1869,75 @@ The AVM decode command still reports `Invalid value for chroma intra mode
 index` on this 10-bit 4:4:4 predictive stream, matching the non-4:2:0
 compatibility note above. The internal reconstruction and raw PSNR checks are
 therefore the active guardrails for this row.
+
+### Regular-Q Rate-Biased RD Selection
+
+The next instrumentation pass kept residual syntax as the main target. The
+first-frame SB maps still showed residuals dominating the three representative
+rows: Scene 4:2:0 at 85.3%, RGB at 91.7%, and Mission 4:4:4 10-bit at 95.2%.
+This checkpoint changes only the regular-Q 4x4 TXB selector by making the
+rate/distortion score slightly more rate-favoring. The syntax, candidate set,
+and reconstruction path are unchanged; the retained setting simply chooses
+DC-only or tail-pruned candidates in a few more places when the measured SSE
+guard allows it.
+
+Retained first-frame QP24 predictive comparison versus the high-depth 4:4:4
+double-tail checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 182,240 | -355 | 50.017043 | -0.065721 |
+| SceneComposition_1_422 | yuv422p8 | 191,621 | -413 | 50.456965 | -0.073554 |
+| screen_wayland_activity_rgb | rgb24 | 540,551 | -505 | 49.686978 | -0.039306 |
+| MissionControlClip1_420 | yuv420p10le | 454,797 | -523 | 47.991649 | -0.042726 |
+| MissionControlClip1_422 | yuv422p10le | 490,221 | -588 | 48.773219 | -0.045005 |
+| MissionControlClip1_444 | yuv444p10le | 541,043 | -711 | 49.593694 | -0.054978 |
+| total | mixed | 2,400,473 | -3,095 | n/a | n/a |
+
+Retained 50-frame QP24 predictive comparison versus the high-depth 4:4:4
+double-tail checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF fps | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2,454,925 | -10,661 | 9.04 | 50.716815 | -0.116795 |
+| SceneComposition_1_422 | yuv422p8 | 2,723,669 | -10,985 | 7.69 | 50.982232 | -0.089218 |
+| screen_wayland_activity_rgb | rgb24 | 3,212,030 | -44,400 | 5.87 | 52.962869 | -0.255475 |
+| MissionControlClip1_420 | yuv420p10le | 9,734,853 | -27,215 | 3.39 | 49.788947 | -0.045746 |
+| MissionControlClip1_422 | yuv422p10le | 10,737,158 | -30,421 | 2.75 | 50.647864 | -0.046813 |
+| MissionControlClip1_444 | yuv444p10le | 12,236,159 | -33,153 | 2.04 | 51.679499 | -0.050227 |
+| total | mixed | 41,098,794 | -156,835 | 3.85 | n/a | n/a |
+
+Stats notes:
+
+- First-frame residual bits dropped without materially moving partition or
+  mode syntax: Scene 4:2:0 residual bits fell by 1,754, RGB by 2,251, and
+  Mission 4:4:4 10-bit by 5,194.
+- The selected luma DC-only regular-Q population increased from 5,230 to 5,450
+  TXBs on Scene 4:2:0, from 1,632 to 1,761 on RGB, and from 354 to 969 on
+  Mission 4:4:4 10-bit.
+- Tail-pruned luma selections also increased on the 8-bit rows, while the
+  high-depth 4:4:4 row stayed mostly on the regular-DCT/DC-only split.
+
+Probe notes:
+
+| Probe | Result | Decision |
+|---|---|---|
+| Enable the existing 4:4:4 FSC scorer on small leaves | RGB first frame grew from 541,056 to 581,047 bytes, with 1,834 FSC leaves selected | Rejected: residual bits increased |
+| Regular-Q RD divisor 3 | 50-frame total dropped to 41,162,500 bytes, max PSNR drop was 0.151 dB | Rejected in favor of the stronger retained setting |
+| Regular-Q RD divisor 4 | 50-frame total dropped to 41,098,794 bytes, largest PSNR drop was RGB at 0.255 dB while staying above 52.9 dB | Retained |
+| Regular-Q RD divisor 5 | 50-frame total dropped to 41,059,916 bytes, but Scene 4:2:0 first-frame PSNR had only 0.012 dB headroom and total fps measured 3.79 | Rejected: too tight for the small extra byte win |
+
+Validation:
+
+```text
+cargo fmt --all
+cargo check -p frameforge-codecs --features av2
+cargo check -p frameforge-codecs --features av2-lossy-stats
+cargo test -p frameforge-codecs --features av2
+make build AV2_SB_BITS=1 AV2_LOSSY_STATS=1
+manual three-row first-frame FRAMEFORGE_AV2_SB_BITS + FRAMEFORGE_AV2_LOSSY_STATS trace
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+manual six-row first-frame QP24 predictive encode + ffmpeg psnr filter
+manual six-row 50-frame QP24 predictive encode + ffmpeg psnr filter
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive VALIDATION_LIMIT=1
+```
