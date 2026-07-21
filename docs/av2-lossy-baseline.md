@@ -1806,8 +1806,66 @@ make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50
 ```
 
 Reference-decoder note: the changed 4:2:0 row decodes cleanly with AVM and
-matches the internal reconstruction. The current 4:2:2 and RGB predictive
-lossy rows still hit the pre-existing AVM decoder error `Invalid value for
-chroma intra mode index`, including on the previous retained baseline
-bitstreams, so those rows remain guarded by internal reconstruction and raw
-PSNR until that separate compatibility issue is fixed.
+matches the internal reconstruction. The current non-4:2:0 predictive lossy
+rows still hit the pre-existing AVM decoder error `Invalid value for chroma
+intra mode index`, including on the previous retained baseline bitstreams and
+the 10-bit 4:4:4 stream in the next checkpoint, so those rows remain guarded by
+internal reconstruction and raw PSNR until that separate compatibility issue is
+fixed.
+
+### High-Depth 4:4:4 Double-Tail Pruning
+
+The previous double-tail prune gate was limited to non-4:4:4 streams because
+enabling it on every 4:4:4 stream made the 8-bit RGB screen row regress by a
+small amount. This checkpoint keeps 8-bit 4:4:4 off, but allows high-bit-depth
+4:4:4 to test the same second trailing-unit AC prune candidate through the
+existing regular-Q RD guard.
+
+Targeted first-frame QP24 predictive check versus the 8-bit exact NEWMV
+checkpoint stayed byte-neutral:
+
+| Vector | Format | FF bytes | Delta bytes |
+|---|---|---:|---:|
+| MissionControlClip1_444 | yuv444p10le | 541,754 | 0 |
+
+Retained 50-frame QP24 predictive comparison versus the 8-bit exact NEWMV
+checkpoint:
+
+| Vector | Format | FF bytes | Delta bytes | FF fps | FF PSNR | Delta PSNR |
+|---|---|---:|---:|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | 2,465,586 | 0 | 9.84 | 50.833610 | 0.000000 |
+| SceneComposition_1_422 | yuv422p8 | 2,734,654 | 0 | 7.82 | 51.071450 | 0.000000 |
+| screen_wayland_activity_rgb | rgb24 | 3,256,430 | 0 | 5.86 | 53.218344 | 0.000000 |
+| MissionControlClip1_420 | yuv420p10le | 9,762,068 | 0 | 3.39 | 49.834693 | 0.000000 |
+| MissionControlClip1_422 | yuv422p10le | 10,767,579 | 0 | 2.74 | 50.694677 | 0.000000 |
+| MissionControlClip1_444 | yuv444p10le | 12,269,312 | -45,615 | 2.00 | 51.729726 | -0.001449 |
+| total | mixed | 41,255,629 | -45,615 | 3.85 | n/a | n/a |
+
+Probe notes:
+
+| Probe | Result | Decision |
+|---|---|---|
+| Broad 8-bit low-variance AC prune | Scene 4:2:0 first frame dropped from 50.083 dB to 47.212 dB | Rejected: too much quality loss |
+| Non-4:4:4 8-bit chroma low-variance AC prune | The safe threshold saved only 325 bytes on the 50-frame set | Rejected: too small |
+| Chroma non-DC syntax penalty | First-frame total increased by 1,164 bytes | Rejected: worse rate |
+| Chroma smooth search gate | 50-frame bytes were unchanged and the measured run was slightly slower | Rejected: no retained gain |
+| High-bit-depth 4:4:4 double-tail candidate | MissionControl 4:4:4 50-frame stream saved 45,615 bytes with a 0.001449 dB PSNR drop | Retained |
+
+Validation:
+
+```text
+cargo fmt --all
+cargo check -p frameforge-codecs --features av2
+cargo test -p frameforge-codecs --features av2
+cargo check -p frameforge-codecs --features av2-lossy-stats
+make compare-compression CODEC=av2 COMPRESSION_SET=local-aomctc-b2-scc-1080p-lossless-50f COMPRESSION_REFERENCE_BACKEND=ffmpeg-libaom COMPRESSION_REFERENCE_PRESET=realtime-screen COMPRESSION_SETTINGS=predictive COMPRESSION_QP=24 COMPRESSION_DIRECT_SOURCE_FILES=1
+./ff encode verification/generated/test_vectors/aomctc_b2_scc/MissionControlClip1_1920x1080_60_50f_yuv444p10.y4m --frames 1 --encode av2:verification/generated/instrumentation_loop/double_tail_hbd444_1f/mission444.obu --recon verification/generated/instrumentation_loop/double_tail_hbd444_1f/mission444.recon --qp 24 --set predictive
+manual MissionControl 4:4:4 50-frame QP24 predictive encode + ffmpeg psnr filter
+verification/references/av2/avm/build/avmdec --codec=av2 --rawvideo -o verification/generated/instrumentation_loop/double_tail_hbd444_50f/mission444_avm.raw verification/generated/instrumentation_loop/double_tail_hbd444_50f/mission444_recon.obu
+make validate-set CODEC=av2 VALIDATION_SET=local-aomctc-b2-scc-1080p-lossless-50f VALIDATION_REFERENCE_MODE=off VALIDATION_SETTINGS=predictive VALIDATION_LIMIT=1
+```
+
+The AVM decode command still reports `Invalid value for chroma intra mode
+index` on this 10-bit 4:4:4 predictive stream, matching the non-4:2:0
+compatibility note above. The internal reconstruction and raw PSNR checks are
+therefore the active guardrails for this row.

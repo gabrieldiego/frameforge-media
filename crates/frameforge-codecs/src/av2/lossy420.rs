@@ -690,7 +690,8 @@ impl<'a> Av2LossySubsampledTileState<'a> {
                 )
             });
         let mut double_tail_pruned_qcoeff = qcoeff;
-        let double_tail_pruned = (self.chroma_format != Av2ChromaFormat::Yuv444
+        let double_tail_pruned = ((self.chroma_format != Av2ChromaFormat::Yuv444
+            || self.bit_depth.bits() > 8)
             && prune_regular_dct_trailing_unit_acs(&mut double_tail_pruned_qcoeff, 2) == 2)
             .then(|| {
                 self.regular_dct_candidate_from_qcoeff_kind(
