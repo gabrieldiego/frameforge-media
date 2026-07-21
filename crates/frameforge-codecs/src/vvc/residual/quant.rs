@@ -14,10 +14,10 @@ use super::{
 };
 
 pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
-    quantize_vvc_frame(VvcSampledFrame::solid(color))
+    quantize_vvc_frame(&VvcSampledFrame::solid(color))
 }
 
-pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantizedColor {
+pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantizedColor {
     let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
@@ -61,7 +61,12 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantized
             .zip(predicted.iter())
             .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
             .collect();
-        let quantized = quantize_vvc_luma_residual_greedy(&residuals, node.width, node.height);
+        let quantized = quantize_vvc_luma_residual_greedy(
+            &residuals,
+            node.width,
+            node.height,
+            frame.format.bit_depth,
+        );
         luma_tu_remainders[luma_tu_count] = quantized.abs_remainder;
         luma_tu_negative[luma_tu_count] =
             quantized.reconstructed_dc_coeff < 0 && quantized.abs_remainder != 0;
@@ -222,7 +227,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: VvcSampledFrame) -> VvcQuantized
 }
 
 pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
-    frame: VvcSampledFrame,
+    frame: &VvcSampledFrame,
 ) -> VvcQuantizedColor {
     debug_assert!(matches!(
         frame.format.chroma_sampling,

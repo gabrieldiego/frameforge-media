@@ -63,7 +63,12 @@ fn vvc_transform_accepts_8x8_luma_and_4x4_chroma_tus() {
 #[test]
 fn vvc_luma_residual_quantization_reconstructs_solid_residual() {
     let residuals = vec![-64; 8 * 8];
-    let quantized = quantize_vvc_luma_residual_greedy(&residuals, 8, 8);
+    let quantized = quantize_vvc_luma_residual_greedy(
+        &residuals,
+        8,
+        8,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+    );
     assert!(quantized.reconstructed_dc_coeff < 0);
     assert!(quantized
         .reconstructed_ac_coeffs
@@ -102,7 +107,7 @@ fn vvc_color_quantization_uses_inverse_transform_reconstruction() {
 fn vvc_frame_quantization_uses_leaf_samples_for_coefficients() {
     let mut luma = [0; 64];
     luma[3] = 255;
-    let color = quantize_vvc_frame(VvcSampledFrame {
+    let color = quantize_vvc_frame(&VvcSampledFrame {
         geometry: VvcVideoGeometry {
             width: 8,
             height: 8,
@@ -139,7 +144,7 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
         cr: vec![192; 32 * 32],
         chroma_len: 32 * 32,
     };
-    let color = quantize_vvc_frame(frame);
+    let color = quantize_vvc_frame(&frame);
     assert_eq!(color.luma_tu_count, 64);
     assert!(color.luma_tu_remainders[0] > 0);
     assert_eq!(color.luma_tu_ac_levels[0], [0; VVC_LUMA_AC_COEFFS_PER_TU]);
@@ -161,7 +166,7 @@ fn vvc_420_chroma_dc_residual_preserves_decoder_visible_color() {
         cr: vec![192; 8 * 8],
         chroma_len: 8 * 8,
     };
-    let quantized = quantize_vvc_frame(frame.clone());
+    let quantized = quantize_vvc_frame(&frame);
     assert_eq!(quantized.chroma_tu_count, 4);
     assert!(quantized.cb_tu_dc_levels[0] < 0);
     assert!(quantized.cr_tu_dc_levels[0] > 0);
@@ -194,7 +199,7 @@ fn vvc_420_chroma_dc_residual_predicts_from_prior_chroma_leaves() {
         cr: vec![192; 32 * 24],
         chroma_len: 32 * 24,
     };
-    let quantized = quantize_vvc_frame(frame.clone());
+    let quantized = quantize_vvc_frame(&frame);
     assert_eq!(quantized.chroma_tu_count, 48);
     assert!(quantized.cb_tu_dc_levels[0] < 0);
     assert!(quantized.cr_tu_dc_levels[0] > 0);
@@ -234,7 +239,7 @@ fn vvc_420_chroma_ac_residual_preserves_visible_chroma_variation() {
         cr,
         chroma_len: 8 * 8,
     };
-    let quantized = quantize_vvc_frame(frame.clone());
+    let quantized = quantize_vvc_frame(&frame);
     assert_eq!(quantized.chroma_tu_count, 4);
     assert!(quantized
         .cb_tu_ac_levels

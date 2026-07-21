@@ -27,6 +27,20 @@ pub enum PixelFormat {
 }
 
 impl ChromaSampling {
+    pub const fn subsample_x(self) -> usize {
+        match self {
+            Self::Monochrome | Self::Cs444 => 1,
+            Self::Cs420 | Self::Cs422 => 2,
+        }
+    }
+
+    pub const fn subsample_y(self) -> usize {
+        match self {
+            Self::Monochrome | Self::Cs422 | Self::Cs444 => 1,
+            Self::Cs420 => 2,
+        }
+    }
+
     pub fn chroma_plane_samples(self, width: usize, height: usize) -> Option<usize> {
         let luma = width.checked_mul(height)?;
         match self {
@@ -340,6 +354,44 @@ pub fn write_planar_sample(
     Some(())
 }
 
+pub fn planar_sample_sse(
+    source: &[u8],
+    reconstruction: &[u8],
+    bit_depth: SampleBitDepth,
+) -> Option<u64> {
+    if source.len() != reconstruction.len() {
+        return None;
+    }
+    if bit_depth.bits() <= 8 {
+        return Some(
+            source
+                .iter()
+                .zip(reconstruction)
+                .map(|(&src, &rec)| {
+                    let diff = i32::from(src) - i32::from(rec);
+                    (diff * diff) as u64
+                })
+                .sum(),
+        );
+    }
+    if source.len() % 2 != 0 {
+        return None;
+    }
+
+    Some(
+        source
+            .chunks_exact(2)
+            .zip(reconstruction.chunks_exact(2))
+            .map(|(src, rec)| {
+                let src = u16::from_le_bytes([src[0], src[1]]).min(bit_depth.max_sample());
+                let rec = u16::from_le_bytes([rec[0], rec[1]]).min(bit_depth.max_sample());
+                let diff = i32::from(src) - i32::from(rec);
+                (diff * diff) as u64
+            })
+            .sum(),
+    )
+}
+
 impl FromStr for PixelFormat {
     type Err = String;
 
@@ -521,6 +573,53 @@ mod tests {
         assert_eq!(
             PixelFormat::yuv444(15).unwrap().frame_len(16, 16),
             Some(1536)
+        );
+    }
+
+    #[test]
+    fn chroma_sampling_reports_subsampling_factors() {
+        assert_eq!(ChromaSampling::Cs420.subsample_x(), 2);
+        assert_eq!(ChromaSampling::Cs420.subsample_y(), 2);
+        assert_eq!(ChromaSampling::Cs422.subsample_x(), 2);
+        assert_eq!(ChromaSampling::Cs422.subsample_y(), 1);
+        assert_eq!(ChromaSampling::Cs444.subsample_x(), 1);
+        assert_eq!(ChromaSampling::Cs444.subsample_y(), 1);
+    }
+
+    #[test]
+    fn planar_sample_sse_handles_8_and_high_bit_depth_samples() {
+        assert_eq!(
+            planar_sample_sse(&[0, 10, 20], &[1, 8, 20], SampleBitDepth::new(8).unwrap()),
+            Some(5)
+        );
+
+        let source = [0u16, 1023, 512]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let reconstruction = [1u16, 1020, 512]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            planar_sample_sse(&source, &reconstruction, SampleBitDepth::new(10).unwrap()),
+            Some(10)
+        );
+        assert_eq!(
+            planar_sample_sse(
+                &source[..5],
+                &reconstruction[..5],
+                SampleBitDepth::new(10).unwrap()
+            ),
+            None
+        );
+        assert_eq!(
+            planar_sample_sse(
+                &source,
+                &reconstruction[..4],
+                SampleBitDepth::new(10).unwrap()
+            ),
+            None
         );
     }
 

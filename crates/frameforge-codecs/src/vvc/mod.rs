@@ -23,10 +23,9 @@ mod palette;
 mod residual;
 mod syntax;
 use cabac::{
-    encode_ctu_partition_body, vvc_chroma_420_transform_nodes, vvc_chroma_transform_nodes,
-    VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
-    VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
-    VvcLastSigCoeffPrefixCtxInput,
+    encode_ctu_partition_body, vvc_chroma_transform_nodes, VvcCabacContext, VvcCabacContexts,
+    VvcCabacDumpContextEvent, VvcCabacDumpSymbol, VvcCabacEncoder, VvcCodingTreeNode,
+    VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape, VvcLastSigCoeffPrefixCtxInput,
 };
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
@@ -331,12 +330,6 @@ struct VvcCodingTreeConfig {
 }
 
 impl VvcCodingTreeConfig {
-    const fn yuv420() -> Self {
-        Self {
-            chroma_sampling: ChromaSampling::Cs420,
-        }
-    }
-
     const fn yuv(chroma_sampling: ChromaSampling) -> Self {
         Self { chroma_sampling }
     }
@@ -368,7 +361,7 @@ pub(super) struct VvcSliceSyntaxConfig {
 }
 
 impl VvcSyntaxToolFlags {
-    const fn yuv420_residual() -> Self {
+    const fn residual_lossy(chroma_sampling: ChromaSampling) -> Self {
         Self {
             ibc_enabled: false,
             palette_enabled: false,
@@ -383,6 +376,11 @@ impl VvcSyntaxToolFlags {
             dependent_quantization_enabled: false,
             sign_data_hiding_enabled: false,
         }
+        .without_unsupported_chroma_tools(chroma_sampling)
+    }
+
+    const fn yuv420_residual() -> Self {
+        Self::residual_lossy(ChromaSampling::Cs420)
     }
 
     const fn yuv420_lossless() -> Self {
@@ -398,6 +396,13 @@ impl VvcSyntaxToolFlags {
             tools.cclm_enabled = false;
         }
         tools
+    }
+
+    const fn without_unsupported_chroma_tools(mut self, chroma_sampling: ChromaSampling) -> Self {
+        if matches!(chroma_sampling, ChromaSampling::Cs422) {
+            self.cclm_enabled = false;
+        }
+        self
     }
 
     const fn palette_444() -> Self {
@@ -434,9 +439,13 @@ impl VvcSliceSyntaxConfig {
     }
 
     const fn yuv420_residual() -> Self {
+        Self::residual_lossy(ChromaSampling::Cs420)
+    }
+
+    const fn residual_lossy(chroma_sampling: ChromaSampling) -> Self {
         Self::new(
-            VvcCodingTreeConfig::yuv420(),
-            VvcSyntaxToolFlags::yuv420_residual(),
+            VvcCodingTreeConfig::yuv(chroma_sampling),
+            VvcSyntaxToolFlags::residual_lossy(chroma_sampling),
         )
     }
 
@@ -465,7 +474,7 @@ impl VvcSliceSyntaxConfig {
         // CU-level decisions, content analysis, or explicit encoder controls.
         match format.chroma_sampling {
             ChromaSampling::Cs444 => Self::palette_444(),
-            _ => Self::yuv420_residual(),
+            _ => Self::residual_lossy(format.chroma_sampling),
         }
     }
 
@@ -850,14 +859,6 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         stream_format.bit_depth,
     )?;
     let frame_len = stream_layout.frame_len();
-    if !options.lossless
-        && stream_format.chroma_sampling == ChromaSampling::Cs422
-        && stream_format.bit_depth.bits() != 8
-    {
-        return Err(format!(
-            "VVC high-depth 4:2:2 input currently supports lossless mode only; got {format}"
-        ));
-    }
     if options.lossless
         && !matches!(
             stream_format.chroma_sampling,
@@ -931,30 +932,27 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 }
                 frame_recon.into_yuv()
             } else {
-                let compat_frame = if lossless_residual {
-                    source_frame.clone()
-                } else {
-                    source_frame.decoder_compat_frame()
-                };
+                let compat_frame = source_frame.clone();
                 let mut frame_recon =
                     VvcReconstructionFrame::new_neutral(geometry, compat_frame.format);
                 for region in vvc_ctu_regions(geometry) {
                     let ctu_frame = extract_vvc_ctu_frame(&compat_frame, region);
                     let quantized = if lossless_residual {
-                        quantize_vvc_frame_lossless_residual(ctu_frame.clone())
+                        quantize_vvc_frame_lossless_residual(&ctu_frame)
                     } else {
-                        quantize_vvc_frame(ctu_frame.clone())
+                        quantize_vvc_frame(&ctu_frame)
                     };
-                    let partition_params = if lossless_residual {
-                        vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
-                            ctu_frame.geometry,
-                            quantized,
-                            VVC_LOSSLESS_LUMA_LEAF_SIZE,
-                            ctu_frame.format.chroma_sampling,
-                        )
+                    let luma_max_leaf_size = if lossless_residual {
+                        VVC_LOSSLESS_LUMA_LEAF_SIZE
                     } else {
-                        vvc_ctu_partition_params(ctu_frame.geometry, quantized)
-                    }
+                        VVC_CURRENT_MAX_LUMA_LEAF_SIZE
+                    };
+                    let partition_params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+                        ctu_frame.geometry,
+                        quantized,
+                        luma_max_leaf_size,
+                        ctu_frame.format.chroma_sampling,
+                    )
                     .ok_or_else(|| {
                         format!(
                             "VVC reconstruction has no generated CTU path for coded CTU geometry {}x{}",
@@ -1219,7 +1217,7 @@ pub fn vvc_yuv420_cabac_vector_dump_json(
     }
     let source_frame = sample_vvc_yuv_frame(input, params, geometry, format)?;
     let compat_frame = source_frame.decoder_compat_frame();
-    let color = quantize_vvc_frame(compat_frame.clone());
+    let color = quantize_vvc_frame(&compat_frame);
     let params = vvc_ctu_partition_params(compat_frame.geometry, color).ok_or_else(|| {
         format!(
             "VVC CABAC vector dump has no generated CTU path for coded geometry {}x{}",
@@ -1407,7 +1405,7 @@ fn vvc_yuv420p8_annex_b(
 
 fn vvc_annex_b(params: VvcEncodeParams, frame: VvcSampledFrame) -> Result<Vec<u8>, String> {
     let geometry = frame.geometry;
-    let quantized = quantize_vvc_frame(frame);
+    let quantized = quantize_vvc_frame(&frame);
     vvc_annex_b_from_quantized(
         params,
         geometry,
@@ -1459,7 +1457,7 @@ fn vvc_annex_b_from_quantized_frames(
 
 #[cfg(test)]
 fn vvc_coding_tree_plan(geometry: VvcVideoGeometry) -> Vec<VvcCodingTreeStep> {
-    vvc_coding_tree_plan_with_config(geometry, VvcCodingTreeConfig::yuv420())
+    vvc_coding_tree_plan_with_config(geometry, VvcCodingTreeConfig::yuv(ChromaSampling::Cs420))
 }
 
 #[cfg(test)]

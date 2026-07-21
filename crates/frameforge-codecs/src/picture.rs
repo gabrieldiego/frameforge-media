@@ -168,19 +168,11 @@ impl PlanarYuvGeometry {
 }
 
 pub(crate) fn chroma_subsample_x(chroma_sampling: ChromaSampling) -> usize {
-    match chroma_sampling {
-        ChromaSampling::Monochrome => 1,
-        ChromaSampling::Cs420 | ChromaSampling::Cs422 => 2,
-        ChromaSampling::Cs444 => 1,
-    }
+    chroma_sampling.subsample_x()
 }
 
 pub(crate) fn chroma_subsample_y(chroma_sampling: ChromaSampling) -> usize {
-    match chroma_sampling {
-        ChromaSampling::Monochrome => 1,
-        ChromaSampling::Cs420 => 2,
-        ChromaSampling::Cs422 | ChromaSampling::Cs444 => 1,
-    }
+    chroma_sampling.subsample_y()
 }
 
 pub(crate) fn read_input_frame<R: Read + ?Sized>(

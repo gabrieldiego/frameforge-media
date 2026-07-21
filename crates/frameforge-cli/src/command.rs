@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use frameforge_core::{
-    convert_planar_frame_bit_depth, ChromaSampling, PixelFormat, SampleBitDepth, VERSION,
+    convert_planar_frame_bit_depth, planar_sample_sse, ChromaSampling, PixelFormat, SampleBitDepth,
+    VERSION,
 };
 
 use crate::args::{self, Command, EncodeArgs};
@@ -775,13 +776,17 @@ fn print_frame_metrics(
 }
 
 fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<FramePsnr> {
-    let y_len = job.width.checked_mul(job.height)?;
-    let chroma_len = match job.format {
-        PixelFormat::Yuv420p8 => y_len / 4,
-        PixelFormat::Yuv444p8 => y_len,
-        PixelFormat::Rgb24 => return rgb24_frame_psnr(y_len, source, reconstruction),
-        _ => return None,
-    };
+    let y_samples = job.width.checked_mul(job.height)?;
+    if job.format == PixelFormat::Rgb24 {
+        return rgb24_frame_psnr(y_samples, source, reconstruction);
+    }
+    let chroma_sampling = job.format.chroma_sampling()?;
+    let chroma_width = job.width.checked_div(chroma_sampling.subsample_x())?;
+    let chroma_height = job.height.checked_div(chroma_sampling.subsample_y())?;
+    let chroma_samples = chroma_width.checked_mul(chroma_height)?;
+    let bytes_per_sample = job.format.bit_depth().bytes_per_sample();
+    let y_len = y_samples.checked_mul(bytes_per_sample)?;
+    let chroma_len = chroma_samples.checked_mul(bytes_per_sample)?;
     let frame_len = y_len.checked_add(chroma_len.checked_mul(2)?)?;
     if source.len() != frame_len || reconstruction.len() != frame_len {
         return None;
@@ -804,14 +809,20 @@ fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<F
     let v_src = &source[v_start..frame_len];
     let v_rec = &reconstruction[v_start..frame_len];
 
-    let y_sse = sse_u8(y_src, y_rec);
-    let u_sse = sse_u8(u_src, u_rec);
-    let v_sse = sse_u8(v_src, v_rec);
+    let bit_depth = job.format.bit_depth();
+    let y_sse = planar_sample_sse(y_src, y_rec, bit_depth)?;
+    let u_sse = planar_sample_sse(u_src, u_rec, bit_depth)?;
+    let v_sse = planar_sample_sse(v_src, v_rec, bit_depth)?;
+    let max_sample = f64::from(bit_depth.max_sample());
     Some(FramePsnr {
-        y: psnr_from_sse(y_sse, y_len),
-        u: psnr_from_sse(u_sse, chroma_len),
-        v: psnr_from_sse(v_sse, chroma_len),
-        all: psnr_from_sse(y_sse + u_sse + v_sse, frame_len),
+        y: psnr_from_sse(y_sse, y_samples, max_sample),
+        u: psnr_from_sse(u_sse, chroma_samples, max_sample),
+        v: psnr_from_sse(v_sse, chroma_samples, max_sample),
+        all: psnr_from_sse(
+            y_sse + u_sse + v_sse,
+            y_samples + chroma_samples * 2,
+            max_sample,
+        ),
     })
 }
 
@@ -842,29 +853,18 @@ fn rgb24_frame_psnr(pixels: usize, source: &[u8], reconstruction: &[u8]) -> Opti
     }
 
     Some(FramePsnr {
-        y: psnr_from_sse(r_sse, pixels),
-        u: psnr_from_sse(g_sse, pixels),
-        v: psnr_from_sse(b_sse, pixels),
-        all: psnr_from_sse(r_sse + g_sse + b_sse, frame_len),
+        y: psnr_from_sse(r_sse, pixels, 255.0),
+        u: psnr_from_sse(g_sse, pixels, 255.0),
+        v: psnr_from_sse(b_sse, pixels, 255.0),
+        all: psnr_from_sse(r_sse + g_sse + b_sse, frame_len, 255.0),
     })
 }
 
-fn sse_u8(source: &[u8], reconstruction: &[u8]) -> u64 {
-    source
-        .iter()
-        .zip(reconstruction)
-        .map(|(&src, &rec)| {
-            let diff = src as i32 - rec as i32;
-            (diff * diff) as u64
-        })
-        .sum()
-}
-
-fn psnr_from_sse(sse: u64, samples: usize) -> f64 {
+fn psnr_from_sse(sse: u64, samples: usize, max_sample: f64) -> f64 {
     if sse == 0 {
         f64::INFINITY
     } else {
-        10.0 * ((255.0 * 255.0 * samples as f64) / sse as f64).log10()
+        10.0 * ((max_sample * max_sample * samples as f64) / sse as f64).log10()
     }
 }
 
@@ -894,6 +894,7 @@ struct EncodeJob {
     format: PixelFormat,
     lossless: bool,
     qp: Option<u8>,
+    #[cfg(feature = "codec-av2")]
     av2_predictive: bool,
 }
 
@@ -967,7 +968,10 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     if args.qp.is_some() && codec != "av2" {
         return Err("--qp is currently implemented for AV2 encode only".to_string());
     }
+    #[cfg(feature = "codec-av2")]
     let av2_predictive = boolean_setting_enabled(&args.settings, "predictive")?;
+    #[cfg(not(feature = "codec-av2"))]
+    let _ = boolean_setting_enabled(&args.settings, "predictive")?;
     if source_format == PixelFormat::Rgb24 {
         if codec != "av2" {
             return Err("rgb24 encode is currently implemented for AV2 only".to_string());
@@ -996,6 +1000,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         format,
         lossless,
         qp: args.qp,
+        #[cfg(feature = "codec-av2")]
         av2_predictive,
     })
 }
@@ -1086,9 +1091,9 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
                 ) && matches!(format.bit_depth().bits(), 8 | 10))
         }
         "vvc" => match format.chroma_sampling() {
-            Some(ChromaSampling::Cs420) => vvc_accepts_bit_depth(format),
-            Some(ChromaSampling::Cs422) => format.bit_depth().bits() == 8,
-            Some(ChromaSampling::Cs444) => vvc_accepts_bit_depth(format),
+            Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444) => {
+                vvc_accepts_bit_depth(format)
+            }
             _ => false,
         },
         _ => false,
@@ -2124,6 +2129,36 @@ mod tests {
     }
 
     #[test]
+    fn encode_job_accepts_lossy_yuv422_high_depth_for_vvc_path() {
+        let format_name = "yuv422p10le";
+        let path = temp_yuv_path(&format!("one_frame_8x8_vvc_lossy_{format_name}"));
+        let format = PixelFormat::yuv422(10).unwrap();
+        let input = vec![0; format.frame_len(8, 8).unwrap()];
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.266".to_string()),
+            codec: Some("vvc".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some(format_name.to_string()),
+            }),
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("VVC lossy 4:2:2 should stay native");
+        assert!(!job.lossless);
+        assert_eq!(job.source_format, format);
+        assert_eq!(job.format, format);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn open_job_reader_hides_unselected_file_suffix() {
         let path = temp_yuv_path("reader_prefix_8x8");
         let mut file = File::create(&path).expect("create temp yuv");
@@ -2144,6 +2179,7 @@ mod tests {
             format: PixelFormat::Yuv420p8,
             lossless: false,
             qp: None,
+            #[cfg(feature = "codec-av2")]
             av2_predictive: false,
         };
         let mut reader = open_job_reader(&job).expect("open reader");
@@ -2151,6 +2187,67 @@ mod tests {
         reader.read_to_end(&mut bytes).expect("read limited prefix");
         assert_eq!(bytes.len(), 8 * 8 * 3 / 2);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn frame_psnr_reports_yuv422p8() {
+        let job = EncodeJob {
+            input: EncodeInput::Pattern(PatternSourceSpec {
+                pattern: PatternKind::Black,
+            }),
+            output: PathBuf::from("out.vvc"),
+            recon: None,
+            frames: 1,
+            fps: None,
+            validate_y4m_metadata: false,
+            width: 2,
+            height: 2,
+            source_format: PixelFormat::Yuv422p8,
+            format: PixelFormat::Yuv422p8,
+            lossless: false,
+            qp: None,
+            #[cfg(feature = "codec-av2")]
+            av2_predictive: false,
+        };
+        let source = vec![0; 8];
+        let reconstruction = vec![1; 8];
+
+        let psnr = frame_psnr(&job, &source, &reconstruction).expect("4:2:2 PSNR");
+        assert!(psnr.y.is_finite());
+        assert!(psnr.u.is_finite());
+        assert!(psnr.v.is_finite());
+        assert!(psnr.all.is_finite());
+    }
+
+    #[test]
+    fn frame_psnr_uses_high_bit_depth_peak_sample() {
+        let format = PixelFormat::yuv420(10).unwrap();
+        let job = EncodeJob {
+            input: EncodeInput::Pattern(PatternSourceSpec {
+                pattern: PatternKind::Black,
+            }),
+            output: PathBuf::from("out.vvc"),
+            recon: None,
+            frames: 1,
+            fps: None,
+            validate_y4m_metadata: false,
+            width: 2,
+            height: 2,
+            source_format: format,
+            format,
+            lossless: false,
+            qp: None,
+            #[cfg(feature = "codec-av2")]
+            av2_predictive: false,
+        };
+        let source = vec![0; 12];
+        let mut reconstruction = vec![0; 12];
+        for sample in reconstruction.chunks_exact_mut(2) {
+            sample.copy_from_slice(&1u16.to_le_bytes());
+        }
+
+        let psnr = frame_psnr(&job, &source, &reconstruction).expect("10-bit PSNR");
+        assert!(psnr.all > 60.0, "10-bit peak sample should be used");
     }
 
     #[test]

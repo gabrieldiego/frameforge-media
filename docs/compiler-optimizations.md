@@ -742,6 +742,85 @@ and VVC in both lossless and lossy modes. Lossless rows used exact
 reconstruction checks; lossy rows required encoded output and internal
 reconstruction to be produced.
 
+### VVC Native 4:2:2 Residual And Shared Pixel Metrics
+
+Checkpoint: `vvc-parity-native-422-dc-search`.
+
+Changes retained:
+
+- Core `ChromaSampling` now exposes shared subsampling factors, and core
+  planar byte-slice SSE is used by the CLI PSNR path.
+- VVC non-lossless residual syntax and reconstruction now keep native 4:2:2
+  input instead of routing through the old decoder-compatibility frame.
+- VVC residual quantization borrows CTU frames instead of cloning them.
+- VVC luma DC residual search uses the actual bit depth and inverse-transform
+  response before choosing the DC level.
+- The validation runner cleanup path tolerates already-removed generated files.
+
+Rejected probe:
+
+- A luma DCT AC estimator increased the first lossy 4:2:0 row from 7.15 MB to
+  8.70 MB, slowed encode from 1.11 fps to 0.89 fps, and only improved PSNR by
+  about 0.10 dB, so it was not retained.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-parity-native-422-dc-search \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/post-pack-reuse.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | Notes |
+|---|---:|---:|---:|---:|---|
+| lossless | 0.68 | 0.71 | +4.4% | 0 | 4:2:0/4:2:2 rows remain exact; 4:4:4 palette bytes unchanged |
+| lossy | 1.02 | 0.63 | -38.2% | +31,508,423 | Native 4:2:2 replaces prior compatibility behavior |
+
+Key lossy row deltas:
+
+| Vector | Format | Bytes Delta | FPS Delta | New PSNR | Notes |
+|---|---:|---:|---:|---:|---|
+| SceneComposition_1_420 | yuv420p8 | -14,344 | +0.02 | 23.700 | DC search gives a small size win |
+| SceneComposition_1_422 | yuv422p8 | +5,005,613 | -0.67 | 24.715 | Native 4:2:2 now measures the real path |
+| MissionControlClip1_420 | yuv420p10le | -2,186,574 | -0.12 | 19.005 | Bit-depth-aware DC search fixes a poor high-depth response |
+| MissionControlClip1_422 | yuv422p10le | +28,703,728 | -1.10 | 18.364 | Native high-depth 4:2:2 needs better mode/residual decisions |
+| MissionControlClip1_444 | yuv444p10le | 0 | -0.03 | 65.611 | Existing palette path unchanged |
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-parity-native-422-dc-search.md
+```
+
+AV2 sanity matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-shared-pixel-metrics-check \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/post-pack-reuse.json
+```
+
+Result: all 12 AV2 rows were byte-identical to `post-pack-reuse`. Totals were
+83,531,302 bytes at 9.01 fps for `lossless+predictive` and 41,098,794 bytes at
+3.74 fps for `qp=24+predictive`.
+
+The AV2 generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/av2-shared-pixel-metrics-check.md
+```
+
+This checkpoint is correctness-positive but exposes the real VVC lossy parity
+gap. Next VVC work should focus on mode decisions and residual coding for
+4:2:0 and 4:2:2 rather than treating the old non-native 4:2:2 byte counts as a
+valid target.
+
 ## References
 
 - Cargo profile settings:

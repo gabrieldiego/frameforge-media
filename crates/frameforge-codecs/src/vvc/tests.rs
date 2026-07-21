@@ -150,6 +150,15 @@ fn vvc_sps_signals_444_capable_profiles_for_422() {
         assert_eq!(vvc_u_value(&rbsp, "sps_chroma_format_idc"), 2);
         assert_eq!(vvc_u_value(&rbsp, "general_profile_idc"), expected_profile);
     }
+
+    let lossy = vvc_sps_rbsp(
+        geometry,
+        VvcSliceSyntaxConfig::residual_lossy(ChromaSampling::Cs422),
+        SampleBitDepth::new(10).expect("valid bit depth"),
+    );
+    assert_eq!(vvc_u_value(&lossy, "sps_chroma_format_idc"), 2);
+    assert_eq!(vvc_u_value(&lossy, "general_profile_idc"), 33);
+    assert_vvc_flag(&lossy, "sps_cclm_enabled_flag", false);
 }
 
 fn assert_vvc_annex_b_has_min_picture_nals(bytes: &[u8], frames: usize) -> Vec<VvcNalInfo> {
@@ -775,7 +784,7 @@ fn vvc_ctu_partition_params_are_geometry_derived() {
         assert_eq!(params.chroma_sampling, ChromaSampling::Cs420);
         assert_eq!(
             params.chroma_tu_count,
-            vvc_chroma_420_transform_nodes(params.shape()).len()
+            vvc_chroma_transform_nodes(params.shape()).len()
         );
         assert_eq!(params.luma_tu_count, luma_tu_count);
         assert_eq!(params.luma_tu_abs_levels[0], black.luma_tu_remainders[0]);
@@ -805,7 +814,7 @@ fn vvc_ctu_partition_params_cover_all_8_sample_geometries_up_to_64() {
             assert_eq!(params.visible_height, height);
             assert_eq!(
                 params.chroma_tu_count,
-                vvc_chroma_420_transform_nodes(params.shape()).len()
+                vvc_chroma_transform_nodes(params.shape()).len()
             );
             assert_eq!(
                 vvc_cabac_bits(geometry, black, vvc_test_slice_config()),
@@ -1507,7 +1516,8 @@ fn vvc_coding_tree_plan_carries_chroma_sampling_parameter() {
         width: 16,
         height: 16,
     };
-    let yuv420 = vvc_coding_tree_plan_with_config(geometry, VvcCodingTreeConfig::yuv420());
+    let yuv420 =
+        vvc_coding_tree_plan_with_config(geometry, VvcCodingTreeConfig::yuv(ChromaSampling::Cs420));
     let yuv444 = vvc_coding_tree_plan_with_config(
         geometry,
         VvcCodingTreeConfig {
@@ -1777,29 +1787,42 @@ fn vvc_input_path_accepts_lossless_yuv422_high_depth_exact_reconstruction() {
 
 #[test]
 fn vvc_input_path_accepts_supported_yuv_subsampling() {
-    let expected = vvc_yuv420p8_annex_b_from_input(
-        &solid_yuv420p8(65, 128, 192, 1),
-        VvcEncodeParams { frames: 1 },
-    )
-    .unwrap();
     for (format, chroma_samples) in [(PixelFormat::yuv422(8).unwrap(), 32)] {
         let input =
             solid_yuv_planar_high(65, 128, 192, format.bit_depth().bits(), chroma_samples, 1);
-        assert_eq!(
-            vvc_default_yuv_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
-                .unwrap(),
-            expected
-        );
+        let artifacts = vvc_yuv_encode_artifacts_from_input_with_limits(
+            &input,
+            VvcEncodeParams { frames: 1 },
+            VvcVideoGeometry {
+                width: 8,
+                height: 8,
+            },
+            VvcVideoLimits::max_64x64(),
+            format,
+        )
+        .unwrap();
+        assert_vvc_annex_b_has_min_picture_nals(&artifacts.bitstream, 1);
+        assert_eq!(artifacts.reconstruction.len(), input.len());
     }
 }
 
 #[test]
-fn vvc_input_path_rejects_high_depth_yuv422_until_native_path_exists() {
+fn vvc_input_path_accepts_lossy_yuv422_high_depth_native_reconstruction() {
     let format = PixelFormat::yuv422(10).unwrap();
     let input = solid_yuv_planar_high(65, 128, 192, format.bit_depth().bits(), 32, 1);
-    let err = vvc_default_yuv_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }, format)
-        .unwrap_err();
-    assert!(err.contains("4:2:2"), "{err}");
+    let artifacts = vvc_yuv_encode_artifacts_from_input_with_limits(
+        &input,
+        VvcEncodeParams { frames: 1 },
+        VvcVideoGeometry {
+            width: 8,
+            height: 8,
+        },
+        VvcVideoLimits::max_64x64(),
+        format,
+    )
+    .expect("lossy high-depth 4:2:2 should stay native");
+    assert_vvc_annex_b_has_min_picture_nals(&artifacts.bitstream, 1);
+    assert_eq!(artifacts.reconstruction.len(), input.len());
 }
 
 #[test]

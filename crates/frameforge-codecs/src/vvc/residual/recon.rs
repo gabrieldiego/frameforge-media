@@ -1,8 +1,8 @@
 use crate::picture::{ChromaSampling, PlanarYuvGeometry};
 
 use super::super::{
-    vvc_chroma_420_transform_nodes, vvc_neutral_sample, VvcCodingTreeNode, VvcCtuCabacOp,
-    VvcCtuPartitionParams, VvcSample, VvcSampledFrame,
+    chroma_subsample_x, chroma_subsample_y, vvc_chroma_transform_nodes, vvc_neutral_sample,
+    VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcSample, VvcSampledFrame,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node, inverse_transform_vvc_chroma_residual_levels,
@@ -16,8 +16,8 @@ pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
     partition_params: VvcCtuPartitionParams,
 ) -> Vec<VvcSample> {
     match frame.format.chroma_sampling {
-        ChromaSampling::Cs420 => {
-            reconstruct_vvc_residual_frame_420(frame, quantized, partition_params)
+        ChromaSampling::Cs420 | ChromaSampling::Cs422 => {
+            reconstruct_vvc_residual_frame_subsampled(frame, quantized, partition_params)
         }
         ChromaSampling::Cs444 => {
             unreachable!("4:4:4 pictures are reconstructed by the palette path for now")
@@ -28,7 +28,7 @@ pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
     }
 }
 
-fn reconstruct_vvc_residual_frame_420(
+fn reconstruct_vvc_residual_frame_subsampled(
     frame: &VvcSampledFrame,
     quantized: VvcQuantizedColor,
     partition_params: VvcCtuPartitionParams,
@@ -71,7 +71,8 @@ fn reconstruct_vvc_residual_frame_420(
     let chroma_height = layout.chroma_height();
     let mut cb = vec![neutral; chroma_len];
     let mut cr = vec![neutral; chroma_len];
-    for (tu_idx, node) in vvc_chroma_420_transform_nodes(partition_params.shape())
+    let chroma_sampling = frame.format.chroma_sampling;
+    for (tu_idx, node) in vvc_chroma_transform_nodes(partition_params.shape())
         .into_iter()
         .enumerate()
     {
@@ -79,14 +80,15 @@ fn reconstruct_vvc_residual_frame_420(
             &cb,
             frame.geometry,
             node,
-            ChromaSampling::Cs420,
+            chroma_sampling,
             frame.format.bit_depth,
         );
         let cb_residuals = inverse_transform_vvc_chroma_residual_levels(
-            node.width / 2,
-            node.height / 2,
+            node.width / chroma_subsample_x(chroma_sampling) as u16,
+            node.height / chroma_subsample_y(chroma_sampling) as u16,
             &quantized_chroma_coeff_levels(
                 node,
+                chroma_sampling,
                 quantized.cb_tu_dc_levels[tu_idx],
                 quantized.cb_tu_ac_levels[tu_idx],
             ),
@@ -96,7 +98,7 @@ fn reconstruct_vvc_residual_frame_420(
             &mut cb,
             frame.geometry,
             node,
-            ChromaSampling::Cs420,
+            chroma_sampling,
             &cb_predicted,
             &cb_residuals,
             frame.format.bit_depth,
@@ -105,14 +107,15 @@ fn reconstruct_vvc_residual_frame_420(
             &cr,
             frame.geometry,
             node,
-            ChromaSampling::Cs420,
+            chroma_sampling,
             frame.format.bit_depth,
         );
         let cr_residuals = inverse_transform_vvc_chroma_residual_levels(
-            node.width / 2,
-            node.height / 2,
+            node.width / chroma_subsample_x(chroma_sampling) as u16,
+            node.height / chroma_subsample_y(chroma_sampling) as u16,
             &quantized_chroma_coeff_levels(
                 node,
+                chroma_sampling,
                 quantized.cr_tu_dc_levels[tu_idx],
                 quantized.cr_tu_ac_levels[tu_idx],
             ),
@@ -122,7 +125,7 @@ fn reconstruct_vvc_residual_frame_420(
             &mut cr,
             frame.geometry,
             node,
-            ChromaSampling::Cs420,
+            chroma_sampling,
             &cr_predicted,
             &cr_residuals,
             frame.format.bit_depth,
@@ -138,11 +141,12 @@ fn reconstruct_vvc_residual_frame_420(
 
 fn quantized_chroma_coeff_levels(
     node: VvcCodingTreeNode,
+    chroma_sampling: ChromaSampling,
     dc_level: i16,
     ac_levels: [i16; super::VVC_CHROMA_AC_COEFFS_PER_TU],
 ) -> Vec<i16> {
-    let width = usize::from(node.width / 2);
-    let height = usize::from(node.height / 2);
+    let width = usize::from(node.width / chroma_subsample_x(chroma_sampling) as u16);
+    let height = usize::from(node.height / chroma_subsample_y(chroma_sampling) as u16);
     let mut levels = vec![0; width * height];
     levels[0] = dc_level;
     for (slot, level) in ac_levels.iter().enumerate() {

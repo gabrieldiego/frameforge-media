@@ -265,12 +265,9 @@ def run_command(
     vector: generate_test_vectors.TestVector,
     lossless_source: Path | generate_test_vectors.TestVector | None = None,
 ) -> ValidationResult:
-    if output.exists():
-        output.unlink()
-    if recon.exists():
-        recon.unlink()
-    if reference_recon.exists():
-        reference_recon.unlink()
+    output.unlink(missing_ok=True)
+    recon.unlink(missing_ok=True)
+    reference_recon.unlink(missing_ok=True)
 
     for setting in args.setting:
         command.extend(["--set", setting])

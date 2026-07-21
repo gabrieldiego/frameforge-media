@@ -65,13 +65,6 @@ impl VvcCtuPartitionParams {
     }
 }
 
-pub(in crate::vvc) fn vvc_chroma_420_transform_nodes(
-    shape: VvcCtuPartitionShape,
-) -> Vec<VvcCodingTreeNode> {
-    debug_assert_eq!(shape.chroma_sampling, ChromaSampling::Cs420);
-    vvc_chroma_transform_nodes(shape)
-}
-
 pub(in crate::vvc) fn vvc_chroma_transform_nodes(
     shape: VvcCtuPartitionShape,
 ) -> Vec<VvcCodingTreeNode> {

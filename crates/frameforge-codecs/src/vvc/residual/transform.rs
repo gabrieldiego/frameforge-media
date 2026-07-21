@@ -99,16 +99,14 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy(
     residuals: &[i16],
     width: u16,
     height: u16,
+    bit_depth: SampleBitDepth,
 ) -> VvcQuantizedTransformBlock {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
 
-    let residual_sum: i32 = residuals.iter().map(|value| i32::from(*value)).sum();
-    let residual_avg = div_round_nearest_i32(residual_sum, i32::from(width) * i32::from(height));
-    let dc_level = div_round_nearest_i32(residual_avg * VVC_LUMA_DC_NUM, VVC_LUMA_DC_DEN)
-        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth);
 
     let mut coeff_levels = vec![0; coefficient_count];
     coeff_levels[0] = dc_level;
@@ -142,6 +140,51 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy(
         reconstructed_ac_coeffs: ac_coeffs,
         abs_remainder: dc_level.unsigned_abs().min(u8::MAX as u16) as u8,
     }
+}
+
+fn quantize_vvc_luma_residual_dc_by_search(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+) -> i16 {
+    let sample_count = residuals.len() as i64;
+    let residual_sum = residuals.iter().map(|value| i64::from(*value)).sum::<i64>();
+    let original_sse = residuals
+        .iter()
+        .map(|value| i64::from(*value) * i64::from(*value))
+        .sum::<i64>();
+    let unit = dc_only_residual_from_level(1, width, height, VVC_LUMA_QP, bit_depth);
+    if unit == 0 {
+        let residual_avg = div_round_nearest_i64(residual_sum, sample_count);
+        return div_round_nearest_i64(
+            residual_avg * i64::from(VVC_LUMA_DC_NUM),
+            i64::from(VVC_LUMA_DC_DEN),
+        )
+        .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+    }
+
+    let estimate = div_round_nearest_i64(residual_sum, sample_count * i64::from(unit))
+        .clamp(i64::from(i16::MIN), i64::from(i16::MAX));
+    let mut best_level = 0i16;
+    let mut best_sse = original_sse;
+    for candidate in (estimate - 4)..=(estimate + 4) {
+        let level = candidate.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+        let reconstructed = i64::from(dc_only_residual_from_level(
+            level,
+            width,
+            height,
+            VVC_LUMA_QP,
+            bit_depth,
+        ));
+        let sse = original_sse + (sample_count * reconstructed * reconstructed)
+            - (2 * reconstructed * residual_sum);
+        if sse < best_sse {
+            best_sse = sse;
+            best_level = level;
+        }
+    }
+    best_level
 }
 
 pub(in crate::vvc) fn inverse_transform_vvc_luma_residual_levels(
@@ -454,15 +497,6 @@ fn residuals_have_ac_energy(residuals: &[i16]) -> bool {
     residuals
         .first()
         .is_some_and(|first| residuals.iter().any(|value| value != first))
-}
-
-fn div_round_nearest_i32(value: i32, divisor: i32) -> i32 {
-    debug_assert!(divisor > 0);
-    if value < 0 {
-        -(((-value) + (divisor / 2)) / divisor)
-    } else {
-        (value + (divisor / 2)) / divisor
-    }
 }
 
 fn div_round_nearest_i64(value: i64, divisor: i64) -> i64 {

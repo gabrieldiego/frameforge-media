@@ -136,11 +136,8 @@ Current behavior:
   Palette entries carry native samples; high-depth escape-coded samples follow
   VTM palette escape level scaling, which is exact for zero-padded 8-bit
   upconverts but can quantize arbitrary high-depth escape samples.
-- VVC accepts `yuv422p8` through `yuv422p12le` natively for stream-exact
-  lossless 4:2:2 encoding. The current non-lossless 4:2:2 compatibility path
-  still accepts only 8-bit input; higher depths are scaled to `yuv422p8`
-  before non-lossless encoding until that path gains native high-depth syntax
-  and reconstruction.
+- VVC accepts `yuv422p8` through `yuv422p12le` natively for both stream-exact
+  lossless 4:2:2 encoding and the current non-lossless residual path.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 
