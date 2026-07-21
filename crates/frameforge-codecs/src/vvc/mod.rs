@@ -14,7 +14,6 @@ use crate::picture::{
     chroma_subsample_y as planar_chroma_subsample_y, read_input_frame, ChromaSampling, FrameLimit,
     Picture, PixelFormat, PlanarYuvGeometry, SampleBitDepth,
 };
-use frameforge_core::{read_planar_sample, write_planar_sample};
 
 mod cabac;
 mod header;
@@ -1180,13 +1179,30 @@ impl VvcReconstructionFrame {
             self.format.bit_depth,
         );
         let mut output = vec![0; layout.frame_len()];
-        let mut sample_idx = 0;
-        for sample in self.luma.into_iter().chain(self.cb).chain(self.cr) {
-            write_planar_sample(&mut output, sample_idx, sample, self.format.bit_depth)
-                .expect("VVC reconstruction sample index is in bounds");
-            sample_idx += 1;
-        }
+        let bytes_per_sample = layout.bytes_per_sample();
+        let y_bytes = layout.luma_samples() * bytes_per_sample;
+        let c_bytes = layout.chroma_samples() * bytes_per_sample;
+        let (y_plane, chroma) = output.split_at_mut(y_bytes);
+        let (cb_plane, cr_plane) = chroma.split_at_mut(c_bytes);
+        pack_vvc_plane(&self.luma, y_plane, self.format.bit_depth);
+        pack_vvc_plane(&self.cb, cb_plane, self.format.bit_depth);
+        pack_vvc_plane(&self.cr, cr_plane, self.format.bit_depth);
         output
+    }
+}
+
+fn pack_vvc_plane(samples: &[VvcSample], output: &mut [u8], bit_depth: SampleBitDepth) {
+    debug_assert_eq!(output.len(), samples.len() * bit_depth.bytes_per_sample());
+    if bit_depth.bits() <= 8 {
+        for (dst, &sample) in output.iter_mut().zip(samples) {
+            *dst = sample as u8;
+        }
+    } else {
+        for (dst, &sample) in output.chunks_exact_mut(2).zip(samples) {
+            let bytes = sample.to_le_bytes();
+            dst[0] = bytes[0];
+            dst[1] = bytes[1];
+        }
     }
 }
 
@@ -1299,37 +1315,28 @@ fn sample_vvc_yuv_frame_at(
         ));
     }
     let frame_base = frame_len * frame_idx;
-    let frame_sample_base = frame_base / layout.bytes_per_sample();
+    let frame = &input[frame_base..frame_base + frame_len];
 
     let luma_samples = layout.luma_samples();
     let mut luma = vec![0; luma_samples];
-    for (idx, sample) in luma.iter_mut().take(luma_samples).enumerate() {
-        *sample = read_planar_sample(input, frame_sample_base + idx, format.bit_depth())
-            .ok_or_else(|| format!("VVC input sample {idx} is out of bounds"))?
-            .min(format.bit_depth().max_sample());
-    }
 
-    let u_offset = luma_samples;
     let chroma_plane_samples = layout.chroma_samples();
-    let v_offset = u_offset + chroma_plane_samples;
     let mut cb = vec![0; chroma_plane_samples];
     let mut cr = vec![0; chroma_plane_samples];
-    for idx in 0..chroma_plane_samples {
-        cb[idx] = read_planar_sample(
-            input,
-            frame_sample_base + u_offset + idx,
-            format.bit_depth(),
-        )
-        .ok_or_else(|| format!("VVC input Cb sample {idx} is out of bounds"))?
-        .min(format.bit_depth().max_sample());
-        cr[idx] = read_planar_sample(
-            input,
-            frame_sample_base + v_offset + idx,
-            format.bit_depth(),
-        )
-        .ok_or_else(|| format!("VVC input Cr sample {idx} is out of bounds"))?
-        .min(format.bit_depth().max_sample());
-    }
+    let bytes_per_sample = layout.bytes_per_sample();
+    let y_bytes = luma_samples * bytes_per_sample;
+    let c_bytes = chroma_plane_samples * bytes_per_sample;
+    unpack_vvc_plane(&frame[..y_bytes], &mut luma, stream_format.bit_depth);
+    unpack_vvc_plane(
+        &frame[y_bytes..y_bytes + c_bytes],
+        &mut cb,
+        stream_format.bit_depth,
+    );
+    unpack_vvc_plane(
+        &frame[y_bytes + c_bytes..y_bytes + c_bytes * 2],
+        &mut cr,
+        stream_format.bit_depth,
+    );
 
     Ok(VvcSampledFrame {
         geometry,
@@ -1339,6 +1346,20 @@ fn sample_vvc_yuv_frame_at(
         cr,
         chroma_len: chroma_plane_samples,
     })
+}
+
+fn unpack_vvc_plane(input: &[u8], output: &mut [VvcSample], bit_depth: SampleBitDepth) {
+    debug_assert_eq!(input.len(), output.len() * bit_depth.bytes_per_sample());
+    if bit_depth.bits() <= 8 {
+        for (dst, &sample) in output.iter_mut().zip(input) {
+            *dst = VvcSample::from(sample);
+        }
+    } else {
+        let max_sample = bit_depth.max_sample();
+        for (dst, sample) in output.iter_mut().zip(input.chunks_exact(2)) {
+            *dst = u16::from_le_bytes([sample[0], sample[1]]).min(max_sample);
+        }
+    }
 }
 
 fn validate_vvc_exact_frame_count(params: VvcEncodeParams) -> Result<FrameLimit, String> {

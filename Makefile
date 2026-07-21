@@ -61,6 +61,22 @@ COMPRESSION_AVM_TILE_COLUMNS ?= auto
 COMPRESSION_AVM_TILE_ROWS ?= 0
 COMPRESSION_REFRESH_REFERENCE ?= 0
 COMPRESSION_DIRECT_SOURCE_FILES ?= 0
+ENCODE_MATRIX_SET ?= local-aomctc-b2-scc-1080p-lossless-50f
+ENCODE_MATRIX_OUT_DIR ?= verification/generated/encode_matrix
+ENCODE_MATRIX_RUN ?=
+ENCODE_MATRIX_CODECS ?=
+ENCODE_MATRIX_MODES ?=
+ENCODE_MATRIX_BASELINE ?=
+ENCODE_MATRIX_LIMIT ?=
+ENCODE_MATRIX_AV2_LOSSY_QP ?= 24
+ENCODE_MATRIX_AV2_PREDICTIVE ?= 1
+ENCODE_MATRIX_DIRECT_SOURCE_FILES ?= 1
+GEOMETRY_SWEEP_SETS ?= screenshot-sweep-444 screenshot-sweep-444-10bit screenshot-sweep-420-10bit-canary
+GEOMETRY_SWEEP_CODECS ?= av2 vvc
+GEOMETRY_SWEEP_MODES ?= lossless lossy
+GEOMETRY_SWEEP_REFERENCE_MODE ?= off
+GEOMETRY_SWEEP_AV2_LOSSY_QP ?= 24
+GEOMETRY_SWEEP_AV2_SETTINGS ?= predictive
 LIBAOM_SB_BITS ?= 0
 LIBAOM_SB_BITS_BUILD_DIR ?= verification/references/libaom/libaom/build-sb-bits
 LIBAOM_SB_BITS_ENCODER ?= $(LIBAOM_SB_BITS_BUILD_DIR)/aomenc
@@ -86,9 +102,17 @@ COMPRESSION_SETTINGS_FLAG := $(foreach setting,$(COMPRESSION_SETTINGS),--setting
 COMPRESSION_QP_FLAG := $(if $(strip $(COMPRESSION_QP)),--qp "$(COMPRESSION_QP)",)
 COMPRESSION_REFRESH_REFERENCE_FLAG := $(if $(filter 1 true yes,$(COMPRESSION_REFRESH_REFERENCE)),--refresh-reference,)
 COMPRESSION_DIRECT_SOURCE_FILES_FLAG := $(if $(filter 1 true yes,$(COMPRESSION_DIRECT_SOURCE_FILES)),--direct-source-files,)
+ENCODE_MATRIX_RUN_FLAG := $(if $(strip $(ENCODE_MATRIX_RUN)),--run-name "$(ENCODE_MATRIX_RUN)",)
+ENCODE_MATRIX_CODECS_FLAG := $(foreach codec,$(ENCODE_MATRIX_CODECS),--codec "$(codec)")
+ENCODE_MATRIX_MODES_FLAG := $(foreach mode,$(ENCODE_MATRIX_MODES),--mode "$(mode)")
+ENCODE_MATRIX_BASELINE_FLAG := $(if $(strip $(ENCODE_MATRIX_BASELINE)),--baseline-json "$(ENCODE_MATRIX_BASELINE)",)
+ENCODE_MATRIX_LIMIT_FLAG := $(if $(strip $(ENCODE_MATRIX_LIMIT)),--limit "$(ENCODE_MATRIX_LIMIT)",)
+ENCODE_MATRIX_AV2_PREDICTIVE_FLAG := $(if $(filter 1 true yes,$(ENCODE_MATRIX_AV2_PREDICTIVE)),--av2-predictive,--no-av2-predictive)
+ENCODE_MATRIX_DIRECT_SOURCE_FILES_FLAG := $(if $(filter 1 true yes,$(ENCODE_MATRIX_DIRECT_SOURCE_FILES)),--direct-source-files,--no-direct-source-files)
+GEOMETRY_SWEEP_AV2_SETTINGS_FLAG := $(foreach setting,$(GEOMETRY_SWEEP_AV2_SETTINGS),--setting $(setting))
 GPROF_PROFILE_SETTINGS_FLAG := $(foreach setting,$(GPROF_PROFILE_SETTINGS),--set "$(setting)")
 
-.PHONY: help check-tools fmt check test build debug run reference-list reference-setup test-vector-sets test-vectors validate-set compare-compression profile-av2-i-lossless regression clean release-check
+.PHONY: help check-tools fmt check test build debug run reference-list reference-setup test-vector-sets test-vectors validate-set compare-compression benchmark-encode-matrix validate-geometry-sweep profile-av2-i-lossless regression clean release-check
 
 help:
 	@printf '%s\n' \
@@ -130,6 +154,10 @@ help:
 		'                         Set AVM_SB_BITS=1 for instrumented AVM reference builds' \
 		'                         Set COMPRESSION_DIRECT_SOURCE_FILES=1 to feed source_file inputs directly' \
 		'                         Set COMPRESSION_REFRESH_REFERENCE=1 to ignore cache' \
+		'  make benchmark-encode-matrix' \
+		'                         Time AV2/VVC lossy/lossless encodes over ENCODE_MATRIX_SET' \
+		'  make validate-geometry-sweep' \
+		'                         Run small geometry sweeps for AV2/VVC lossy/lossless modes' \
 		'  make regression       Run smoke validation for AV2 and VVC' \
 		'  make release-check    Run the default local quality gate' \
 		'  make clean            Remove Cargo build outputs' \
@@ -180,6 +208,23 @@ validate-set: build
 
 compare-compression: build
 	$(REFERENCE_ENV) $(PYTHON) scripts/compare_reference_compression.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
+
+benchmark-encode-matrix: build
+	$(PYTHON) scripts/benchmark_encode_matrix.py "$(ENCODE_MATRIX_SET)" --ff "$(abspath $(BUILD_BINARY))" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(ENCODE_MATRIX_OUT_DIR)" --av2-lossy-qp "$(ENCODE_MATRIX_AV2_LOSSY_QP)" $(ENCODE_MATRIX_RUN_FLAG) $(ENCODE_MATRIX_CODECS_FLAG) $(ENCODE_MATRIX_MODES_FLAG) $(ENCODE_MATRIX_BASELINE_FLAG) $(ENCODE_MATRIX_LIMIT_FLAG) $(ENCODE_MATRIX_AV2_PREDICTIVE_FLAG) $(ENCODE_MATRIX_DIRECT_SOURCE_FILES_FLAG)
+
+validate-geometry-sweep: build
+	for codec in $(GEOMETRY_SWEEP_CODECS); do \
+		for mode in $(GEOMETRY_SWEEP_MODES); do \
+			for set in $(GEOMETRY_SWEEP_SETS); do \
+				extra=""; \
+				settings=""; \
+				if [ "$$codec" = "av2" ]; then settings='$(GEOMETRY_SWEEP_AV2_SETTINGS_FLAG)'; fi; \
+				if [ "$$mode" = "lossy" ]; then extra="--force-lossy"; fi; \
+				if [ "$$codec" = "av2" ] && [ "$$mode" = "lossy" ]; then extra="$$extra --qp $(GEOMETRY_SWEEP_AV2_LOSSY_QP)"; fi; \
+				$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec "$$codec" "$$set" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(GEOMETRY_SWEEP_REFERENCE_MODE)" --stop-on-fail $$settings $$extra; \
+			done; \
+		done; \
+	done
 
 profile-av2-i-lossless:
 	$(MAKE) build PROFILE=gprof

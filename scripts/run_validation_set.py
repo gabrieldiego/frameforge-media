@@ -56,12 +56,24 @@ def main() -> int:
     )
     parser.add_argument("--setting", action="append", default=[], help="extra --set key[=value]")
     parser.add_argument(
+        "--qp",
+        type=parse_qp,
+        help="pass a lossy AV2 --qp value and treat manifest lossless rows as lossy",
+    )
+    parser.add_argument(
+        "--force-lossy",
+        action="store_true",
+        help="do not pass --set lossless even when the manifest row is lossless",
+    )
+    parser.add_argument(
         "--source-filters",
         action="store_true",
         help="run manifest patterns directly through --filter pattern=... without input files",
     )
     parser.add_argument("--stop-on-fail", action="store_true")
     args = parser.parse_args()
+    if args.qp is not None and args.codec.lower() != "av2":
+        parser.error("--qp is currently supported for AV2 validation only")
 
     if not args.ff.exists():
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
@@ -159,8 +171,10 @@ def run_file_case(
             str(recon),
         ]
     )
-    if vector.lossless:
+    if effective_lossless(vector, args):
         command.extend(["--set", "lossless"])
+    if args.qp is not None:
+        command.extend(["--qp", str(args.qp)])
     return run_command(
         vector_path.name,
         output,
@@ -170,7 +184,7 @@ def run_file_case(
         command,
         args,
         vector,
-        lossless_source=vector_path if vector.lossless else None,
+        lossless_source=vector_path if effective_lossless(vector, args) else None,
     )
 
 
@@ -190,8 +204,10 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
     if vector.fps is not None:
         command.extend(["--fps", vector.fps])
     command.extend(["--encode", f"{args.codec}:{output}", "--recon", str(recon)])
-    if vector.lossless:
+    if effective_lossless(vector, args):
         command.extend(["--set", "lossless"])
+    if args.qp is not None:
+        command.extend(["--qp", str(args.qp)])
     return run_command(
         vector.filename,
         output,
@@ -201,8 +217,26 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
         command,
         args,
         vector,
-        lossless_source=vector if vector.lossless else None,
+        lossless_source=vector if effective_lossless(vector, args) else None,
     )
+
+
+def effective_lossless(vector: generate_test_vectors.TestVector, args: argparse.Namespace) -> bool:
+    return vector.lossless and not args.force_lossy and args.qp is None
+
+
+def parse_qp(value: str) -> int:
+    try:
+        qp = int(value, 10)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            f"QP expects an integer from 1 through 255, got '{value}'"
+        ) from err
+    if not (1 <= qp <= 255):
+        raise argparse.ArgumentTypeError(
+            f"QP expects an integer from 1 through 255, got '{value}'"
+        )
+    return qp
 
 
 def case_paths(stem: str, args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:

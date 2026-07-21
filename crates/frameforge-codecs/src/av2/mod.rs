@@ -807,11 +807,11 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     let mut predictive_reference: Option<Vec<u8>> = None;
     let mut predictive_reconstruction: Option<Vec<u8>> = None;
     let frame_limit = FrameLimit::from_frame_count(request.params.frames);
+    let mut source_frame = vec![0; source_expected_len];
     let mut frame_index = 0usize;
     while frame_limit.should_read(frame_index) {
         #[cfg(feature = "av2-sb-bit-profile")]
         sb_bits::set_current_frame(frame_index);
-        let mut source_frame = vec![0; source_expected_len];
         if !read_input_frame(
             input,
             &mut source_frame,
@@ -1065,11 +1065,10 @@ fn rgb24_to_planar_gbr(frame: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {
     let mut out = vec![0; pixels * 3];
     let (g_plane, chroma) = out.split_at_mut(pixels);
     let (b_plane, r_plane) = chroma.split_at_mut(pixels);
-    for pixel in 0..pixels {
-        let src = pixel * 3;
-        r_plane[pixel] = frame[src];
-        g_plane[pixel] = frame[src + 1];
-        b_plane[pixel] = frame[src + 2];
+    for (pixel, source) in frame.chunks_exact(3).enumerate() {
+        r_plane[pixel] = source[0];
+        g_plane[pixel] = source[1];
+        b_plane[pixel] = source[2];
     }
     out
 }
@@ -1080,11 +1079,13 @@ fn planar_gbr_to_rgb24(frame: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {
     let (g_plane, chroma) = frame.split_at(pixels);
     let (b_plane, r_plane) = chroma.split_at(pixels);
     let mut out = vec![0; pixels * 3];
-    for pixel in 0..pixels {
-        let dst = pixel * 3;
-        out[dst] = r_plane[pixel];
-        out[dst + 1] = g_plane[pixel];
-        out[dst + 2] = b_plane[pixel];
+    for (pixel, ((&r, &g), &b)) in out
+        .chunks_exact_mut(3)
+        .zip(r_plane.iter().zip(g_plane.iter()).zip(b_plane.iter()))
+    {
+        pixel[0] = r;
+        pixel[1] = g;
+        pixel[2] = b;
     }
     out
 }
