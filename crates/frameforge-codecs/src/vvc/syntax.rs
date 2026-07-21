@@ -1,4 +1,4 @@
-use crate::bitstream::{rbsp_trailing_bits, BitWriter};
+use crate::bitstream::{SyntaxBitWriter, SyntaxField};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VvcSyntaxCode {
@@ -11,19 +11,11 @@ pub enum VvcSyntaxCode {
     RbspTrailingBits,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VvcSyntaxField {
-    pub name: &'static str,
-    pub code: VvcSyntaxCode,
-    pub bit_offset: usize,
-    pub bit_count: usize,
-}
+pub type VvcSyntaxField = SyntaxField<VvcSyntaxCode>;
 
 #[derive(Debug, Default, Clone)]
 pub struct VvcSyntaxWriter {
-    writer: BitWriter,
-    fields: Vec<VvcSyntaxField>,
-    bit_offset: usize,
+    writer: SyntaxBitWriter<VvcSyntaxCode>,
 }
 
 impl VvcSyntaxWriter {
@@ -32,9 +24,8 @@ impl VvcSyntaxWriter {
     }
 
     pub fn write_flag(&mut self, name: &'static str, value: bool) {
-        self.push_field(name, VvcSyntaxCode::Flag, 1);
-        self.writer.write_bool(value);
-        self.bit_offset += 1;
+        self.writer
+            .write_field_bool(name, VvcSyntaxCode::Flag, value);
     }
 
     pub fn write_u(&mut self, name: &'static str, value: u64, bit_count: u8) {
@@ -45,9 +36,8 @@ impl VvcSyntaxWriter {
                 "value does not fit in u({bit_count})"
             );
         }
-        self.push_field(name, VvcSyntaxCode::U, bit_count as usize);
-        self.writer.write_bits(value, bit_count);
-        self.bit_offset += bit_count as usize;
+        self.writer
+            .write_field_bits(name, VvcSyntaxCode::U, value, bit_count);
     }
 
     pub fn write_ue(&mut self, name: &'static str, value: u32) {
@@ -69,12 +59,11 @@ impl VvcSyntaxWriter {
         let bit_count = 64 - code_num.leading_zeros() as u8;
         let leading_zero_bits = bit_count - 1;
         let total_bits = (leading_zero_bits * 2) + 1;
-        self.push_field(name, code, total_bits as usize);
+        self.writer.record_field(name, code, total_bits as usize);
         for _ in 0..leading_zero_bits {
             self.writer.write_bit(false);
         }
         self.writer.write_bits(code_num, bit_count);
-        self.bit_offset += total_bits as usize;
     }
 
     pub fn write_cabac_token(&mut self, name: &'static str, value: u64, bit_count: u8) {
@@ -82,43 +71,23 @@ impl VvcSyntaxWriter {
             bit_count <= 64,
             "CABAC token cannot write more than 64 bits"
         );
-        self.push_field(name, VvcSyntaxCode::CabacToken, bit_count as usize);
-        self.writer.write_bits(value, bit_count);
-        self.bit_offset += bit_count as usize;
+        self.writer
+            .write_field_bits(name, VvcSyntaxCode::CabacToken, value, bit_count);
     }
 
     pub fn write_cabac_bits(&mut self, name: &'static str, bits: &[bool]) {
-        self.push_field(name, VvcSyntaxCode::CabacToken, bits.len());
-        for bit in bits {
-            self.writer.write_bit(*bit);
-        }
-        self.bit_offset += bits.len();
+        self.writer
+            .write_field_bit_slice(name, VvcSyntaxCode::CabacToken, bits);
     }
 
     pub fn byte_align_zero(&mut self, name: &'static str) {
-        let remainder = self.bit_offset % 8;
-        if remainder == 0 {
-            return;
-        }
-        let bit_count = 8 - remainder;
-        self.push_field(name, VvcSyntaxCode::ByteAlignZero, bit_count);
-        self.writer.byte_align_zero();
-        self.bit_offset += bit_count;
+        self.writer
+            .write_byte_align_zero(name, VvcSyntaxCode::ByteAlignZero);
     }
 
     pub fn rbsp_trailing_bits(&mut self) {
-        let bit_count = if self.writer.is_byte_aligned() {
-            8
-        } else {
-            8 - (self.bit_offset % 8)
-        };
-        self.push_field(
-            "rbsp_trailing_bits",
-            VvcSyntaxCode::RbspTrailingBits,
-            bit_count,
-        );
-        rbsp_trailing_bits(&mut self.writer);
-        self.bit_offset += bit_count;
+        self.writer
+            .write_trailing_one_zero_bits("rbsp_trailing_bits", VvcSyntaxCode::RbspTrailingBits);
     }
 
     pub fn is_byte_aligned(&self) -> bool {
@@ -126,7 +95,7 @@ impl VvcSyntaxWriter {
     }
 
     pub fn fields(&self) -> &[VvcSyntaxField] {
-        &self.fields
+        self.writer.fields()
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
@@ -134,19 +103,8 @@ impl VvcSyntaxWriter {
     }
 
     pub fn finish(self) -> VvcSyntaxRbsp {
-        VvcSyntaxRbsp {
-            bytes: self.writer.into_bytes(),
-            fields: self.fields,
-        }
-    }
-
-    fn push_field(&mut self, name: &'static str, code: VvcSyntaxCode, bit_count: usize) {
-        self.fields.push(VvcSyntaxField {
-            name,
-            code,
-            bit_offset: self.bit_offset,
-            bit_count,
-        });
+        let (bytes, fields) = self.writer.into_parts();
+        VvcSyntaxRbsp { bytes, fields }
     }
 }
 
