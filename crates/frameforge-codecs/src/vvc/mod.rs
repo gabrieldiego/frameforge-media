@@ -8,6 +8,7 @@
 
 use std::io::{Cursor, Read, Write};
 
+use crate::instrumentation::CountingWriter;
 use crate::picture::{
     read_input_frame, ChromaSampling, FrameLimit, Picture, PixelFormat, SampleBitDepth,
 };
@@ -1011,36 +1012,6 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         }
     } else {
         Ok(())
-    }
-}
-
-struct CountingWriter<'a, W: Write> {
-    inner: &'a mut W,
-    bytes_written: usize,
-}
-
-impl<'a, W: Write> CountingWriter<'a, W> {
-    fn new(inner: &'a mut W) -> Self {
-        Self {
-            inner,
-            bytes_written: 0,
-        }
-    }
-
-    fn bytes_written(&self) -> usize {
-        self.bytes_written
-    }
-}
-
-impl<W: Write> Write for CountingWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        self.bytes_written += written;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
     }
 }
 

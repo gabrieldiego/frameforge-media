@@ -1,7 +1,7 @@
-use std::fs::OpenOptions;
-use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+use crate::instrumentation::JsonlInstrumentationSink;
 
 use super::{AV2_MI_SIZE, AV2_MVP_SUPERBLOCK_SIZE};
 
@@ -16,13 +16,7 @@ pub(crate) fn set_current_frame(frame_index: usize) {
 
 #[derive(Debug)]
 struct Av2SbBitReport {
-    destination: Av2SbBitReportDestination,
-}
-
-#[derive(Debug)]
-enum Av2SbBitReportDestination {
-    File(BufWriter<std::fs::File>),
-    Stderr,
+    sink: JsonlInstrumentationSink,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,9 +172,13 @@ impl Av2SbBitCost {
 }
 
 impl Av2SbBitReport {
-    fn write_line(&mut self, collector: &Av2SbBitCollector, cost: &Av2SbBitCost) -> io::Result<()> {
+    fn write_line(
+        &mut self,
+        collector: &Av2SbBitCollector,
+        cost: &Av2SbBitCost,
+    ) -> std::io::Result<()> {
         let line = format!(
-            "{{\"codec\":\"av2\",\"source\":\"frameforge\",\"path\":\"{}\",\"frame_index\":{},\"tile_origin_x\":{},\"tile_origin_y\":{},\"tile_width\":{},\"tile_height\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"total_symbol_bits\":{},\"decision_count\":{},\"leaf_count\":{}}}\n",
+            "{{\"codec\":\"av2\",\"source\":\"frameforge\",\"path\":\"{}\",\"frame_index\":{},\"tile_origin_x\":{},\"tile_origin_y\":{},\"tile_width\":{},\"tile_height\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"total_symbol_bits\":{},\"decision_count\":{},\"leaf_count\":{}}}",
             collector.path,
             collector.frame_index,
             collector.tile_origin_x,
@@ -206,45 +204,26 @@ impl Av2SbBitReport {
             cost.decision_count,
             cost.leaf_count,
         );
-        match &mut self.destination {
-            Av2SbBitReportDestination::File(file) => file.write_all(line.as_bytes()),
-            Av2SbBitReportDestination::Stderr => std::io::stderr().write_all(line.as_bytes()),
-        }
+        self.sink.write_json_line(&line)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        match &mut self.destination {
-            Av2SbBitReportDestination::File(file) => file.flush(),
-            Av2SbBitReportDestination::Stderr => std::io::stderr().flush(),
-        }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.sink.flush()
     }
 }
 
 fn report() -> Option<&'static Mutex<Av2SbBitReport>> {
     REPORT
         .get_or_init(|| {
-            let value = std::env::var_os(REPORT_ENV)?;
-            if value == "0" {
-                return None;
-            }
-            if value == "-" {
-                return Some(Mutex::new(Av2SbBitReport {
-                    destination: Av2SbBitReportDestination::Stderr,
-                }));
-            }
-            let file = match OpenOptions::new().create(true).append(true).open(&value) {
-                Ok(file) => file,
+            let sink = match JsonlInstrumentationSink::append_from_env(REPORT_ENV) {
+                Ok(Some(sink)) => sink,
+                Ok(None) => return None,
                 Err(err) => {
-                    eprintln!(
-                        "failed to open {REPORT_ENV} destination '{}': {err}",
-                        value.to_string_lossy()
-                    );
+                    eprintln!("failed to open {REPORT_ENV} destination: {err}");
                     return None;
                 }
             };
-            Some(Mutex::new(Av2SbBitReport {
-                destination: Av2SbBitReportDestination::File(BufWriter::new(file)),
-            }))
+            Some(Mutex::new(Av2SbBitReport { sink }))
         })
         .as_ref()
 }

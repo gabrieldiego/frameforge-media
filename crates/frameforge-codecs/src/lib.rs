@@ -7,6 +7,7 @@
 #[cfg(feature = "av2")]
 pub mod av2;
 pub mod bitstream;
+pub mod instrumentation;
 #[cfg(any(feature = "av2", feature = "vvc"))]
 mod picture;
 pub mod trace;
