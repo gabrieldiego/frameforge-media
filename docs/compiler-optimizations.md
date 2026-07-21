@@ -918,6 +918,61 @@ The full generated report for this run was written to:
 verification/generated/encode_matrix/vvc-direct-residual-extract.md
 ```
 
+### VVC Prediction Scratch
+
+Checkpoint: `vvc-prediction-stack-scratch`.
+
+Change retained:
+
+- VVC residual quantization and reconstruction reuse the predicted luma/Cb/Cr
+  buffers across transform units within a frame.
+- DC intra prediction now keeps top and left reference samples in fixed arrays
+  sized to the encoder CTU edge, avoiding per-TU reference-vector allocation.
+- Residual reconstruction also uses the direct luma transform-node traversal
+  instead of constructing CABAC partition ops only to filter luma leaves.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-prediction-stack-scratch \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-direct-residual-extract.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.73 | 0.74 | +1.4% | 0 | 0 |
+| lossy | 0.65 | 0.67 | +3.1% | 0 | 0 |
+
+All rows were byte-identical to `vvc-direct-residual-extract`; lossless rows
+remained exact and lossy PSNR was unchanged. The 8-bit 4:2:0 and 4:2:2 lossy
+rows each gained about 0.04 fps in this run.
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-prediction-stack-scratch.md
+```
+
+AV2 sanity command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-after-vvc-prediction-stack-scratch \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/av2-shared-pixel-metrics-check.json
+```
+
+Result: all 12 AV2 rows were byte-identical to
+`av2-shared-pixel-metrics-check` and lossy PSNR was unchanged. Totals were
+83,531,302 bytes at 9.09 fps for `lossless+predictive` and 41,098,794 bytes at
+3.83 fps for `qp=24+predictive`.
+
 ## References
 
 - Cargo profile settings:

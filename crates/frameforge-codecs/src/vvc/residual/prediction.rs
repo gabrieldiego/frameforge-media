@@ -2,16 +2,20 @@ use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcCodingTreeNode, VvcSample,
-    VvcVideoGeometry,
+    VvcVideoGeometry, VVC_CTU_SIZE,
 };
 
-pub(in crate::vvc) fn predict_vvc_luma_dc_block(
+pub(in crate::vvc) fn predict_vvc_luma_dc_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
     luma: &[VvcSample],
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
     bit_depth: SampleBitDepth,
-) -> Vec<VvcSample> {
-    predict_vvc_dc_block(
+) {
+    predict_vvc_dc_block_into(
+        prediction,
+        scratch,
         luma,
         geometry.width,
         geometry.height,
@@ -20,19 +24,23 @@ pub(in crate::vvc) fn predict_vvc_luma_dc_block(
         usize::from(node.width),
         usize::from(node.height),
         bit_depth,
-    )
+    );
 }
 
-pub(in crate::vvc) fn predict_vvc_chroma_dc_block(
+pub(in crate::vvc) fn predict_vvc_chroma_dc_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
     chroma: &[VvcSample],
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
     chroma_sampling: ChromaSampling,
     bit_depth: SampleBitDepth,
-) -> Vec<VvcSample> {
+) {
     let subsample_x = chroma_subsample_x(chroma_sampling);
     let subsample_y = chroma_subsample_y(chroma_sampling);
-    predict_vvc_dc_block(
+    predict_vvc_dc_block_into(
+        prediction,
+        scratch,
         chroma,
         geometry.width / subsample_x,
         geometry.height / subsample_y,
@@ -41,10 +49,26 @@ pub(in crate::vvc) fn predict_vvc_chroma_dc_block(
         usize::from(node.width) / subsample_x,
         usize::from(node.height) / subsample_y,
         bit_depth,
-    )
+    );
 }
 
-fn predict_vvc_dc_block(
+pub(in crate::vvc) struct VvcDcPredictionScratch {
+    top: [VvcSample; VVC_CTU_SIZE],
+    left: [VvcSample; VVC_CTU_SIZE],
+}
+
+impl Default for VvcDcPredictionScratch {
+    fn default() -> Self {
+        Self {
+            top: [0; VVC_CTU_SIZE],
+            left: [0; VVC_CTU_SIZE],
+        }
+    }
+}
+
+fn predict_vvc_dc_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
     plane: &[VvcSample],
     plane_width: usize,
     plane_height: usize,
@@ -53,8 +77,11 @@ fn predict_vvc_dc_block(
     width: usize,
     height: usize,
     bit_depth: SampleBitDepth,
-) -> Vec<VvcSample> {
-    let top = top_references(
+) {
+    debug_assert!(width <= VVC_CTU_SIZE);
+    debug_assert!(height <= VVC_CTU_SIZE);
+    top_references_into(
+        &mut scratch.top,
         plane,
         plane_width,
         plane_height,
@@ -63,7 +90,8 @@ fn predict_vvc_dc_block(
         width,
         bit_depth,
     );
-    let left = left_references(
+    left_references_into(
+        &mut scratch.left,
         plane,
         plane_width,
         plane_height,
@@ -72,8 +100,11 @@ fn predict_vvc_dc_block(
         height,
         bit_depth,
     );
-    let dc = dc_prediction_value(&top, &left, width, height);
-    let mut prediction = vec![dc; width * height];
+    let top = &scratch.top[..width];
+    let left = &scratch.left[..height];
+    let dc = dc_prediction_value(top, left, width, height);
+    prediction.clear();
+    prediction.resize(width * height, dc);
 
     // VTM IntraPrediction::predIntraAng applies PDPC to DC mode when the
     // luma TU is at least MIN_TB_SIZEY in both dimensions and multiRefIdx is
@@ -94,8 +125,6 @@ fn predict_vvc_dc_block(
             }
         }
     }
-
-    prediction
 }
 
 pub(in crate::vvc) fn fill_visible_luma_node(
@@ -156,7 +185,8 @@ pub(in crate::vvc) fn fill_visible_chroma_node(
     }
 }
 
-fn top_references(
+fn top_references_into(
+    out: &mut [VvcSample],
     plane: &[VvcSample],
     plane_width: usize,
     plane_height: usize,
@@ -164,15 +194,15 @@ fn top_references(
     start_y: usize,
     width: usize,
     bit_depth: SampleBitDepth,
-) -> Vec<VvcSample> {
+) {
+    debug_assert!(out.len() >= width);
     if start_y > 0 {
         let row = (start_y - 1) * plane_width;
-        return (0..width)
-            .map(|x| {
-                let src_x = (start_x + x).min(plane_width.saturating_sub(1));
-                plane[row + src_x]
-            })
-            .collect();
+        for (x, dst) in out.iter_mut().take(width).enumerate() {
+            let src_x = (start_x + x).min(plane_width.saturating_sub(1));
+            *dst = plane[row + src_x];
+        }
+        return;
     }
 
     let fallback = if start_x > 0 && start_y < plane_height {
@@ -180,10 +210,11 @@ fn top_references(
     } else {
         vvc_neutral_sample(bit_depth)
     };
-    vec![fallback; width]
+    out[..width].fill(fallback);
 }
 
-fn left_references(
+fn left_references_into(
+    out: &mut [VvcSample],
     plane: &[VvcSample],
     plane_width: usize,
     plane_height: usize,
@@ -191,14 +222,14 @@ fn left_references(
     start_y: usize,
     height: usize,
     bit_depth: SampleBitDepth,
-) -> Vec<VvcSample> {
+) {
+    debug_assert!(out.len() >= height);
     if start_x > 0 {
-        return (0..height)
-            .map(|y| {
-                let src_y = (start_y + y).min(plane_height.saturating_sub(1));
-                plane[src_y * plane_width + start_x - 1]
-            })
-            .collect();
+        for (y, dst) in out.iter_mut().take(height).enumerate() {
+            let src_y = (start_y + y).min(plane_height.saturating_sub(1));
+            *dst = plane[src_y * plane_width + start_x - 1];
+        }
+        return;
     }
 
     let fallback = if start_y > 0 && start_x < plane_width {
@@ -206,7 +237,7 @@ fn left_references(
     } else {
         vvc_neutral_sample(bit_depth)
     };
-    vec![fallback; height]
+    out[..height].fill(fallback);
 }
 
 fn dc_prediction_value(

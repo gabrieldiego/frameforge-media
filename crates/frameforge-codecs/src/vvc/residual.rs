@@ -18,8 +18,8 @@ pub(super) use transform::{
 };
 
 pub(super) use prediction::{
-    fill_visible_chroma_node, fill_visible_luma_node, predict_vvc_chroma_dc_block,
-    predict_vvc_luma_dc_block,
+    fill_visible_chroma_node, fill_visible_luma_node, predict_vvc_chroma_dc_block_into,
+    predict_vvc_luma_dc_block_into, VvcDcPredictionScratch,
 };
 pub use quant::quantize_vvc_color;
 pub(super) use quant::quantize_vvc_frame;

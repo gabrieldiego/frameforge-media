@@ -6,8 +6,9 @@ use super::super::{
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node, inverse_transform_vvc_chroma_residual_levels,
-    predict_vvc_chroma_dc_block, predict_vvc_luma_dc_block, quantize_vvc_chroma_residual_greedy,
-    quantize_vvc_chroma_sample, quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
+    predict_vvc_chroma_dc_block_into, predict_vvc_luma_dc_block_into,
+    quantize_vvc_chroma_residual_greedy, quantize_vvc_chroma_sample,
+    quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma, VvcDcPredictionScratch,
     VvcQuantizedColor, VvcQuantizedTransformBlock, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
     VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
 };
@@ -31,12 +32,18 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
     let mut cr_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
     let mut reconstructed_cb = vec![neutral; frame.chroma_len];
     let mut reconstructed_cr = vec![neutral; frame.chroma_len];
+    let mut prediction_scratch = VvcDcPredictionScratch::default();
+    let mut predicted_luma = Vec::new();
+    let mut predicted_cb = Vec::new();
+    let mut predicted_cr = Vec::new();
 
     for node in vvc_luma_tu_nodes(frame.geometry, frame.format.chroma_sampling) {
         if luma_tu_count >= MAX_VVC_LUMA_TUS {
             break;
         }
-        let predicted = predict_vvc_luma_dc_block(
+        predict_vvc_luma_dc_block_into(
+            &mut predicted_luma,
+            &mut prediction_scratch,
             &reconstructed_luma,
             frame.geometry,
             node,
@@ -48,7 +55,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             usize::from(node.y),
             usize::from(node.width),
             usize::from(node.height),
-            &predicted,
+            &predicted_luma,
         );
         let quantized = quantize_vvc_luma_residual_greedy(
             &residuals,
@@ -72,7 +79,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             &mut reconstructed_luma,
             frame.geometry,
             node,
-            &predicted,
+            &predicted_luma,
             &reconstructed_residual,
             frame.format.bit_depth,
         );
@@ -92,14 +99,18 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        let cb_predicted = predict_vvc_chroma_dc_block(
+        predict_vvc_chroma_dc_block_into(
+            &mut predicted_cb,
+            &mut prediction_scratch,
             &reconstructed_cb,
             frame.geometry,
             node,
             frame.format.chroma_sampling,
             frame.format.bit_depth,
         );
-        let cr_predicted = predict_vvc_chroma_dc_block(
+        predict_vvc_chroma_dc_block_into(
+            &mut predicted_cr,
+            &mut prediction_scratch,
             &reconstructed_cr,
             frame.geometry,
             node,
@@ -114,7 +125,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             chroma_y,
             chroma_width,
             chroma_height,
-            &cb_predicted,
+            &predicted_cb,
         );
         let cr_residuals = residual_chroma_tu_at(
             &frame.cr,
@@ -124,7 +135,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             chroma_y,
             chroma_width,
             chroma_height,
-            &cr_predicted,
+            &predicted_cr,
         );
         let cb_quantized = quantize_vvc_chroma_residual_greedy(
             &cb_residuals,
@@ -159,7 +170,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             frame.geometry,
             node,
             frame.format.chroma_sampling,
-            &cb_predicted,
+            &predicted_cb,
             &cb_reconstructed_residual,
             frame.format.bit_depth,
         );
@@ -168,7 +179,7 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             frame.geometry,
             node,
             frame.format.chroma_sampling,
-            &cr_predicted,
+            &predicted_cr,
             &cr_reconstructed_residual,
             frame.format.bit_depth,
         );
@@ -224,6 +235,10 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
     let mut reconstructed_luma = vec![neutral; frame.geometry.luma_samples()];
     let mut reconstructed_cb = vec![neutral; frame.chroma_len];
     let mut reconstructed_cr = vec![neutral; frame.chroma_len];
+    let mut prediction_scratch = VvcDcPredictionScratch::default();
+    let mut predicted_luma = Vec::new();
+    let mut predicted_cb = Vec::new();
+    let mut predicted_cr = Vec::new();
 
     let mut luma_tu_count = 0;
     for node in vvc_luma_tu_nodes_with_leaf_size(
@@ -234,7 +249,9 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
         if luma_tu_count >= MAX_VVC_LUMA_TUS {
             break;
         }
-        let predicted = predict_vvc_luma_dc_block(
+        predict_vvc_luma_dc_block_into(
+            &mut predicted_luma,
+            &mut prediction_scratch,
             &reconstructed_luma,
             frame.geometry,
             node,
@@ -246,7 +263,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             usize::from(node.y),
             usize::from(node.width),
             usize::from(node.height),
-            &predicted,
+            &predicted_luma,
         );
         let dc_level = residuals.first().copied().unwrap_or(0);
         luma_tu_remainders[luma_tu_count] = dc_level.unsigned_abs().min(u8::MAX as u16) as u8;
@@ -258,7 +275,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             &mut reconstructed_luma,
             frame.geometry,
             node,
-            &predicted,
+            &predicted_luma,
             &residuals,
             frame.format.bit_depth,
         );
@@ -279,14 +296,18 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        let cb_predicted = predict_vvc_chroma_dc_block(
+        predict_vvc_chroma_dc_block_into(
+            &mut predicted_cb,
+            &mut prediction_scratch,
             &reconstructed_cb,
             frame.geometry,
             node,
             frame.format.chroma_sampling,
             frame.format.bit_depth,
         );
-        let cr_predicted = predict_vvc_chroma_dc_block(
+        predict_vvc_chroma_dc_block_into(
+            &mut predicted_cr,
+            &mut prediction_scratch,
             &reconstructed_cr,
             frame.geometry,
             node,
@@ -301,7 +322,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             chroma_y,
             chroma_width,
             chroma_height,
-            &cb_predicted,
+            &predicted_cb,
         );
         let cr_residuals = residual_chroma_tu_at(
             &frame.cr,
@@ -311,7 +332,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             chroma_y,
             chroma_width,
             chroma_height,
-            &cr_predicted,
+            &predicted_cr,
         );
         cb_tu_dc_levels[chroma_tu_count] = cb_residuals.first().copied().unwrap_or(0);
         cr_tu_dc_levels[chroma_tu_count] = cr_residuals.first().copied().unwrap_or(0);
@@ -322,7 +343,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             frame.geometry,
             node,
             frame.format.chroma_sampling,
-            &cb_predicted,
+            &predicted_cb,
             &cb_residuals,
             frame.format.bit_depth,
         );
@@ -331,7 +352,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             frame.geometry,
             node,
             frame.format.chroma_sampling,
-            &cr_predicted,
+            &predicted_cr,
             &cr_residuals,
             frame.format.bit_depth,
         );
