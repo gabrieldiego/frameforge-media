@@ -42,18 +42,14 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             node,
             frame.format.bit_depth,
         );
-        let samples = residual_luma_tu_at(
+        let residuals = residual_luma_tu_at(
             frame,
             usize::from(node.x),
             usize::from(node.y),
             usize::from(node.width),
             usize::from(node.height),
+            &predicted,
         );
-        let residuals: Vec<i16> = samples
-            .iter()
-            .zip(predicted.iter())
-            .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
-            .collect();
         let quantized = quantize_vvc_luma_residual_greedy(
             &residuals,
             node.width,
@@ -96,24 +92,6 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        let cb_samples = residual_chroma_tu_at(
-            &frame.cb,
-            frame.geometry,
-            frame.format,
-            chroma_x,
-            chroma_y,
-            chroma_width,
-            chroma_height,
-        );
-        let cr_samples = residual_chroma_tu_at(
-            &frame.cr,
-            frame.geometry,
-            frame.format,
-            chroma_x,
-            chroma_y,
-            chroma_width,
-            chroma_height,
-        );
         let cb_predicted = predict_vvc_chroma_dc_block(
             &reconstructed_cb,
             frame.geometry,
@@ -128,16 +106,26 @@ pub(in crate::vvc) fn quantize_vvc_frame(frame: &VvcSampledFrame) -> VvcQuantize
             frame.format.chroma_sampling,
             frame.format.bit_depth,
         );
-        let cb_residuals: Vec<i16> = cb_samples
-            .iter()
-            .zip(cb_predicted.iter())
-            .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
-            .collect();
-        let cr_residuals: Vec<i16> = cr_samples
-            .iter()
-            .zip(cr_predicted.iter())
-            .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
-            .collect();
+        let cb_residuals = residual_chroma_tu_at(
+            &frame.cb,
+            frame.geometry,
+            frame.format,
+            chroma_x,
+            chroma_y,
+            chroma_width,
+            chroma_height,
+            &cb_predicted,
+        );
+        let cr_residuals = residual_chroma_tu_at(
+            &frame.cr,
+            frame.geometry,
+            frame.format,
+            chroma_x,
+            chroma_y,
+            chroma_width,
+            chroma_height,
+            &cr_predicted,
+        );
         let cb_quantized = quantize_vvc_chroma_residual_greedy(
             &cb_residuals,
             chroma_width as u16,
@@ -252,18 +240,14 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             node,
             frame.format.bit_depth,
         );
-        let samples = residual_luma_tu_at(
+        let residuals = residual_luma_tu_at(
             frame,
             usize::from(node.x),
             usize::from(node.y),
             usize::from(node.width),
             usize::from(node.height),
+            &predicted,
         );
-        let residuals: Vec<i16> = samples
-            .iter()
-            .zip(predicted.iter())
-            .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
-            .collect();
         let dc_level = residuals.first().copied().unwrap_or(0);
         luma_tu_remainders[luma_tu_count] = dc_level.unsigned_abs().min(u8::MAX as u16) as u8;
         luma_tu_negative[luma_tu_count] = dc_level < 0;
@@ -295,24 +279,6 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        let cb_samples = residual_chroma_tu_at(
-            &frame.cb,
-            frame.geometry,
-            frame.format,
-            chroma_x,
-            chroma_y,
-            chroma_width,
-            chroma_height,
-        );
-        let cr_samples = residual_chroma_tu_at(
-            &frame.cr,
-            frame.geometry,
-            frame.format,
-            chroma_x,
-            chroma_y,
-            chroma_width,
-            chroma_height,
-        );
         let cb_predicted = predict_vvc_chroma_dc_block(
             &reconstructed_cb,
             frame.geometry,
@@ -327,16 +293,26 @@ pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
             frame.format.chroma_sampling,
             frame.format.bit_depth,
         );
-        let cb_residuals: Vec<i16> = cb_samples
-            .iter()
-            .zip(cb_predicted.iter())
-            .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
-            .collect();
-        let cr_residuals: Vec<i16> = cr_samples
-            .iter()
-            .zip(cr_predicted.iter())
-            .map(|(sample, predicted)| vvc_sample_delta_i16(*sample, *predicted))
-            .collect();
+        let cb_residuals = residual_chroma_tu_at(
+            &frame.cb,
+            frame.geometry,
+            frame.format,
+            chroma_x,
+            chroma_y,
+            chroma_width,
+            chroma_height,
+            &cb_predicted,
+        );
+        let cr_residuals = residual_chroma_tu_at(
+            &frame.cr,
+            frame.geometry,
+            frame.format,
+            chroma_x,
+            chroma_y,
+            chroma_width,
+            chroma_height,
+            &cr_predicted,
+        );
         cb_tu_dc_levels[chroma_tu_count] = cb_residuals.first().copied().unwrap_or(0);
         cr_tu_dc_levels[chroma_tu_count] = cr_residuals.first().copied().unwrap_or(0);
         cb_tu_ac_levels[chroma_tu_count] = lossless_chroma_ac_levels(&cb_residuals, chroma_width);
@@ -496,16 +472,27 @@ fn residual_luma_tu_at(
     origin_y: usize,
     width: usize,
     height: usize,
-) -> Vec<VvcSample> {
-    let mut block = vec![0; width * height];
+    predicted: &[VvcSample],
+) -> Vec<i16> {
+    debug_assert_eq!(predicted.len(), width * height);
+    let mut residuals: Vec<i16> = predicted
+        .iter()
+        .map(|predicted| vvc_sample_delta_i16(0, *predicted))
+        .collect();
     let copy_width = width.min(frame.geometry.width.saturating_sub(origin_x));
     let copy_height = height.min(frame.geometry.height.saturating_sub(origin_y));
     for y in 0..copy_height {
         let src = (origin_y + y) * frame.geometry.width + origin_x;
         let dst = y * width;
-        block[dst..dst + copy_width].copy_from_slice(&frame.luma[src..src + copy_width]);
+        for ((residual, sample), predicted) in residuals[dst..dst + copy_width]
+            .iter_mut()
+            .zip(&frame.luma[src..src + copy_width])
+            .zip(&predicted[dst..dst + copy_width])
+        {
+            *residual = vvc_sample_delta_i16(*sample, *predicted);
+        }
     }
-    block
+    residuals
 }
 
 fn residual_chroma_tu_at(
@@ -516,18 +503,30 @@ fn residual_chroma_tu_at(
     origin_y: usize,
     width: usize,
     height: usize,
-) -> Vec<VvcSample> {
+    predicted: &[VvcSample],
+) -> Vec<i16> {
+    debug_assert_eq!(predicted.len(), width * height);
     let chroma_width = geometry.width / chroma_subsample_x(format.chroma_sampling);
     let chroma_height = geometry.height / chroma_subsample_y(format.chroma_sampling);
-    let mut block = vec![vvc_neutral_sample(format.bit_depth); width * height];
+    let neutral = vvc_neutral_sample(format.bit_depth);
+    let mut residuals: Vec<i16> = predicted
+        .iter()
+        .map(|predicted| vvc_sample_delta_i16(neutral, *predicted))
+        .collect();
     let copy_width = width.min(chroma_width.saturating_sub(origin_x));
     let copy_height = height.min(chroma_height.saturating_sub(origin_y));
     for y in 0..copy_height {
         let src = (origin_y + y) * chroma_width + origin_x;
         let dst = y * width;
-        block[dst..dst + copy_width].copy_from_slice(&samples[src..src + copy_width]);
+        for ((residual, sample), predicted) in residuals[dst..dst + copy_width]
+            .iter_mut()
+            .zip(&samples[src..src + copy_width])
+            .zip(&predicted[dst..dst + copy_width])
+        {
+            *residual = vvc_sample_delta_i16(*sample, *predicted);
+        }
     }
-    block
+    residuals
 }
 
 fn vvc_sample_delta_i16(sample: VvcSample, predicted: VvcSample) -> i16 {

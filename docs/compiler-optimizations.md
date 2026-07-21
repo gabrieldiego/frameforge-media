@@ -879,6 +879,45 @@ Result: all 12 AV2 rows were byte-identical to
 `lossless+predictive` and 41,098,794 bytes at 3.82 fps for
 `qp=24+predictive`.
 
+### VVC Direct Residual Extraction
+
+Checkpoint: `vvc-direct-residual-extract`.
+
+Change retained:
+
+- VVC residual quantization now builds luma/chroma residual vectors directly
+  from source samples and predictors, instead of first allocating copied sample
+  blocks and then allocating residual blocks from those samples. Off-visible
+  padding behavior is unchanged: luma padding remains zero-derived and chroma
+  padding remains neutral-sample-derived.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-direct-residual-extract \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-direct-luma-nodes.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.71 | 0.73 | +2.8% | 0 | 0 |
+| lossy | 0.65 | 0.65 | 0.0% | 0 | 0 |
+
+All rows were byte-identical to `vvc-direct-luma-nodes`; lossless rows remained
+exact and lossy PSNR was unchanged. The high-depth 4:2:2 lossless row improved
+from 0.46 fps to 0.48 fps in this run.
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-direct-residual-extract.md
+```
+
 ## References
 
 - Cargo profile settings:
