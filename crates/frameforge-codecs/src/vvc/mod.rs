@@ -8,7 +8,7 @@
 
 use std::io::{Cursor, ErrorKind, Read, Write};
 
-use crate::picture::{ChromaSampling, Picture, PixelFormat, SampleBitDepth};
+use crate::picture::{ChromaSampling, FrameLimit, Picture, PixelFormat, SampleBitDepth};
 use frameforge_core::{read_planar_sample, write_planar_sample};
 
 mod cabac;
@@ -791,7 +791,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     mut frame_metrics: Option<&mut dyn for<'a> FnMut(VvcEncodeFrameMetrics<'a>)>,
 ) -> Result<(), String> {
     geometry.validate_against(limits)?;
-    validate_vvc_frame_count(params)?;
+    let frame_limit = validate_vvc_frame_count(params)?;
     geometry.validate_shape()?;
     if !format.is_yuv() {
         return Err(format!("VVC input expects planar YUV format; got {format}"));
@@ -845,11 +845,12 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     )?;
 
     let mut frame_buf = vec![0; frame_len];
-    for frame_idx in 0..params.frames {
+    let mut frame_idx = 0usize;
+    while frame_limit.should_read(frame_idx) {
         if let Some(progress) = progress.as_deref_mut() {
             progress(VvcEncodeProgress {
                 frame_idx,
-                frame_count: params.frames,
+                frame_count: frame_limit.metric_count(),
             });
         }
         input.read_exact(&mut frame_buf).map_err(|err| {
@@ -965,12 +966,13 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
             frame_metrics(VvcEncodeFrameMetrics {
                 frame_idx,
-                frame_count: params.frames,
+                frame_count: frame_limit.metric_count(),
                 bitstream_bytes: frame_bitstream_bytes,
                 source: &frame_buf,
                 reconstruction: &frame_recon_yuv,
             });
         }
+        frame_idx += 1;
     }
 
     let mut extra = [0; 1];
@@ -1306,11 +1308,12 @@ fn sample_vvc_yuv_frame_at(
     })
 }
 
-fn validate_vvc_frame_count(params: VvcEncodeParams) -> Result<(), String> {
-    if params.frames == 0 {
+fn validate_vvc_frame_count(params: VvcEncodeParams) -> Result<FrameLimit, String> {
+    let frame_limit = FrameLimit::from_frame_count(params.frames);
+    if matches!(frame_limit, FrameLimit::UntilEof) {
         return Err("VVC encode expects at least one frame".to_string());
     }
-    Ok(())
+    Ok(frame_limit)
 }
 
 fn validate_vvc_input_format(format: PixelFormat) -> Result<(), String> {

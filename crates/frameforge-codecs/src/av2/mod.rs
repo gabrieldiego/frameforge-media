@@ -1,6 +1,6 @@
 use std::io::{ErrorKind, Read, Write};
 
-use crate::picture::{ChromaSampling, Picture, PixelFormat, SampleBitDepth};
+use crate::picture::{ChromaSampling, FrameLimit, Picture, PixelFormat, SampleBitDepth};
 
 mod decision;
 pub mod entropy;
@@ -800,12 +800,13 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     let mut predictive_started = false;
     let mut predictive_reference: Option<Vec<u8>> = None;
     let mut predictive_reconstruction: Option<Vec<u8>> = None;
+    let frame_limit = FrameLimit::from_frame_count(request.params.frames);
     let mut frame_index = 0usize;
-    while request.params.frames == 0 || frame_index < request.params.frames {
+    while frame_limit.should_read(frame_index) {
         #[cfg(feature = "av2-sb-bit-profile")]
         sb_bits::set_current_frame(frame_index);
         let mut source_frame = vec![0; source_expected_len];
-        if !read_av2_input_frame(input, &mut source_frame, frame_index, request.params.frames)? {
+        if !read_av2_input_frame(input, &mut source_frame, frame_index, frame_limit)? {
             break;
         }
         let coded_frame: Vec<u8>;
@@ -885,7 +886,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
             if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
                 frame_metrics(Av2EncodeFrameMetrics {
                     frame_idx: frame_index,
-                    frame_count: request.params.frames,
+                    frame_count: frame_limit.metric_count(),
                     bitstream_bytes: bitstream.len(),
                     source: &source_frame,
                     reconstruction,
@@ -992,7 +993,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
             if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
                 frame_metrics(Av2EncodeFrameMetrics {
                     frame_idx: frame_index,
-                    frame_count: request.params.frames,
+                    frame_count: frame_limit.metric_count(),
                     bitstream_bytes: bitstream.len(),
                     source: &source_frame,
                     reconstruction,
@@ -1035,7 +1036,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
         if let Some(frame_metrics) = frame_metrics.as_deref_mut() {
             frame_metrics(Av2EncodeFrameMetrics {
                 frame_idx: frame_index,
-                frame_count: request.params.frames,
+                frame_count: frame_limit.metric_count(),
                 bitstream_bytes: bitstream.len(),
                 source: &source_frame,
                 reconstruction,
@@ -1050,9 +1051,9 @@ fn read_av2_input_frame(
     input: &mut dyn Read,
     frame: &mut [u8],
     frame_index: usize,
-    requested_frames: usize,
+    frame_limit: FrameLimit,
 ) -> Result<bool, String> {
-    if requested_frames != 0 {
+    if let FrameLimit::Exact(requested_frames) = frame_limit {
         input.read_exact(frame).map_err(|err| {
             format!(
                 "failed to read AV2 MVP input frame {} of {}: {err}",
