@@ -1050,6 +1050,78 @@ make validate-geometry-sweep
 
 Both checks passed after this checkpoint.
 
+### VVC Fixed Active Residual Scan
+
+Checkpoint: `vvc-fixed-active-scan`.
+
+Change retained:
+
+- VVC residual symbol construction now uses a fixed 16-position diagonal scan
+  for the active first 4x4 coefficient group.
+- This removes the per-TU grouped full-transform scan allocation. The current
+  encoder only populates the first 4x4 residual subset, so scanning beyond that
+  group could not change the last significant coefficient or emitted syntax.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-fixed-active-scan \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-sparse-active-transform.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.74 | 0.76 | +2.7% | 0 | 0 |
+| lossy | 0.70 | 0.71 | +1.4% | 0 | 0 |
+
+All rows were byte-identical to `vvc-sparse-active-transform`; lossless rows
+remained exact and lossy PSNR was unchanged. Residual-backed rows improved
+consistently, while the 4:4:4 palette rows were effectively unchanged.
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-fixed-active-scan.md
+```
+
+AV2 sanity command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-after-vvc-fixed-active-scan \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/av2-shared-pixel-metrics-check.json
+```
+
+AV2 sanity result:
+
+| Mode | Bytes | FPS | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|
+| lossless+predictive | 83,531,302 | 8.97 | 0 | 0 |
+| qp=24+predictive | 41,098,794 | 3.82 | 0 | 0 |
+
+All AV2 rows remained byte-identical and PSNR-identical to the baseline. The
+cross-codec report was written to:
+
+```text
+verification/generated/encode_matrix/av2-after-vvc-fixed-active-scan.md
+```
+
+Additional validation:
+
+```sh
+make test
+make validate-geometry-sweep
+```
+
+Both checks passed after this checkpoint.
+
 ## References
 
 - Cargo profile settings:

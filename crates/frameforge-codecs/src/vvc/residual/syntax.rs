@@ -835,7 +835,7 @@ impl VvcResidualCabacSymbolStream {
         let height = 1usize << log2_tb_height;
         assert_eq!(coeff_levels.len(), width * height);
 
-        let scan = grouped_4x4_diag_scan(width, height);
+        let scan = first_4x4_diag_scan(width);
         let last_scan_pos = scan
             .iter()
             .rposition(|pos| coeff_levels[pos.raster_index] != 0)
@@ -1048,52 +1048,38 @@ struct VvcScanPosition {
     raster_index: usize,
 }
 
-fn grouped_4x4_diag_scan(width: usize, height: usize) -> Vec<VvcScanPosition> {
+const VVC_FIRST_4X4_DIAG_SCAN_XY: [(usize, usize); 16] = [
+    (0, 0),
+    (0, 1),
+    (1, 0),
+    (0, 2),
+    (1, 1),
+    (2, 0),
+    (0, 3),
+    (1, 2),
+    (2, 1),
+    (3, 0),
+    (1, 3),
+    (2, 2),
+    (3, 1),
+    (2, 3),
+    (3, 2),
+    (3, 3),
+];
+
+fn first_4x4_diag_scan(width: usize) -> [VvcScanPosition; 16] {
     debug_assert!(width >= 4);
-    debug_assert!(height >= 4);
-    let group_width = 4;
-    let group_height = 4;
-    let groups_wide = width / group_width;
-    let groups_high = height / group_height;
-    let mut scan = Vec::with_capacity(width * height);
-    for group in diag_scan_positions(groups_wide, groups_high) {
-        let group_x = group.x * group_width;
-        let group_y = group.y * group_height;
-        for local in diag_scan_positions(group_width, group_height) {
-            let x = group_x + local.x;
-            let y = group_y + local.y;
-            scan.push(VvcScanPosition {
-                x,
-                y,
-                raster_index: y * width + x,
-            });
-        }
-    }
-    scan
-}
-
-fn diag_scan_positions(width: usize, height: usize) -> Vec<VvcScanPosition> {
-    let mut line = 0usize;
-    let mut column = 0usize;
-    let mut scan = Vec::with_capacity(width * height);
-    for _ in 0..(width * height) {
-        scan.push(VvcScanPosition {
-            x: column,
-            y: line,
-            raster_index: line * width + column,
-        });
-
-        if column == width - 1 || line == 0 {
-            line += column + 1;
-            column = 0;
-            if line >= height {
-                column += line - (height - 1);
-                line = height - 1;
-            }
-        } else {
-            column += 1;
-            line -= 1;
-        }
+    let mut scan = [VvcScanPosition {
+        x: 0,
+        y: 0,
+        raster_index: 0,
+    }; 16];
+    for (dst, (x, y)) in scan.iter_mut().zip(VVC_FIRST_4X4_DIAG_SCAN_XY) {
+        *dst = VvcScanPosition {
+            x,
+            y,
+            raster_index: y * width + x,
+        };
     }
     scan
 }
