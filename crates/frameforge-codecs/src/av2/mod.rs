@@ -1,6 +1,8 @@
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 
-use crate::picture::{ChromaSampling, FrameLimit, Picture, PixelFormat, SampleBitDepth};
+use crate::picture::{
+    read_input_frame, ChromaSampling, FrameLimit, Picture, PixelFormat, SampleBitDepth,
+};
 
 mod decision;
 pub mod entropy;
@@ -806,7 +808,13 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
         #[cfg(feature = "av2-sb-bit-profile")]
         sb_bits::set_current_frame(frame_index);
         let mut source_frame = vec![0; source_expected_len];
-        if !read_av2_input_frame(input, &mut source_frame, frame_index, frame_limit)? {
+        if !read_input_frame(
+            input,
+            &mut source_frame,
+            frame_index,
+            frame_limit,
+            "AV2 MVP input",
+        )? {
             break;
         }
         let coded_frame: Vec<u8>;
@@ -1045,48 +1053,6 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
         frame_index += 1;
     }
     Ok(())
-}
-
-fn read_av2_input_frame(
-    input: &mut dyn Read,
-    frame: &mut [u8],
-    frame_index: usize,
-    frame_limit: FrameLimit,
-) -> Result<bool, String> {
-    if let FrameLimit::Exact(requested_frames) = frame_limit {
-        input.read_exact(frame).map_err(|err| {
-            format!(
-                "failed to read AV2 MVP input frame {} of {}: {err}",
-                frame_index + 1,
-                requested_frames
-            )
-        })?;
-        return Ok(true);
-    }
-
-    let mut filled = 0usize;
-    while filled < frame.len() {
-        match input.read(&mut frame[filled..]) {
-            Ok(0) if filled == 0 => return Ok(false),
-            Ok(0) => {
-                return Err(format!(
-                    "failed to read complete AV2 MVP input frame {}: EOF after {} of {} byte(s)",
-                    frame_index + 1,
-                    filled,
-                    frame.len()
-                ));
-            }
-            Ok(read) => filled += read,
-            Err(err) if err.kind() == ErrorKind::Interrupted => {}
-            Err(err) => {
-                return Err(format!(
-                    "failed to read AV2 MVP input frame {}: {err}",
-                    frame_index + 1
-                ));
-            }
-        }
-    }
-    Ok(true)
 }
 
 fn rgb24_to_planar_gbr(frame: &[u8], geometry: Av2VideoGeometry) -> Vec<u8> {

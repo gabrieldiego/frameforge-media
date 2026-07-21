@@ -1640,6 +1640,25 @@ fn vvc_input_path_encodes_each_yuv420_frame_independently() {
 }
 
 #[test]
+fn vvc_input_stream_zero_frames_reads_until_eof() {
+    let input = solid_yuv420p8(41, 128, 192, 2);
+    let artifacts = vvc_yuv_encode_artifacts_from_input_with_limits(
+        &input,
+        VvcEncodeParams { frames: 0 },
+        VvcVideoGeometry {
+            width: 8,
+            height: 8,
+        },
+        VvcVideoLimits::unbounded(),
+        PixelFormat::Yuv420p8,
+    )
+    .expect("zero-frame VVC stream encode should read complete frames until EOF");
+
+    assert!(!artifacts.bitstream.is_empty());
+    assert_eq!(artifacts.reconstruction.len(), input.len());
+}
+
+#[test]
 fn vvc_bitstream_path_accepts_sampled_non_black_input() {
     let input = solid_yuv420p8(65, 128, 192, 1);
     let bytes = vvc_yuv420p8_annex_b_from_input(&input, VvcEncodeParams { frames: 1 }).unwrap();
