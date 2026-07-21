@@ -973,6 +973,83 @@ Result: all 12 AV2 rows were byte-identical to
 83,531,302 bytes at 9.09 fps for `lossless+predictive` and 41,098,794 bytes at
 3.83 fps for `qp=24+predictive`.
 
+### VVC Sparse Active Transform
+
+Checkpoint: `vvc-sparse-active-transform`.
+
+Change retained:
+
+- VVC lossy residual quantizers now fill the stored DC/first-4x4 AC subset
+  directly instead of constructing full coefficient vectors and copying the
+  subset back out.
+- VVC inverse transform now has sparse quantized-block entry points that reuse
+  dequantized/vertical scratch buffers and only traverse active coefficient
+  rows/columns for the stored first-4x4 subset.
+- The general full-coefficient inverse transform remains available to tests,
+  but the production residual path no longer allocates coefficient,
+  dequantized, and vertical vectors per TU.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-sparse-active-transform \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-prediction-stack-scratch.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 0.74 | 0.74 | 0.0% | 0 | 0 |
+| lossy | 0.67 | 0.70 | +4.5% | 0 | 0 |
+
+All rows were byte-identical to `vvc-prediction-stack-scratch`; lossless rows
+remained exact and lossy PSNR was unchanged. The largest row gain was the
+8-bit 4:2:0 lossy residual path, which moved from 1.24 fps to 1.39 fps in this
+run.
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-sparse-active-transform.md
+```
+
+AV2 sanity command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=av2-after-vvc-sparse-active-transform \
+  ENCODE_MATRIX_CODECS=av2 \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/av2-shared-pixel-metrics-check.json
+```
+
+AV2 sanity result:
+
+| Mode | Bytes | FPS | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|
+| lossless+predictive | 83,531,302 | 9.61 | 0 | 0 |
+| qp=24+predictive | 41,098,794 | 3.66 | 0 | 0 |
+
+All AV2 rows remained byte-identical and PSNR-identical to the baseline. The
+cross-codec report was written to:
+
+```text
+verification/generated/encode_matrix/av2-after-vvc-sparse-active-transform.md
+```
+
+Additional validation:
+
+```sh
+make test
+make validate-geometry-sweep
+```
+
+Both checks passed after this checkpoint.
+
 ## References
 
 - Cargo profile settings:

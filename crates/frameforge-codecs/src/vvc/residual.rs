@@ -8,13 +8,15 @@ pub(super) mod transform;
 mod tests;
 
 pub(super) use transform::{
-    inverse_transform_vvc_chroma_residual_levels, inverse_transform_vvc_luma_residual_levels,
-    quantize_vvc_chroma_residual_greedy, quantize_vvc_chroma_sample,
-    quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
+    inverse_transform_vvc_chroma_quantized_block_into,
+    inverse_transform_vvc_luma_quantized_block_into, quantize_vvc_chroma_residual_greedy,
+    quantize_vvc_chroma_sample, quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
+    VvcInverseTransformScratch,
 };
 #[cfg(test)]
 pub(super) use transform::{
-    quantize_vvc_chroma, transform_vvc_tu, VVC_CHROMA_DC_BASE, VVC_LUMA_DC_BASE,
+    inverse_transform_vvc_luma_residual_levels, quantize_vvc_chroma, transform_vvc_tu,
+    VVC_CHROMA_DC_BASE, VVC_LUMA_DC_BASE,
 };
 
 pub(super) use prediction::{

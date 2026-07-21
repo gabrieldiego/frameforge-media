@@ -18,6 +18,8 @@ const VVC_CHROMA_AC_QUANT_SHIFT_FOR_8X8: i32 = 19;
 const VVC_LUMA_AC_LEVEL_LIMIT: i16 = 2;
 const VVC_CHROMA_DC_LEVEL_LIMIT: i16 = 255;
 const VVC_CHROMA_AC_LEVEL_LIMIT: i16 = 2;
+const VVC_MAX_TRANSFORM_EDGE: usize = 32;
+const VVC_MAX_TRANSFORM_COEFFS: usize = VVC_MAX_TRANSFORM_EDGE * VVC_MAX_TRANSFORM_EDGE;
 const VVC_DCT2_4: [[i32; 4]; 4] = [
     [64, 64, 64, 64],
     [83, 36, -36, -83],
@@ -111,33 +113,18 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy(
 
     let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth);
 
-    let mut coeff_levels = vec![0; coefficient_count];
-    coeff_levels[0] = dc_level;
-
+    let mut ac_coeffs = [0; 15];
     // H.266 7.3.11.10 transform_unit() can carry all AC coefficients. The
     // current luma subset keeps the full first 4x4 coefficient group so the
     // residual syntax remains ready for the next transform expansion.
     for y in 0..usize::from(height).min(4) {
         for x in 0..usize::from(width).min(4) {
-            let coeff_index = y * usize::from(width) + x;
-            if coeff_index == 0 {
+            if x == 0 && y == 0 {
                 continue;
             }
-            coeff_levels[coeff_index] = quantize_direct_luma_ac_coeff(residuals, width, x, y);
+            ac_coeffs[y * 4 + x - 1] = quantize_direct_luma_ac_coeff(residuals, width, x, y);
         }
     }
-
-    let mut ac_coeffs = [0; 15];
-    for y in 0..usize::from(height).min(4) {
-        for x in 0..usize::from(width).min(4) {
-            let coeff_index = y * usize::from(width) + x;
-            if coeff_index == 0 {
-                continue;
-            }
-            ac_coeffs[y * 4 + x - 1] = coeff_levels[coeff_index];
-        }
-    }
-    let dc_level = coeff_levels[0];
     VvcQuantizedTransformBlock {
         reconstructed_dc_coeff: dc_level,
         reconstructed_ac_coeffs: ac_coeffs,
@@ -190,60 +177,184 @@ fn quantize_vvc_luma_residual_dc_by_search(
     best_level
 }
 
+pub(in crate::vvc) struct VvcInverseTransformScratch {
+    dequantized: [i32; VVC_MAX_TRANSFORM_COEFFS],
+    vertical: [i32; VVC_MAX_TRANSFORM_COEFFS],
+}
+
+impl Default for VvcInverseTransformScratch {
+    fn default() -> Self {
+        Self {
+            dequantized: [0; VVC_MAX_TRANSFORM_COEFFS],
+            vertical: [0; VVC_MAX_TRANSFORM_COEFFS],
+        }
+    }
+}
+
+pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    dc_level: i16,
+    ac_levels: &[i16; 15],
+    bit_depth: SampleBitDepth,
+) {
+    inverse_transform_vvc_quantized_block_into(
+        residuals,
+        scratch,
+        width,
+        height,
+        dc_level,
+        ac_levels,
+        VVC_LUMA_QP,
+        bit_depth,
+    );
+}
+
+pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    dc_level: i16,
+    ac_levels: &[i16; 15],
+    bit_depth: SampleBitDepth,
+) {
+    // Current SPS/PPS chroma QP mapping table maps slice QP 32 to chroma QP 34.
+    inverse_transform_vvc_quantized_block_into(
+        residuals,
+        scratch,
+        width,
+        height,
+        dc_level,
+        ac_levels,
+        VVC_CHROMA_QP,
+        bit_depth,
+    );
+}
+
+fn inverse_transform_vvc_quantized_block_into(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    dc_level: i16,
+    ac_levels: &[i16; 15],
+    qp: i32,
+    bit_depth: SampleBitDepth,
+) {
+    let width_usize = usize::from(width);
+    let height_usize = usize::from(height);
+    let coefficient_count = width_usize * height_usize;
+    debug_assert!(coefficient_count <= VVC_MAX_TRANSFORM_COEFFS);
+    debug_assert!([4, 8, 16, 32].contains(&width));
+    debug_assert!([4, 8, 16, 32].contains(&height));
+
+    let active_width = width_usize.min(4);
+    let active_height = height_usize.min(4);
+    let dequantized = &mut scratch.dequantized[..coefficient_count];
+    for y in 0..active_height {
+        for x in 0..active_width {
+            dequantized[y * width_usize + x] = 0;
+        }
+    }
+    dequantized[0] = dequantize_vvc_transform_level(dc_level, width, height, qp);
+    for y in 0..active_height {
+        for x in 0..active_width {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            let level = ac_levels[y * 4 + x - 1];
+            if level != 0 {
+                dequantized[y * width_usize + x] =
+                    dequantize_vvc_transform_level(level, width, height, qp);
+            }
+        }
+    }
+    inverse_transform_vvc_dequantized_levels_into(
+        residuals,
+        scratch,
+        width,
+        height,
+        active_width,
+        active_height,
+        bit_depth,
+    );
+}
+
+#[cfg(test)]
 pub(in crate::vvc) fn inverse_transform_vvc_luma_residual_levels(
     width: u16,
     height: u16,
     coeff_levels: &[i16],
     bit_depth: SampleBitDepth,
 ) -> Vec<i16> {
-    inverse_transform_vvc_residual_levels_with_qp(
+    let mut scratch = VvcInverseTransformScratch::default();
+    let mut residuals = Vec::new();
+    inverse_transform_vvc_residual_levels_into(
+        &mut residuals,
+        &mut scratch,
         width,
         height,
         coeff_levels,
         VVC_LUMA_QP,
         bit_depth,
-    )
+    );
+    residuals
 }
 
-pub(in crate::vvc) fn inverse_transform_vvc_chroma_residual_levels(
-    width: u16,
-    height: u16,
-    coeff_levels: &[i16],
-    bit_depth: SampleBitDepth,
-) -> Vec<i16> {
-    // Current SPS/PPS chroma QP mapping table maps slice QP 32 to chroma QP 34.
-    inverse_transform_vvc_residual_levels_with_qp(
-        width,
-        height,
-        coeff_levels,
-        VVC_CHROMA_QP,
-        bit_depth,
-    )
-}
-
-fn inverse_transform_vvc_residual_levels_with_qp(
+#[cfg(test)]
+fn inverse_transform_vvc_residual_levels_into(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
     width: u16,
     height: u16,
     coeff_levels: &[i16],
     qp: i32,
     bit_depth: SampleBitDepth,
-) -> Vec<i16> {
+) {
     let width_usize = usize::from(width);
     let height_usize = usize::from(height);
     assert_eq!(coeff_levels.len(), width_usize * height_usize);
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
 
-    let mut dequantized = vec![0; coeff_levels.len()];
+    let dequantized = &mut scratch.dequantized[..coeff_levels.len()];
     for (dst, level) in dequantized.iter_mut().zip(coeff_levels.iter().copied()) {
         *dst = dequantize_vvc_transform_level(level, width, height, qp);
     }
+    inverse_transform_vvc_dequantized_levels_into(
+        residuals,
+        scratch,
+        width,
+        height,
+        width_usize,
+        height_usize,
+        bit_depth,
+    );
+}
 
-    let mut vertical = vec![0; coeff_levels.len()];
-    for x in 0..width_usize {
+fn inverse_transform_vvc_dequantized_levels_into(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    active_width: usize,
+    active_height: usize,
+    bit_depth: SampleBitDepth,
+) {
+    let width_usize = usize::from(width);
+    let height_usize = usize::from(height);
+    let coefficient_count = width_usize * height_usize;
+    let dequantized = &scratch.dequantized[..coefficient_count];
+    let vertical = &mut scratch.vertical[..coefficient_count];
+    debug_assert!(active_width <= width_usize);
+    debug_assert!(active_height <= height_usize);
+    for x in 0..active_width {
         for y in 0..height_usize {
             let mut sum = 0;
-            for k in 0..height_usize {
+            for k in 0..active_height {
                 let coeff = dequantized[k * width_usize + x];
                 if coeff != 0 {
                     sum += dct2_value(height, k, y) * coeff;
@@ -259,11 +370,12 @@ fn inverse_transform_vvc_residual_levels_with_qp(
         6 + 15 - i32::from(bit_depth.bits())
     };
     let residual_offset = 1 << (residual_bd_shift - 1);
-    let mut residuals = vec![0; coeff_levels.len()];
+    residuals.clear();
+    residuals.resize(coefficient_count, 0);
     for y in 0..height_usize {
         for x in 0..width_usize {
             let mut sum = 0;
-            for k in 0..width_usize {
+            for k in 0..active_width {
                 let coeff = vertical[y * width_usize + k];
                 if coeff != 0 {
                     sum += dct2_value(width, k, x) * coeff;
@@ -272,7 +384,6 @@ fn inverse_transform_vvc_residual_levels_with_qp(
             residuals[y * width_usize + x] = ((sum + residual_offset) >> residual_bd_shift) as i16;
         }
     }
-    residuals
 }
 
 pub(in crate::vvc) fn quantize_vvc_chroma_residual_dc(
@@ -357,8 +468,7 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
 
-    let mut coeff_levels = vec![0; coefficient_count];
-    coeff_levels[0] = quantize_vvc_chroma_residual_dc(residuals, width, height, bit_depth);
+    let dc_level = quantize_vvc_chroma_residual_dc(residuals, width, height, bit_depth);
     let mut ac_coeffs = [0; 15];
     if residuals_have_ac_energy(residuals) {
         // H.266 7.3.11.10 transform_unit() can carry the full 4x4 chroma
@@ -367,15 +477,12 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
         // only a small subset of nonzero levels.
         for (x, y) in VVC_CHROMA_AC_POSITIONS_4X4 {
             if x < usize::from(width) && y < usize::from(height) {
-                let coeff_index = y * usize::from(width) + x;
                 let level = quantize_direct_chroma_ac_coeff(residuals, width, x, y);
-                coeff_levels[coeff_index] = level;
                 ac_coeffs[y * 4 + x - 1] = level;
             }
         }
     }
 
-    let dc_level = coeff_levels[0];
     VvcQuantizedTransformBlock {
         reconstructed_dc_coeff: dc_level,
         reconstructed_ac_coeffs: ac_coeffs,

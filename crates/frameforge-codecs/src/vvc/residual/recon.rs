@@ -2,13 +2,14 @@ use crate::picture::{ChromaSampling, PlanarYuvGeometry};
 
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_transform_nodes, vvc_luma_transform_nodes,
-    vvc_neutral_sample, VvcCodingTreeNode, VvcCtuPartitionParams, VvcSample, VvcSampledFrame,
+    vvc_neutral_sample, VvcCtuPartitionParams, VvcSample, VvcSampledFrame,
 };
 use super::{
-    fill_visible_chroma_node, fill_visible_luma_node, inverse_transform_vvc_chroma_residual_levels,
-    inverse_transform_vvc_luma_residual_levels, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_dc_block_into, VvcDcPredictionScratch, VvcQuantizedColor,
-    VVC_LUMA_AC_COEFFS_PER_TU,
+    fill_visible_chroma_node, fill_visible_luma_node,
+    inverse_transform_vvc_chroma_quantized_block_into,
+    inverse_transform_vvc_luma_quantized_block_into, predict_vvc_chroma_dc_block_into,
+    predict_vvc_luma_dc_block_into, VvcDcPredictionScratch, VvcInverseTransformScratch,
+    VvcQuantizedColor,
 };
 
 pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
@@ -45,6 +46,8 @@ fn reconstruct_vvc_residual_frame_subsampled(
     let mut tu_idx = 0;
     let mut prediction_scratch = VvcDcPredictionScratch::default();
     let mut predicted_luma = Vec::new();
+    let mut transform_scratch = VvcInverseTransformScratch::default();
+    let mut residuals = Vec::new();
     for node in vvc_luma_transform_nodes(
         partition_params.shape(),
         partition_params.luma_max_leaf_size,
@@ -57,11 +60,13 @@ fn reconstruct_vvc_residual_frame_subsampled(
             node,
             frame.format.bit_depth,
         );
-        let coeff_levels = quantized_luma_coeff_levels(node.width, node.height, quantized, tu_idx);
-        let residuals = inverse_transform_vvc_luma_residual_levels(
+        inverse_transform_vvc_luma_quantized_block_into(
+            &mut residuals,
+            &mut transform_scratch,
             node.width,
             node.height,
-            &coeff_levels,
+            quantized.luma_tu_dc_levels[tu_idx],
+            &quantized.luma_tu_ac_levels[tu_idx],
             frame.format.bit_depth,
         );
         fill_visible_luma_node(
@@ -96,15 +101,15 @@ fn reconstruct_vvc_residual_frame_subsampled(
             chroma_sampling,
             frame.format.bit_depth,
         );
-        let cb_residuals = inverse_transform_vvc_chroma_residual_levels(
-            node.width / chroma_subsample_x(chroma_sampling) as u16,
-            node.height / chroma_subsample_y(chroma_sampling) as u16,
-            &quantized_chroma_coeff_levels(
-                node,
-                chroma_sampling,
-                quantized.cb_tu_dc_levels[tu_idx],
-                quantized.cb_tu_ac_levels[tu_idx],
-            ),
+        let chroma_width = node.width / chroma_subsample_x(chroma_sampling) as u16;
+        let chroma_height = node.height / chroma_subsample_y(chroma_sampling) as u16;
+        inverse_transform_vvc_chroma_quantized_block_into(
+            &mut residuals,
+            &mut transform_scratch,
+            chroma_width,
+            chroma_height,
+            quantized.cb_tu_dc_levels[tu_idx],
+            &quantized.cb_tu_ac_levels[tu_idx],
             frame.format.bit_depth,
         );
         fill_visible_chroma_node(
@@ -113,7 +118,7 @@ fn reconstruct_vvc_residual_frame_subsampled(
             node,
             chroma_sampling,
             &predicted_cb,
-            &cb_residuals,
+            &residuals,
             frame.format.bit_depth,
         );
         predict_vvc_chroma_dc_block_into(
@@ -125,15 +130,13 @@ fn reconstruct_vvc_residual_frame_subsampled(
             chroma_sampling,
             frame.format.bit_depth,
         );
-        let cr_residuals = inverse_transform_vvc_chroma_residual_levels(
-            node.width / chroma_subsample_x(chroma_sampling) as u16,
-            node.height / chroma_subsample_y(chroma_sampling) as u16,
-            &quantized_chroma_coeff_levels(
-                node,
-                chroma_sampling,
-                quantized.cr_tu_dc_levels[tu_idx],
-                quantized.cr_tu_ac_levels[tu_idx],
-            ),
+        inverse_transform_vvc_chroma_quantized_block_into(
+            &mut residuals,
+            &mut transform_scratch,
+            chroma_width,
+            chroma_height,
+            quantized.cr_tu_dc_levels[tu_idx],
+            &quantized.cr_tu_ac_levels[tu_idx],
             frame.format.bit_depth,
         );
         fill_visible_chroma_node(
@@ -142,7 +145,7 @@ fn reconstruct_vvc_residual_frame_subsampled(
             node,
             chroma_sampling,
             &predicted_cr,
-            &cr_residuals,
+            &residuals,
             frame.format.bit_depth,
         );
     }
@@ -152,46 +155,4 @@ fn reconstruct_vvc_residual_frame_subsampled(
     out.extend_from_slice(&cb[..chroma_width * chroma_height]);
     out.extend_from_slice(&cr[..chroma_width * chroma_height]);
     out
-}
-
-fn quantized_chroma_coeff_levels(
-    node: VvcCodingTreeNode,
-    chroma_sampling: ChromaSampling,
-    dc_level: i16,
-    ac_levels: [i16; super::VVC_CHROMA_AC_COEFFS_PER_TU],
-) -> Vec<i16> {
-    let width = usize::from(node.width / chroma_subsample_x(chroma_sampling) as u16);
-    let height = usize::from(node.height / chroma_subsample_y(chroma_sampling) as u16);
-    let mut levels = vec![0; width * height];
-    levels[0] = dc_level;
-    for (slot, level) in ac_levels.iter().enumerate() {
-        let (x, y) = super::VVC_CHROMA_AC_POSITIONS_4X4[slot];
-        if x < width && y < height {
-            levels[y * width + x] = *level;
-        }
-    }
-    levels
-}
-
-fn quantized_luma_coeff_levels(
-    width: u16,
-    height: u16,
-    quantized: VvcQuantizedColor,
-    tu_idx: usize,
-) -> Vec<i16> {
-    let mut levels = vec![0; usize::from(width) * usize::from(height)];
-    levels[0] = quantized.luma_tu_dc_levels[tu_idx];
-    let ac_levels = quantized.luma_tu_ac_levels[tu_idx];
-    for y in 0..usize::from(height).min(4) {
-        for x in 0..usize::from(width).min(4) {
-            let coeff_index = y * usize::from(width) + x;
-            if coeff_index == 0 {
-                continue;
-            }
-            let ac_index = y * 4 + x - 1;
-            debug_assert!(ac_index < VVC_LUMA_AC_COEFFS_PER_TU);
-            levels[coeff_index] = ac_levels[ac_index];
-        }
-    }
-    levels
 }
