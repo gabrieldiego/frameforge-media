@@ -1195,12 +1195,12 @@ const VVC_CHROMA_INTRA_CANDIDATE_CAPACITY: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcLumaIntraCandidateCost {
     mode: VvcIntraPredictionMode,
-    sad: u64,
+    score: u64,
 }
 
 impl VvcLumaIntraCandidateCost {
-    const fn new(mode: VvcIntraPredictionMode, sad: u64) -> Self {
-        Self { mode, sad }
+    const fn new(mode: VvcIntraPredictionMode, score: u64) -> Self {
+        Self { mode, score }
     }
 }
 
@@ -1211,28 +1211,28 @@ pub(in crate::vvc) struct VvcLumaIntraCandidateCosts {
 }
 
 impl VvcLumaIntraCandidateCosts {
-    pub(in crate::vvc) const fn new(dc_sad: u64) -> Self {
+    pub(in crate::vvc) const fn new(dc_score: u64) -> Self {
         Self {
             candidates: [VvcLumaIntraCandidateCost::new(VvcIntraPredictionMode::Dc, 0);
                 VVC_LUMA_INTRA_CANDIDATE_CAPACITY],
             count: 1,
         }
-        .with_required_candidate(VvcIntraPredictionMode::Dc, dc_sad)
+        .with_required_candidate(VvcIntraPredictionMode::Dc, dc_score)
     }
 
-    const fn with_required_candidate(mut self, mode: VvcIntraPredictionMode, sad: u64) -> Self {
-        self.candidates[self.count - 1] = VvcLumaIntraCandidateCost::new(mode, sad);
+    const fn with_required_candidate(mut self, mode: VvcIntraPredictionMode, score: u64) -> Self {
+        self.candidates[self.count - 1] = VvcLumaIntraCandidateCost::new(mode, score);
         self
     }
 
     pub(in crate::vvc) fn with_candidate(
         mut self,
         mode: VvcIntraPredictionMode,
-        sad: Option<u64>,
+        score: Option<u64>,
     ) -> Self {
-        if let Some(sad) = sad {
+        if let Some(score) = score {
             assert!(self.count < self.candidates.len());
-            self.candidates[self.count] = VvcLumaIntraCandidateCost::new(mode, sad);
+            self.candidates[self.count] = VvcLumaIntraCandidateCost::new(mode, score);
             self.count += 1;
         }
         self
@@ -1246,12 +1246,12 @@ impl VvcLumaIntraCandidateCosts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcChromaIntraCandidateCost {
     mode: VvcChromaIntraPredictionMode,
-    sad: u64,
+    score: u64,
 }
 
 impl VvcChromaIntraCandidateCost {
-    const fn new(mode: VvcChromaIntraPredictionMode, sad: u64) -> Self {
-        Self { mode, sad }
+    const fn new(mode: VvcChromaIntraPredictionMode, score: u64) -> Self {
+        Self { mode, score }
     }
 }
 
@@ -1262,32 +1262,32 @@ pub(in crate::vvc) struct VvcChromaIntraCandidateCosts {
 }
 
 impl VvcChromaIntraCandidateCosts {
-    pub(in crate::vvc) const fn new(derived_sad: u64) -> Self {
+    pub(in crate::vvc) const fn new(derived_score: u64) -> Self {
         Self {
             candidates: [VvcChromaIntraCandidateCost::new(VvcChromaIntraPredictionMode::Derived, 0);
                 VVC_CHROMA_INTRA_CANDIDATE_CAPACITY],
             count: 1,
         }
-        .with_required_candidate(VvcChromaIntraPredictionMode::Derived, derived_sad)
+        .with_required_candidate(VvcChromaIntraPredictionMode::Derived, derived_score)
     }
 
     const fn with_required_candidate(
         mut self,
         mode: VvcChromaIntraPredictionMode,
-        sad: u64,
+        score: u64,
     ) -> Self {
-        self.candidates[self.count - 1] = VvcChromaIntraCandidateCost::new(mode, sad);
+        self.candidates[self.count - 1] = VvcChromaIntraCandidateCost::new(mode, score);
         self
     }
 
     pub(in crate::vvc) fn with_candidate(
         mut self,
         mode: VvcChromaIntraPredictionMode,
-        sad: Option<u64>,
+        score: Option<u64>,
     ) -> Self {
-        if let Some(sad) = sad {
+        if let Some(score) = score {
             assert!(self.count < self.candidates.len());
-            self.candidates[self.count] = VvcChromaIntraCandidateCost::new(mode, sad);
+            self.candidates[self.count] = VvcChromaIntraCandidateCost::new(mode, score);
             self.count += 1;
         }
         self
@@ -1326,6 +1326,10 @@ impl VvcResidualModeDecisionContext {
     const fn is_lossless(self) -> bool {
         self.residual_mode.is_lossless()
     }
+
+    pub(in crate::vvc) const fn residual_mode(self) -> VvcResidualCodingMode {
+        self.residual_mode
+    }
 }
 
 pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
@@ -1340,10 +1344,10 @@ pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
         node.height,
     );
     let mut best_mode = VvcIntraPredictionMode::Dc;
-    let mut best_sad = u64::MAX;
+    let mut best_score = u64::MAX;
     for candidate in costs.iter() {
-        if candidate.sad < best_sad {
-            best_sad = candidate.sad;
+        if candidate.score < best_score {
+            best_score = candidate.score;
             best_mode = candidate.mode;
         }
     }
@@ -1395,10 +1399,10 @@ pub(in crate::vvc) fn select_vvc_residual_chroma_intra_mode_from_costs(
         node.height,
     );
     let mut best_mode = VvcChromaIntraPredictionMode::Derived;
-    let mut best_sad = u64::MAX;
+    let mut best_score = u64::MAX;
     for candidate in costs.iter() {
-        if candidate.sad < best_sad {
-            best_sad = candidate.sad;
+        if candidate.score < best_score {
+            best_score = candidate.score;
             best_mode = candidate.mode;
         }
     }

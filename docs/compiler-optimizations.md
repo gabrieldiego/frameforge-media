@@ -2217,6 +2217,54 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-intra-stats-1f.json
 ```
 
+## VVC Lossy SSE Mode Scoring
+
+Checkpoint: `vvc-lossy-sse-mode-score-1f`.
+
+This checkpoint keeps VVC luma/chroma mode selection on the same shared
+candidate path, but makes the candidate score depend on the residual coding
+mode:
+
+- lossless still ranks candidates by residual SAD, matching the exact-residual
+  entropy proxy used by the current lossless path;
+- lossy ranks candidates by residual SSE, matching the distortion term used by
+  the QP path and PSNR measurements.
+
+The selector API now stores neutral `score` values instead of SAD-specific
+field names. The lossy behavior change is therefore gated at block mode
+selection without reintroducing a separate lossy encode path.
+
+First-frame six-vector matrix versus `vvc-chroma-dc-fast-search-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.35 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | -153,481 |
+
+Per-row VVC QP24 deltas:
+
+| Vector | Bytes delta | FPS delta | PSNR |
+|---|---:|---:|---:|
+| SceneComposition_1_420 | -6,323 | -0.01 | 24.846 |
+| SceneComposition_1_422 | -9,138 | +0.00 | 25.205 |
+| screen_wayland_activity_rgb | +18,220 | +0.00 | 24.657 |
+| MissionControlClip1_420 | -25,060 | +0.01 | 15.870 |
+| MissionControlClip1_422 | -51,137 | +0.01 | 15.243 |
+| MissionControlClip1_444 | -80,043 | +0.00 | 14.890 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-lossy-sse-mode-score-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-chroma-dc-fast-search-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

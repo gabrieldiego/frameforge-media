@@ -156,10 +156,10 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             usize::from(node.height),
             &predicted_luma,
         );
-        let dc_sad = residual_sad(&luma_residuals);
+        let dc_score = residual_mode_selection_score(mode_context, &luma_residuals);
         let mut best_luma_mode = VvcIntraPredictionMode::Dc;
-        let mut best_luma_sad = dc_sad;
-        let mut luma_candidate_costs = VvcLumaIntraCandidateCosts::new(dc_sad);
+        let mut best_luma_score = dc_score;
+        let mut luma_candidate_costs = VvcLumaIntraCandidateCosts::new(dc_score);
         #[cfg(feature = "vvc-stats")]
         intra_search_stats.add_luma_dc();
         if vvc_residual_luma_planar_candidate_allowed(mode_context, node) {
@@ -182,13 +182,14 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 usize::from(node.height),
                 &candidate_luma_prediction,
             );
-            let candidate_sad = residual_sad(&candidate_luma_residuals);
+            let candidate_score =
+                residual_mode_selection_score(mode_context, &candidate_luma_residuals);
             #[cfg(feature = "vvc-stats")]
             intra_search_stats.add_luma_planar();
             luma_candidate_costs = luma_candidate_costs
-                .with_candidate(VvcIntraPredictionMode::Planar, Some(candidate_sad));
-            if candidate_sad < best_luma_sad {
-                best_luma_sad = candidate_sad;
+                .with_candidate(VvcIntraPredictionMode::Planar, Some(candidate_score));
+            if candidate_score < best_luma_score {
+                best_luma_score = candidate_score;
                 best_luma_mode = VvcIntraPredictionMode::Planar;
                 std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
                 std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
@@ -223,13 +224,14 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                     usize::from(node.height),
                     &candidate_luma_prediction,
                 );
-                let candidate_sad = residual_sad(&candidate_luma_residuals);
+                let candidate_score =
+                    residual_mode_selection_score(mode_context, &candidate_luma_residuals);
                 #[cfg(feature = "vvc-stats")]
                 intra_search_stats.add_luma_directional_coarse();
                 luma_candidate_costs =
-                    luma_candidate_costs.with_candidate(mode, Some(candidate_sad));
-                if candidate_sad < best_luma_sad {
-                    best_luma_sad = candidate_sad;
+                    luma_candidate_costs.with_candidate(mode, Some(candidate_score));
+                if candidate_score < best_luma_score {
+                    best_luma_score = candidate_score;
                     best_luma_mode = mode;
                     std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
                     std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
@@ -258,13 +260,14 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                         usize::from(node.height),
                         &candidate_luma_prediction,
                     );
-                    let candidate_sad = residual_sad(&candidate_luma_residuals);
+                    let candidate_score =
+                        residual_mode_selection_score(mode_context, &candidate_luma_residuals);
                     #[cfg(feature = "vvc-stats")]
                     intra_search_stats.add_luma_directional_refinement();
                     luma_candidate_costs =
-                        luma_candidate_costs.with_candidate(mode, Some(candidate_sad));
-                    if candidate_sad < best_luma_sad {
-                        best_luma_sad = candidate_sad;
+                        luma_candidate_costs.with_candidate(mode, Some(candidate_score));
+                    if candidate_score < best_luma_score {
+                        best_luma_score = candidate_score;
                         best_luma_mode = mode;
                         std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
                         std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
@@ -275,7 +278,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let luma_mode =
             select_vvc_residual_luma_intra_mode(mode_context, node, luma_candidate_costs);
         debug_assert_eq!(luma_mode, best_luma_mode);
-        let _best_luma_sad = best_luma_sad;
+        let _best_luma_score = best_luma_score;
         luma_tu_intra_modes[luma_tu_count] = luma_mode;
         let luma_tu = finalize_vvc_luma_tu(
             residual_mode,
@@ -366,10 +369,11 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             chroma_height,
             &predicted_cr,
         );
-        let initial_sad = residual_sad(&cb_residuals) + residual_sad(&cr_residuals);
+        let initial_score =
+            chroma_residual_mode_selection_score(mode_context, &cb_residuals, &cr_residuals);
         let mut best_chroma_mode = initial_chroma_mode;
-        let mut best_chroma_sad = initial_sad;
-        let mut chroma_candidate_costs = VvcChromaIntraCandidateCosts::new(initial_sad);
+        let mut best_chroma_score = initial_score;
+        let mut chroma_candidate_costs = VvcChromaIntraCandidateCosts::new(initial_score);
         #[cfg(feature = "vvc-stats")]
         intra_search_stats.add_chroma_derived();
         for explicit_mode in vvc_chroma_explicit_candidates(co_located_luma_mode) {
@@ -427,14 +431,17 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 chroma_height,
                 &candidate_cr_prediction,
             );
-            let candidate_sad =
-                residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
+            let candidate_score = chroma_residual_mode_selection_score(
+                mode_context,
+                &candidate_cb_residuals,
+                &candidate_cr_residuals,
+            );
             #[cfg(feature = "vvc-stats")]
             intra_search_stats.add_chroma_explicit();
             chroma_candidate_costs =
-                chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
-            if candidate_sad < best_chroma_sad {
-                best_chroma_sad = candidate_sad;
+                chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_score));
+            if candidate_score < best_chroma_score {
+                best_chroma_score = candidate_score;
                 best_chroma_mode = chroma_mode;
                 std::mem::swap(&mut predicted_cb, &mut candidate_cb_prediction);
                 std::mem::swap(&mut predicted_cr, &mut candidate_cr_prediction);
@@ -499,14 +506,17 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                     chroma_height,
                     &candidate_cr_prediction,
                 );
-                let candidate_sad =
-                    residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
+                let candidate_score = chroma_residual_mode_selection_score(
+                    mode_context,
+                    &candidate_cb_residuals,
+                    &candidate_cr_residuals,
+                );
                 #[cfg(feature = "vvc-stats")]
                 intra_search_stats.add_chroma_cclm();
                 chroma_candidate_costs =
-                    chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
-                if candidate_sad < best_chroma_sad {
-                    best_chroma_sad = candidate_sad;
+                    chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_score));
+                if candidate_score < best_chroma_score {
+                    best_chroma_score = candidate_score;
                     best_chroma_mode = chroma_mode;
                     std::mem::swap(&mut predicted_cb, &mut candidate_cb_prediction);
                     std::mem::swap(&mut predicted_cr, &mut candidate_cr_prediction);
@@ -521,7 +531,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             chroma_candidate_costs,
         );
         debug_assert_eq!(chroma_mode, best_chroma_mode);
-        let _best_chroma_sad = best_chroma_sad;
+        let _best_chroma_score = best_chroma_score;
         chroma_tu_intra_modes[chroma_tu_count] = chroma_mode;
         let chroma_tu = finalize_vvc_chroma_tu(
             residual_mode,
@@ -813,6 +823,35 @@ fn residual_sad(residuals: &[i16]) -> u64 {
     residuals
         .iter()
         .map(|residual| u64::from(residual.unsigned_abs()))
+        .sum()
+}
+
+fn residual_mode_selection_score(
+    context: VvcResidualModeDecisionContext,
+    residuals: &[i16],
+) -> u64 {
+    match context.residual_mode() {
+        VvcResidualCodingMode::Lossless => residual_sad(residuals),
+        VvcResidualCodingMode::Lossy => residual_sse(residuals),
+    }
+}
+
+fn chroma_residual_mode_selection_score(
+    context: VvcResidualModeDecisionContext,
+    cb_residuals: &[i16],
+    cr_residuals: &[i16],
+) -> u64 {
+    residual_mode_selection_score(context, cb_residuals)
+        .saturating_add(residual_mode_selection_score(context, cr_residuals))
+}
+
+fn residual_sse(residuals: &[i16]) -> u64 {
+    residuals
+        .iter()
+        .map(|residual| {
+            let residual = i64::from(*residual);
+            (residual * residual) as u64
+        })
         .sum()
 }
 
