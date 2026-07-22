@@ -709,6 +709,35 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             &mut residual,
             cabac,
         );
+        self.emit_luma_post_residual_tools(cabac, node, has_ac, transform_skip, mts_index);
+    }
+
+    fn emit_luma_post_residual_tools(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        has_ac: bool,
+        transform_skip: bool,
+        mts_index: u8,
+    ) {
+        if !self.slice_config.tools.explicit_mts_intra_enabled
+            || transform_skip
+            || !has_ac
+            || node.width > 32
+            || node.height > 32
+        {
+            return;
+        }
+        assert_eq!(
+            mts_index, 0,
+            "nonzero VVC MTS index is not wired into transform/reconstruction yet"
+        );
+
+        // H.266 cu_residual() writes mts_idx after the transform tree. With
+        // the current selector fixed to DCT2_DCT2, truncated Rice coding emits
+        // only the first zero context bin.
+        self.contexts
+            .encode(cabac, VvcCabacContext::MtsIdx(0), false);
     }
 
     fn emit_chroma_tree(

@@ -217,7 +217,6 @@ impl<'a> VvcResidualCabacEncoder<'a> {
             state.config.transform_skip,
             state.config.bdpcm,
         );
-        self.emit_mts_idx(cabac, state);
         self.observe_future_chroma_defaults();
         self.observe_current_disabled_tool_defaults();
         #[cfg(test)]
@@ -252,24 +251,6 @@ impl<'a> VvcResidualCabacEncoder<'a> {
             VvcCabacContext::TransformSkipFlag(component.transform_skip_ctx_inc()),
             transform_skip,
         );
-    }
-
-    fn emit_mts_idx(&mut self, cabac: &mut VvcCabacEncoder, state: &VvcResidualPass1State) {
-        if !self.options.explicit_mts_intra_enabled {
-            return;
-        }
-        if state.config.component != VvcResidualComponent::Luma || state.config.transform_skip {
-            return;
-        }
-        assert_eq!(
-            state.config.mts_index, 0,
-            "nonzero VVC MTS index is not wired into transform/reconstruction yet"
-        );
-
-        // Table 132 maps mts_idx binIdx 0..3 to ctxInc 0..3. For mts_idx=0
-        // under TR(cMax=4,cRiceParam=0), only the first zero bin is emitted.
-        self.contexts
-            .encode(cabac, VvcCabacContext::MtsIdx(0), false);
     }
 
     fn observe_future_chroma_defaults(&self) {

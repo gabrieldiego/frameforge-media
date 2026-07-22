@@ -3018,6 +3018,44 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-dct-selector-gated-1f.json
 ```
 
+## VVC CU-Level MTS Hook
+
+Checkpoint: `vvc-cu-mts-hook-1f`.
+
+This checkpoint moves the default `mts_idx` syntax hook out of residual
+coefficient emission and into the luma CU body after residual coding, matching
+the VTM `cu_residual()` order. Nonzero MTS remains asserted off until matching
+forward/inverse transform support is implemented, but the syntax gate now has
+the right owner: explicit intra MTS, transformed luma TU, non-DC residual, and
+MTS-sized CU.
+
+The default product configuration does not enable explicit MTS, so the change
+is byte-neutral against `vvc-stored-residual-unified-1f`:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| VVC | lossless | 5,884,724 | 0 |
+| VVC | qp=24 | 5,714,171 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-cu-mts-hook-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-stored-residual-unified-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

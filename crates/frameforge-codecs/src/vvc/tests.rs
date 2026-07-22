@@ -1162,7 +1162,7 @@ fn vvc_residual_cabac_encoder_labels_disabled_tool_paths() {
         contexts.transform_skip_flag[0].state(),
         initial_transform_skip_state
     );
-    assert_ne!(contexts.mts_idx[0].state(), initial_mts_state);
+    assert_eq!(contexts.mts_idx[0].state(), initial_mts_state);
 
     let mut contexts = VvcCabacContexts::new();
     let mut cabac = VvcCabacEncoder::new();
@@ -1178,6 +1178,52 @@ fn vvc_residual_cabac_encoder_labels_disabled_tool_paths() {
         contexts.transform_skip_flag[0].state(),
         initial_transform_skip_state
     );
+    assert_eq!(contexts.mts_idx[0].state(), initial_mts_state);
+}
+
+#[test]
+fn vvc_ctu_body_emits_mts_idx_after_luma_residual_when_enabled() {
+    let neutral = quantize_vvc_color(VvcSampledColor {
+        y: 128,
+        u: 128,
+        v: 128,
+    });
+    let mut params = vvc_ctu_partition_params(
+        VvcVideoGeometry {
+            width: 16,
+            height: 16,
+        },
+        neutral,
+    )
+    .expect("16x16 partition parameters");
+    params.luma_tu_ac_levels[0][0] = 1;
+    params.luma_tu_has_ac[0] = true;
+
+    let mut config = vvc_test_slice_config();
+    config.tools.explicit_mts_intra_enabled = true;
+
+    let mut contexts = initial_vvc_cabac_contexts(config);
+    let initial_mts_state = contexts.mts_idx[0].state();
+    let mut cabac = VvcCabacEncoder::new();
+    cabac.start();
+    encode_ctu_partition_body_with_contexts(&mut cabac, &mut contexts, &params, config);
+
+    assert_ne!(contexts.mts_idx[0].state(), initial_mts_state);
+
+    params.luma_tu_transform_skip[0] = true;
+    let mut transform_skip_config = config;
+    transform_skip_config.tools.transform_skip_enabled = true;
+    let mut contexts = initial_vvc_cabac_contexts(transform_skip_config);
+    let initial_mts_state = contexts.mts_idx[0].state();
+    let mut cabac = VvcCabacEncoder::new();
+    cabac.start();
+    encode_ctu_partition_body_with_contexts(
+        &mut cabac,
+        &mut contexts,
+        &params,
+        transform_skip_config,
+    );
+
     assert_eq!(contexts.mts_idx[0].state(), initial_mts_state);
 }
 

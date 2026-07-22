@@ -36,7 +36,10 @@ use cabac::{
     VvcLastSigCoeffPrefixCtxInput, VvcPartSplit,
 };
 #[cfg(test)]
-use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
+use cabac::{
+    encode_ctu_partition_body_with_contexts, VvcCtuCabacGenerator, VvcQtSplitCtxInput,
+    VvcSplitCtxInput, VvcTreeType,
+};
 use header::{
     vvc_frame_slice_unit, vvc_picture_ctu_cols, vvc_picture_ctu_count, vvc_picture_ctu_rows,
     vvc_poc_lsb_for_frame_idx, vvc_pps_unit, vvc_pps_unit_with_partitioning,
