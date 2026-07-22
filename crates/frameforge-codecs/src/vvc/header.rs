@@ -3,7 +3,7 @@ use crate::picture::{ChromaSampling, SampleBitDepth};
 use super::{
     vvc_cabac_bits_with_luma_max_leaf_size, vvc_frame_cabac_bits, VvcCodingTreeConfig, VvcNalUnit,
     VvcNalUnitType, VvcQuantizedColor, VvcQuantizedCtu, VvcSliceSyntaxConfig, VvcSyntaxRbsp,
-    VvcSyntaxWriter, VvcVideoGeometry, VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    VvcSyntaxWriter, VvcVideoGeometry, VvcVuiSignal, VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
     VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
@@ -449,11 +449,58 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
     writer.write_flag("sps_virtual_boundaries_enabled_flag", false);
     writer.write_flag("sps_timing_hrd_params_present_flag", false);
     writer.write_flag("sps_field_seq_flag", false);
-    writer.write_flag("sps_vui_parameters_present_flag", false);
+    writer.write_flag(
+        "sps_vui_parameters_present_flag",
+        slice_config.vui_signal.is_some(),
+    );
+    if let Some(vui_signal) = slice_config.vui_signal {
+        let vui_payload_size = vvc_vui_payload_size_bytes(vui_signal);
+        writer.write_ue("sps_vui_payload_size_minus1", (vui_payload_size - 1) as u32);
+        writer.byte_align_zero("sps_vui_alignment_zero_bit");
+        debug_assert!(writer.is_byte_aligned());
+        write_vvc_vui_parameters(&mut writer, vui_signal);
+    }
     writer.write_flag("sps_extension_present_flag", false);
     writer.rbsp_trailing_bits();
     debug_assert!(writer.is_byte_aligned());
     writer.finish()
+}
+
+fn vvc_vui_payload_size_bytes(vui_signal: VvcVuiSignal) -> usize {
+    let mut writer = VvcSyntaxWriter::new();
+    write_vvc_vui_parameters(&mut writer, vui_signal);
+    debug_assert!(writer.is_byte_aligned());
+    writer.into_bytes().len()
+}
+
+fn write_vvc_vui_parameters(writer: &mut VvcSyntaxWriter, vui_signal: VvcVuiSignal) {
+    writer.write_flag("vui_progressive_source_flag", vui_signal.progressive_source);
+    writer.write_flag("vui_interlaced_source_flag", vui_signal.interlaced_source);
+    writer.write_flag("vui_non_packed_constraint_flag", vui_signal.non_packed);
+    writer.write_flag(
+        "vui_non_projected_constraint_flag",
+        vui_signal.non_projected,
+    );
+    writer.write_flag("vui_aspect_ratio_info_present_flag", false);
+    writer.write_flag("vui_overscan_info_present_flag", false);
+    writer.write_flag("vui_colour_description_present_flag", true);
+    writer.write_u(
+        "vui_colour_primaries",
+        u64::from(vui_signal.colour_primaries),
+        8,
+    );
+    writer.write_u(
+        "vui_transfer_characteristics",
+        u64::from(vui_signal.transfer_characteristics),
+        8,
+    );
+    writer.write_u("vui_matrix_coeffs", u64::from(vui_signal.matrix_coeffs), 8);
+    writer.write_flag("vui_full_range_flag", vui_signal.full_range);
+    writer.write_flag("vui_chroma_loc_info_present_flag", false);
+    if !writer.is_byte_aligned() {
+        writer.write_flag("vui_payload_bit_equal_to_one", true);
+        writer.byte_align_zero("vui_payload_bit_equal_to_zero");
+    }
 }
 
 fn vvc_picture_header_payload(

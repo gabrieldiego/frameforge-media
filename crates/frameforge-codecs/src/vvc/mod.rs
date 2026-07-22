@@ -539,6 +539,36 @@ impl VvcCodingTreeConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VvcVuiSignal {
+    progressive_source: bool,
+    interlaced_source: bool,
+    non_packed: bool,
+    non_projected: bool,
+    colour_primaries: u8,
+    transfer_characteristics: u8,
+    matrix_coeffs: u8,
+    full_range: bool,
+}
+
+impl VvcVuiSignal {
+    const fn srgb_gbr_compatible() -> Self {
+        Self {
+            progressive_source: true,
+            interlaced_source: false,
+            non_packed: true,
+            non_projected: true,
+            colour_primaries: 1,
+            transfer_characteristics: 13,
+            // H.266/VTM forbid identity matrix coefficients for 4:4:4 VUI.
+            // Keep the colour volume explicit while leaving the RGB matrix
+            // unspecified until a compatible VVC RGB signalling path is added.
+            matrix_coeffs: 2,
+            full_range: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VvcSyntaxToolFlags {
     ibc_enabled: bool,
     palette_enabled: bool,
@@ -561,6 +591,7 @@ pub(super) struct VvcSliceSyntaxConfig {
     ref_pic_resampling_enabled: bool,
     entry_point_offsets_present: bool,
     slice_qp: i32,
+    vui_signal: Option<VvcVuiSignal>,
 }
 
 impl VvcSyntaxToolFlags {
@@ -638,6 +669,7 @@ impl VvcSliceSyntaxConfig {
             ref_pic_resampling_enabled: true,
             entry_point_offsets_present: true,
             slice_qp: 32,
+            vui_signal: None,
         }
     }
 
@@ -679,6 +711,11 @@ impl VvcSliceSyntaxConfig {
             ChromaSampling::Cs444 => Self::palette_444(),
             _ => Self::residual_lossy(format.chroma_sampling),
         }
+    }
+
+    const fn with_vui_signal(mut self, vui_signal: VvcVuiSignal) -> Self {
+        self.vui_signal = Some(vui_signal);
+        self
     }
 
     const fn residual_options(self) -> VvcResidualCabacOptions {
@@ -1091,6 +1128,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     } else {
         VvcSliceSyntaxConfig::for_picture_format(stream_format)
     };
+    let slice_config = vvc_slice_config_for_input_format(slice_config, format);
     let picture_partitioning = if lossless_residual {
         VvcPicturePartitioning::SingleSlice
     } else {
@@ -2007,6 +2045,17 @@ fn validate_vvc_input_format(format: PixelFormat) -> Result<VvcPictureFormat, St
         ChromaSampling::Monochrome => Err(format!(
             "VVC monochrome input is not wired yet; got {format}"
         )),
+    }
+}
+
+fn vvc_slice_config_for_input_format(
+    slice_config: VvcSliceSyntaxConfig,
+    format: PixelFormat,
+) -> VvcSliceSyntaxConfig {
+    if format == PixelFormat::Gbrp8 {
+        slice_config.with_vui_signal(VvcVuiSignal::srgb_gbr_compatible())
+    } else {
+        slice_config
     }
 }
 

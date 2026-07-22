@@ -109,6 +109,61 @@ fn assert_vvc_parameter_sets_signal_geometry(geometry: VvcVideoGeometry) {
 }
 
 #[test]
+fn vvc_sps_omits_vui_by_default() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    let sps = vvc_sps_rbsp_8bit(geometry, vvc_test_slice_config());
+
+    assert_vvc_flag(&sps, "sps_vui_parameters_present_flag", false);
+    assert_vvc_field_absent(&sps, "sps_vui_payload_size_minus1");
+    assert_vvc_field_absent(&sps, "vui_colour_primaries");
+}
+
+#[test]
+fn vvc_sps_signals_srgb_gbr_vui_when_requested() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    let sps = vvc_sps_rbsp_8bit(
+        geometry,
+        VvcSliceSyntaxConfig::palette_444().with_vui_signal(VvcVuiSignal::srgb_gbr_compatible()),
+    );
+
+    assert_vvc_flag(&sps, "sps_vui_parameters_present_flag", true);
+    assert_eq!(vvc_ue_value(&sps, "sps_vui_payload_size_minus1"), 4);
+    assert_vvc_flag(&sps, "vui_progressive_source_flag", true);
+    assert_vvc_flag(&sps, "vui_interlaced_source_flag", false);
+    assert_vvc_flag(&sps, "vui_non_packed_constraint_flag", true);
+    assert_vvc_flag(&sps, "vui_non_projected_constraint_flag", true);
+    assert_vvc_flag(&sps, "vui_aspect_ratio_info_present_flag", false);
+    assert_vvc_flag(&sps, "vui_overscan_info_present_flag", false);
+    assert_vvc_flag(&sps, "vui_colour_description_present_flag", true);
+    assert_eq!(vvc_u_value(&sps, "vui_colour_primaries"), 1);
+    assert_eq!(vvc_u_value(&sps, "vui_transfer_characteristics"), 13);
+    assert_eq!(vvc_u_value(&sps, "vui_matrix_coeffs"), 2);
+    assert_vvc_flag(&sps, "vui_full_range_flag", true);
+    assert_vvc_flag(&sps, "vui_chroma_loc_info_present_flag", false);
+    assert_vvc_flag(&sps, "vui_payload_bit_equal_to_one", true);
+    assert_vvc_flag(&sps, "sps_extension_present_flag", false);
+}
+
+#[test]
+fn vvc_gbrp8_input_requests_srgb_vui_signal() {
+    let config =
+        vvc_slice_config_for_input_format(VvcSliceSyntaxConfig::palette_444(), PixelFormat::Gbrp8);
+    assert_eq!(config.vui_signal, Some(VvcVuiSignal::srgb_gbr_compatible()));
+
+    let yuv_config = vvc_slice_config_for_input_format(
+        VvcSliceSyntaxConfig::palette_444(),
+        PixelFormat::Yuv444p8,
+    );
+    assert_eq!(yuv_config.vui_signal, None);
+}
+
+#[test]
 fn vvc_sps_signals_native_420_bit_depth_profiles() {
     let geometry = VvcVideoGeometry {
         width: 16,
@@ -193,6 +248,32 @@ fn assert_vvc_annex_b_has_min_picture_nals(bytes: &[u8], frames: usize) -> Vec<V
         "stream should end at the last NAL payload boundary"
     );
     infos
+}
+
+fn assert_vvc_annex_b_sps_matches_config(
+    bytes: &[u8],
+    geometry: VvcVideoGeometry,
+    slice_config: VvcSliceSyntaxConfig,
+    bit_depth: SampleBitDepth,
+) {
+    let infos = parse_annex_b_nal_units(bytes).unwrap();
+    let sps = infos
+        .first()
+        .expect("Annex B stream should include an SPS NAL");
+    assert_eq!(sps.nal_unit_type, VvcNalUnitType::Sps as u8);
+
+    let expected_unit = vvc_sps_unit(geometry, slice_config, bit_depth);
+    let expected_header = nal_unit_header_bytes(&expected_unit).unwrap();
+    let expected_payload =
+        crate::bitstream::insert_emulation_prevention_bytes(&expected_unit.rbsp_payload);
+    assert_eq!(
+        &bytes[sps.offset..sps.offset + 2],
+        expected_header.as_slice()
+    );
+    assert_eq!(
+        &bytes[sps.offset + 2..sps.offset + 2 + sps.payload_len],
+        expected_payload.as_slice()
+    );
 }
 
 fn count_vvc_picture_nals(infos: &[VvcNalInfo]) -> usize {
@@ -1668,6 +1749,12 @@ fn vvc_lossless_input_path_accepts_16x16_gbrp8_frames() {
     .expect("VVC gbrp8 should pass through the 4:4:4 lossless component path");
 
     assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+    assert_vvc_annex_b_sps_matches_config(
+        &bitstream,
+        geometry,
+        vvc_slice_config_for_input_format(VvcSliceSyntaxConfig::palette_444(), PixelFormat::Gbrp8),
+        PixelFormat::Gbrp8.bit_depth(),
+    );
     assert_eq!(reconstruction, input);
 }
 
