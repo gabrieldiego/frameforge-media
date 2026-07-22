@@ -150,10 +150,12 @@ impl PlanarYuvGeometry {
         self.luma_samples
     }
 
+    #[cfg(any(feature = "av2", test))]
     pub(crate) fn chroma_width(self) -> usize {
         self.chroma_width
     }
 
+    #[cfg(any(feature = "av2", test))]
     pub(crate) fn chroma_height(self) -> usize {
         self.chroma_height
     }

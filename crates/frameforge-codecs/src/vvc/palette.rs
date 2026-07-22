@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::borrow::Cow;
 
 use crate::picture::{ChromaSampling, PixelFormat, SampleBitDepth};
@@ -149,6 +151,7 @@ pub(super) fn vvc_palette_444_reconstruction_yuv_with_config(
         visible_width: frame.geometry.coded_width() as u16,
         visible_height: frame.geometry.coded_height() as u16,
         chroma_sampling: frame.format.chroma_sampling,
+        dual_tree_intra: false,
     };
 
     for op in VvcCtuCabacOp::intra_ctu_partition(partition_shape, VVC_PALETTE_CU_SIZE) {
@@ -755,6 +758,7 @@ fn vvc_palette_444_cabac_encoder_with_dump_recording(
         visible_width: frame.geometry.coded_width() as u16,
         visible_height: frame.geometry.coded_height() as u16,
         chroma_sampling: frame.format.chroma_sampling,
+        dual_tree_intra: false,
     };
     for op in VvcCtuCabacOp::intra_ctu_partition(partition_shape, VVC_PALETTE_CU_SIZE) {
         append_vvc_palette_444_partition_op(

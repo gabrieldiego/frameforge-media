@@ -1,15 +1,15 @@
 use super::ctu_split::{
     vvc_chroma_height, vvc_chroma_split_availability, vvc_chroma_width, VvcChromaSplitAvailability,
-    VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcPartSplit, VvcQtSplitCtxInput,
-    VvcSplitCtxInput, VvcTreeType,
+    VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcLumaNeighbourState, VvcPartSplit,
+    VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType,
 };
 use super::{VvcCabacContext, VvcCabacContexts, VvcCabacEncoder};
 use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
     chroma_subsample_x, chroma_subsample_y, VvcIntraPredictionMode, VvcResidualComponent,
-    VvcSliceSyntaxConfig, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
-    VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
+    VvcSliceSyntaxConfig, VvcVideoGeometry, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE,
+    VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
 pub(in crate::vvc) fn encode_ctu_partition_body(
@@ -41,6 +41,46 @@ pub(in crate::vvc) fn encode_ctu_partition_body_with_contexts(
     let mut ctu = VvcCtuCabacGenerator::new(contexts, params, slice_config);
     for op in ops {
         ctu.emit(cabac, op);
+    }
+}
+
+pub(in crate::vvc) fn encode_frame_partition_body_with_contexts(
+    cabac: &mut VvcCabacEncoder,
+    contexts: &mut VvcCabacContexts,
+    picture_geometry: VvcVideoGeometry,
+    params: &[VvcCtuPartitionParams],
+    slice_config: VvcSliceSyntaxConfig,
+) {
+    let Some(first_ctu) = params.first() else {
+        return;
+    };
+    let picture_width = picture_geometry.coded_width() as u16;
+    let picture_height = picture_geometry.coded_height() as u16;
+    let ctu_cols = picture_geometry.coded_width().div_ceil(VVC_CTU_SIZE);
+    let mut luma_neighbours = VvcLumaNeighbourState::new(picture_width, picture_height);
+    let mut chroma_neighbours =
+        VvcChromaNeighbourState::new(picture_width, picture_height, first_ctu.chroma_sampling);
+
+    for (slice_address, ctu) in params.iter().enumerate() {
+        let ctu_x = slice_address % ctu_cols;
+        let ctu_y = slice_address / ctu_cols;
+        let origin_x = (ctu_x * VVC_CTU_SIZE) as u16;
+        let origin_y = (ctu_y * VVC_CTU_SIZE) as u16;
+        let mut ops = Vec::new();
+        VvcCtuCabacOp::append_intra_ctu_partition_with_luma_neighbours(
+            &mut ops,
+            &mut luma_neighbours,
+            ctu.shape(),
+            origin_x,
+            origin_y,
+            picture_width,
+            picture_height,
+            ctu.luma_max_leaf_size,
+        );
+        let mut ctu_encoder = VvcCtuCabacGenerator::new(contexts, ctu, slice_config);
+        for op in ops {
+            ctu_encoder.emit_with_frame_chroma_neighbours(cabac, op, &mut chroma_neighbours);
+        }
     }
 }
 
@@ -207,6 +247,31 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         }
     }
 
+    fn emit_with_frame_chroma_neighbours(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        op: VvcCtuCabacOp,
+        chroma_neighbours: &mut VvcChromaNeighbourState,
+    ) {
+        if vvc_cabac_op_trace_enabled() {
+            eprintln!("FF_CABAC_OP {op:?}");
+        }
+        match op {
+            VvcCtuCabacOp::ChromaTree {
+                node,
+                visible_width,
+                visible_height,
+            } => self.emit_chroma_tree_with_neighbours(
+                cabac,
+                node,
+                visible_width,
+                visible_height,
+                chroma_neighbours,
+            ),
+            other => self.emit(cabac, other),
+        }
+    }
+
     fn emit_bt_split(&mut self, cabac: &mut VvcCabacEncoder, op: VvcCtuCabacOp) {
         let VvcCtuCabacOp::BtSplit {
             node,
@@ -323,7 +388,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         // MultiRefLineIdx(0) for intra luma CUs that are not on the first
         // luma line of the CTU. The current encoder always selects the first
         // reference line, so only the first MRL bin is needed.
-        if self.slice_config.tools.mrl_enabled && node.y != 0 {
+        if self.slice_config.tools.mrl_enabled && node.y % VVC_CTU_SIZE as u16 != 0 {
             self.contexts
                 .encode(cabac, VvcCabacContext::MultiRefLineIdx(0), false);
         }
@@ -392,13 +457,31 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             visible_height,
             self.params.chroma_sampling,
         );
+        self.emit_chroma_tree_with_neighbours(
+            cabac,
+            node,
+            visible_width,
+            visible_height,
+            &mut neighbours,
+        );
+    }
+
+    fn emit_chroma_tree_with_neighbours(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        visible_width: u16,
+        visible_height: u16,
+        neighbours: &mut VvcChromaNeighbourState,
+    ) {
+        debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeChroma);
         self.emit_chroma_visible_qt_subtree(
             cabac,
             node,
             visible_width,
             visible_height,
             4,
-            &mut neighbours,
+            neighbours,
         );
     }
 

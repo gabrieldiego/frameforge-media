@@ -27,16 +27,16 @@ mod palette;
 mod residual;
 mod syntax;
 use cabac::{
-    encode_ctu_partition_body, encode_ctu_partition_body_with_contexts, initial_vvc_cabac_contexts,
-    vvc_chroma_transform_nodes, vvc_luma_transform_nodes, VvcCabacContext, VvcCabacContexts,
-    VvcCabacDumpContextEvent, VvcCabacDumpSymbol, VvcCabacEncoder, VvcCodingTreeNode,
-    VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape, VvcLastSigCoeffPrefixCtxInput,
+    encode_ctu_partition_body, encode_frame_partition_body_with_contexts,
+    initial_vvc_cabac_contexts, vvc_chroma_transform_nodes, vvc_luma_transform_nodes,
+    VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
+    VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
+    VvcLastSigCoeffPrefixCtxInput,
 };
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
 use header::{
-    vvc_ctu_slice_unit_with_luma_max_leaf_size, vvc_frame_slice_unit, vvc_picture_ctu_cols,
-    vvc_picture_ctu_count, vvc_picture_ctu_rows, vvc_picture_header_unit,
+    vvc_frame_slice_unit, vvc_picture_ctu_cols, vvc_picture_ctu_count, vvc_picture_ctu_rows,
     vvc_poc_lsb_for_frame_idx, vvc_pps_unit, vvc_pps_unit_with_partitioning,
     vvc_slice_address_bits, vvc_slice_unit, vvc_sps_unit, VvcPictureKind, VvcPicturePartitioning,
 };
@@ -66,8 +66,7 @@ pub use residual::quantize_vvc_color;
 #[cfg(test)]
 use residual::VVC_LUMA_DC_BASE;
 use residual::{
-    quantize_vvc_frame, quantize_vvc_frame_with_reconstruction,
-    quantize_vvc_residual_ctu_into_frame_reconstruction, VvcQuantizedColor,
+    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction, VvcQuantizedColor,
     VvcResidualCabacOptions, VvcResidualComponent, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
     VVC_CHROMA_AC_COEFFS_PER_TU, VVC_LUMA_AC_COEFFS_PER_TU,
 };
@@ -528,11 +527,22 @@ struct VvcPictureFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VvcCodingTreeConfig {
     chroma_sampling: ChromaSampling,
+    dual_tree_intra: bool,
 }
 
 impl VvcCodingTreeConfig {
     const fn yuv(chroma_sampling: ChromaSampling) -> Self {
-        Self { chroma_sampling }
+        Self {
+            chroma_sampling,
+            dual_tree_intra: true,
+        }
+    }
+
+    const fn single_tree_444() -> Self {
+        Self {
+            chroma_sampling: ChromaSampling::Cs444,
+            dual_tree_intra: false,
+        }
     }
 }
 
@@ -693,15 +703,14 @@ impl VvcSliceSyntaxConfig {
 
     const fn palette_444() -> Self {
         let mut config = Self::new(
-            VvcCodingTreeConfig {
-                chroma_sampling: ChromaSampling::Cs444,
-            },
+            VvcCodingTreeConfig::single_tree_444(),
             VvcSyntaxToolFlags::palette_444(),
         );
         config.slice_qp = VVC_PALETTE_DEFAULT_SLICE_QP;
         config
     }
 
+    #[cfg(test)]
     const fn palette_444_lossless(bit_depth: SampleBitDepth) -> Self {
         let mut config = Self::palette_444();
         config.slice_qp = vvc_palette_lossless_slice_qp(bit_depth);
@@ -709,14 +718,7 @@ impl VvcSliceSyntaxConfig {
     }
 
     const fn for_picture_format(format: VvcPictureFormat) -> Self {
-        // Current encoding-mode policy: the only implemented palette path is
-        // 4:4:4, so 4:4:4 pictures select palette syntax. Keep this decision
-        // behind a single helper so later work can replace the heuristic with
-        // CU-level decisions, content analysis, or explicit encoder controls.
-        match format.chroma_sampling {
-            ChromaSampling::Cs444 => Self::palette_444(),
-            _ => Self::residual_lossy(format.chroma_sampling),
-        }
+        Self::residual_lossy(format.chroma_sampling)
     }
 
     const fn with_vui_signal(mut self, vui_signal: VvcVuiSignal) -> Self {
@@ -737,64 +739,16 @@ impl VvcSliceSyntaxConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VvcPictureCodingPath {
-    Residual(VvcResidualCodingMode),
-    Palette444(VvcPaletteCodingMode),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::vvc) enum VvcResidualCodingMode {
     Lossy,
     Lossless,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VvcPaletteCodingMode {
-    Lossy,
-    Lossless,
-}
-
-impl VvcPictureCodingPath {
-    fn for_encode_options(stream_format: VvcPictureFormat, options: VvcEncodeOptions) -> Self {
-        match (stream_format.chroma_sampling, options.lossless) {
-            (ChromaSampling::Cs444, true) => Self::Palette444(VvcPaletteCodingMode::Lossless),
-            (ChromaSampling::Cs444, false) => Self::Palette444(VvcPaletteCodingMode::Lossy),
-            (_, true) => Self::Residual(VvcResidualCodingMode::Lossless),
-            (_, false) => Self::Residual(VvcResidualCodingMode::Lossy),
-        }
-    }
-
-    fn slice_config(self, stream_format: VvcPictureFormat) -> VvcSliceSyntaxConfig {
-        match self {
-            Self::Residual(mode) => mode.slice_config(stream_format),
-            Self::Palette444(mode) => mode.slice_config(stream_format.bit_depth),
-        }
-    }
-
-    const fn picture_partitioning(self) -> VvcPicturePartitioning {
-        match self {
-            Self::Residual(mode) => mode.picture_partitioning(),
-            Self::Palette444(_) => VvcPicturePartitioning::OneSlicePerCtu,
-        }
-    }
-}
-
 impl VvcResidualCodingMode {
-    const fn is_lossless(self) -> bool {
-        matches!(self, Self::Lossless)
-    }
-
-    const fn luma_max_leaf_size(self) -> u16 {
-        match self {
-            Self::Lossy => VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
-            Self::Lossless => VVC_LOSSLESS_LUMA_LEAF_SIZE,
-        }
-    }
-
-    const fn picture_partitioning(self) -> VvcPicturePartitioning {
-        match self {
-            Self::Lossy => VvcPicturePartitioning::OneSlicePerCtu,
-            Self::Lossless => VvcPicturePartitioning::SingleSlice,
+    const fn for_encode_options(options: VvcEncodeOptions) -> Self {
+        match options.lossless {
+            true => Self::Lossless,
+            false => Self::Lossy,
         }
     }
 
@@ -807,13 +761,21 @@ impl VvcResidualCodingMode {
             ),
         }
     }
-}
 
-impl VvcPaletteCodingMode {
-    const fn slice_config(self, bit_depth: SampleBitDepth) -> VvcSliceSyntaxConfig {
+    const fn picture_partitioning(self) -> VvcPicturePartitioning {
         match self {
-            Self::Lossy => VvcSliceSyntaxConfig::palette_444(),
-            Self::Lossless => VvcSliceSyntaxConfig::palette_444_lossless(bit_depth),
+            Self::Lossy | Self::Lossless => VvcPicturePartitioning::SingleSlice,
+        }
+    }
+
+    const fn is_lossless(self) -> bool {
+        matches!(self, Self::Lossless)
+    }
+
+    const fn luma_max_leaf_size(self) -> u16 {
+        match self {
+            Self::Lossy => VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+            Self::Lossless => VVC_LOSSLESS_LUMA_LEAF_SIZE,
         }
     }
 }
@@ -909,6 +871,7 @@ fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
     -((i32::from(bit_depth.bits()) - 8) * 6)
 }
 
+#[cfg(test)]
 const fn vvc_palette_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
     4 - ((bit_depth.bits() as i32 - 8) * 6)
 }
@@ -944,20 +907,6 @@ impl VvcSampledFrame {
             y: self.luma[0],
             u: self.cb[0],
             v: self.cr[0],
-        }
-    }
-
-    fn scratch(format: VvcPictureFormat) -> Self {
-        Self {
-            geometry: VvcVideoGeometry {
-                width: 0,
-                height: 0,
-            },
-            format,
-            luma: Vec::new(),
-            cb: Vec::new(),
-            cr: Vec::new(),
-            chroma_len: 0,
         }
     }
 
@@ -1284,10 +1233,10 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         stream_format.bit_depth,
     )?;
     let frame_len = stream_layout.frame_len();
-    let coding_path = VvcPictureCodingPath::for_encode_options(stream_format, options);
+    let residual_mode = VvcResidualCodingMode::for_encode_options(options);
     let slice_config =
-        vvc_slice_config_for_input_format(coding_path.slice_config(stream_format), format);
-    let picture_partitioning = coding_path.picture_partitioning();
+        vvc_slice_config_for_input_format(residual_mode.slice_config(stream_format), format);
+    let picture_partitioning = residual_mode.picture_partitioning();
     write_annex_b_to(
         bitstream,
         &[
@@ -1342,145 +1291,43 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         frame_stats.add_elapsed("sample_frame", stage_start);
         let (frame_recon_yuv, frame_bitstream_bytes) = {
             let mut frame_bitstream = CountingWriter::new(bitstream);
-            if picture_partitioning == VvcPicturePartitioning::OneSlicePerCtu
-                && vvc_picture_ctu_count(geometry) > 1
-            {
+            let frame_recon_yuv = {
+                let mut frame_recon =
+                    VvcReconstructionFrame::new_neutral(geometry, source_frame.format);
+                let mut frame_ctus = Vec::with_capacity(vvc_picture_ctu_count(geometry));
+                for region in vvc_ctu_regions(geometry) {
+                    #[cfg(feature = "vvc-stats")]
+                    let stage_start = Instant::now();
+                    let quantized = quantize_vvc_residual_ctu_into_frame_reconstruction(
+                        &source_frame,
+                        &mut frame_recon,
+                        region,
+                        residual_mode,
+                    );
+                    #[cfg(feature = "vvc-stats")]
+                    add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
+                    #[cfg(feature = "vvc-stats")]
+                    frame_stats.add_elapsed("ctu_quantize", stage_start);
+                    frame_ctus.push(VvcQuantizedCtu {
+                        slice_address: region.slice_address,
+                        geometry: region.geometry,
+                        color: quantized,
+                        luma_max_leaf_size: residual_mode.luma_max_leaf_size(),
+                    });
+                }
                 #[cfg(feature = "vvc-stats")]
                 let stage_start = Instant::now();
                 write_annex_b_to(
                     &mut frame_bitstream,
-                    &[vvc_picture_header_unit(frame_idx, slice_config)],
+                    &[vvc_frame_slice_unit(
+                        frame_idx,
+                        geometry,
+                        &frame_ctus,
+                        slice_config,
+                    )?],
                 )?;
                 #[cfg(feature = "vvc-stats")]
-                frame_stats.add_elapsed("picture_header_write", stage_start);
-            }
-
-            let frame_recon_yuv = if let VvcPictureCodingPath::Palette444(_) = coding_path {
-                let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
-                let mut ctu_frame = VvcSampledFrame::scratch(stream_format);
-                for region in vvc_ctu_regions(geometry) {
-                    #[cfg(feature = "vvc-stats")]
-                    let stage_start = Instant::now();
-                    copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
-                    #[cfg(feature = "vvc-stats")]
-                    frame_stats.add_elapsed("ctu_copy_source", stage_start);
-                    #[cfg(feature = "vvc-stats")]
-                    let stage_start = Instant::now();
-                    let ctu_recon = palette::vvc_palette_444_reconstruction_yuv_with_config(
-                        &ctu_frame,
-                        slice_config,
-                    );
-                    #[cfg(feature = "vvc-stats")]
-                    frame_stats.add_elapsed("ctu_palette_reconstruct", stage_start);
-                    #[cfg(feature = "vvc-stats")]
-                    let stage_start = Instant::now();
-                    frame_recon.copy_ctu_yuv(region, &ctu_frame, &ctu_recon)?;
-                    #[cfg(feature = "vvc-stats")]
-                    frame_stats.add_elapsed("ctu_recon_copy", stage_start);
-                    #[cfg(feature = "vvc-stats")]
-                    let stage_start = Instant::now();
-                    write_annex_b_to(
-                        &mut frame_bitstream,
-                        &[palette::vvc_palette_444_ctu_slice_unit(
-                            frame_idx,
-                            geometry,
-                            region.slice_address,
-                            &ctu_frame,
-                            slice_config,
-                        )?],
-                    )?;
-                    #[cfg(feature = "vvc-stats")]
-                    frame_stats.add_elapsed("ctu_entropy_write", stage_start);
-                }
-                #[cfg(feature = "vvc-stats")]
-                let stage_start = Instant::now();
-                let yuv = frame_recon.into_yuv();
-                #[cfg(feature = "vvc-stats")]
-                frame_stats.add_elapsed("frame_recon_finalize", stage_start);
-                yuv
-            } else {
-                let VvcPictureCodingPath::Residual(residual_mode) = coding_path else {
-                    unreachable!("palette coding path handled above");
-                };
-                let mut frame_recon =
-                    VvcReconstructionFrame::new_neutral(geometry, source_frame.format);
-                if picture_partitioning == VvcPicturePartitioning::SingleSlice {
-                    let mut frame_ctus = Vec::with_capacity(vvc_picture_ctu_count(geometry));
-                    for region in vvc_ctu_regions(geometry) {
-                        #[cfg(feature = "vvc-stats")]
-                        let stage_start = Instant::now();
-                        let quantized = quantize_vvc_residual_ctu_into_frame_reconstruction(
-                            &source_frame,
-                            &mut frame_recon,
-                            region,
-                            residual_mode,
-                        );
-                        #[cfg(feature = "vvc-stats")]
-                        add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
-                        #[cfg(feature = "vvc-stats")]
-                        frame_stats.add_elapsed("ctu_quantize", stage_start);
-                        frame_ctus.push(VvcQuantizedCtu {
-                            slice_address: region.slice_address,
-                            geometry: region.geometry,
-                            color: quantized,
-                            luma_max_leaf_size: residual_mode.luma_max_leaf_size(),
-                        });
-                    }
-                    #[cfg(feature = "vvc-stats")]
-                    let stage_start = Instant::now();
-                    write_annex_b_to(
-                        &mut frame_bitstream,
-                        &[vvc_frame_slice_unit(
-                            frame_idx,
-                            geometry,
-                            &frame_ctus,
-                            slice_config,
-                        )?],
-                    )?;
-                    #[cfg(feature = "vvc-stats")]
-                    frame_stats.add_elapsed("frame_entropy_write", stage_start);
-                } else {
-                    let mut ctu_frame = VvcSampledFrame::scratch(stream_format);
-                    for region in vvc_ctu_regions(geometry) {
-                        #[cfg(feature = "vvc-stats")]
-                        let stage_start = Instant::now();
-                        copy_vvc_ctu_frame_into(&source_frame, region, &mut ctu_frame);
-                        #[cfg(feature = "vvc-stats")]
-                        frame_stats.add_elapsed("ctu_copy_source", stage_start);
-                        #[cfg(feature = "vvc-stats")]
-                        let stage_start = Instant::now();
-                        let quantized = quantize_vvc_frame_with_reconstruction(&ctu_frame);
-                        #[cfg(feature = "vvc-stats")]
-                        add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized.quantized);
-                        #[cfg(feature = "vvc-stats")]
-                        frame_stats.add_elapsed("ctu_quantize", stage_start);
-                        #[cfg(feature = "vvc-stats")]
-                        let stage_start = Instant::now();
-                        frame_recon.copy_ctu_yuv(
-                            region,
-                            &ctu_frame,
-                            &quantized.reconstruction_yuv,
-                        )?;
-                        #[cfg(feature = "vvc-stats")]
-                        frame_stats.add_elapsed("ctu_recon_copy", stage_start);
-                        #[cfg(feature = "vvc-stats")]
-                        let stage_start = Instant::now();
-                        write_annex_b_to(
-                            &mut frame_bitstream,
-                            &[vvc_ctu_slice_unit_with_luma_max_leaf_size(
-                                frame_idx,
-                                geometry,
-                                region.slice_address,
-                                region.geometry,
-                                quantized.quantized,
-                                slice_config,
-                                residual_mode.luma_max_leaf_size(),
-                            )?],
-                        )?;
-                        #[cfg(feature = "vvc-stats")]
-                        frame_stats.add_elapsed("ctu_entropy_write", stage_start);
-                    }
-                }
+                frame_stats.add_elapsed("frame_entropy_write", stage_start);
                 #[cfg(feature = "vvc-stats")]
                 let stage_start = Instant::now();
                 let yuv = frame_recon.into_yuv();
@@ -1560,52 +1407,6 @@ fn vvc_ctu_regions(geometry: VvcVideoGeometry) -> impl Iterator<Item = VvcCtuReg
     })
 }
 
-fn copy_vvc_ctu_frame_into(
-    frame: &VvcSampledFrame,
-    region: VvcCtuRegion,
-    ctu_frame: &mut VvcSampledFrame,
-) {
-    let ctu_layout = PlanarYuvGeometry::for_validated_shape(
-        region.geometry.width,
-        region.geometry.height,
-        frame.format.chroma_sampling,
-        frame.format.bit_depth,
-    );
-    let frame_layout = PlanarYuvGeometry::for_validated_shape(
-        frame.geometry.width,
-        frame.geometry.height,
-        frame.format.chroma_sampling,
-        frame.format.bit_depth,
-    );
-    ctu_frame.geometry = region.geometry;
-    ctu_frame.format = frame.format;
-    ctu_frame.chroma_len = ctu_layout.chroma_samples();
-    ctu_frame.luma.resize(ctu_layout.luma_samples(), 0);
-    for y in 0..region.geometry.height {
-        let src = (region.origin_y + y) * frame.geometry.width + region.origin_x;
-        let dst = y * region.geometry.width;
-        ctu_frame.luma[dst..dst + region.geometry.width]
-            .copy_from_slice(&frame.luma[src..src + region.geometry.width]);
-    }
-
-    let subsample_x = chroma_subsample_x(frame.format.chroma_sampling);
-    let subsample_y = chroma_subsample_y(frame.format.chroma_sampling);
-    let chroma_width = ctu_layout.chroma_width();
-    let chroma_height = ctu_layout.chroma_height();
-    let source_chroma_width = frame_layout.chroma_width();
-    let source_origin_x = region.origin_x / subsample_x;
-    let source_origin_y = region.origin_y / subsample_y;
-    let neutral = vvc_neutral_sample(frame.format.bit_depth);
-    ctu_frame.cb.resize(ctu_frame.chroma_len, neutral);
-    ctu_frame.cr.resize(ctu_frame.chroma_len, neutral);
-    for y in 0..chroma_height {
-        let src = (source_origin_y + y) * source_chroma_width + source_origin_x;
-        let dst = y * chroma_width;
-        ctu_frame.cb[dst..dst + chroma_width].copy_from_slice(&frame.cb[src..src + chroma_width]);
-        ctu_frame.cr[dst..dst + chroma_width].copy_from_slice(&frame.cr[src..src + chroma_width]);
-    }
-}
-
 impl VvcReconstructionFrame {
     fn new_neutral(geometry: VvcVideoGeometry, format: VvcPictureFormat) -> Self {
         let layout = PlanarYuvGeometry::for_validated_shape(
@@ -1622,56 +1423,6 @@ impl VvcReconstructionFrame {
             cb: vec![neutral; layout.chroma_samples()],
             cr: vec![neutral; layout.chroma_samples()],
         }
-    }
-
-    fn copy_ctu_yuv(
-        &mut self,
-        region: VvcCtuRegion,
-        ctu_frame: &VvcSampledFrame,
-        ctu_yuv: &[VvcSample],
-    ) -> Result<(), String> {
-        if ctu_frame.format.chroma_sampling != self.format.chroma_sampling {
-            return Err(format!(
-                "VVC reconstruction CTU format mismatch: frame {:?}, CTU {:?}",
-                self.format.chroma_sampling, ctu_frame.format.chroma_sampling
-            ));
-        }
-
-        let luma_len = ctu_frame.geometry.luma_samples();
-        if ctu_yuv.len() != luma_len + ctu_frame.chroma_len * 2 {
-            return Err(format!(
-                "VVC CTU reconstruction size mismatch: got {} bytes, expected {}",
-                ctu_yuv.len(),
-                luma_len + ctu_frame.chroma_len * 2
-            ));
-        }
-
-        for y in 0..ctu_frame.geometry.height {
-            let src = y * ctu_frame.geometry.width;
-            let dst = (region.origin_y + y) * self.geometry.width + region.origin_x;
-            self.luma[dst..dst + ctu_frame.geometry.width]
-                .copy_from_slice(&ctu_yuv[src..src + ctu_frame.geometry.width]);
-        }
-
-        let subsample_x = chroma_subsample_x(self.format.chroma_sampling);
-        let subsample_y = chroma_subsample_y(self.format.chroma_sampling);
-        let frame_chroma_width = self.geometry.width / subsample_x;
-        let ctu_chroma_width = ctu_frame.geometry.width / subsample_x;
-        let ctu_chroma_height = ctu_frame.geometry.height / subsample_y;
-        let dst_origin_x = region.origin_x / subsample_x;
-        let dst_origin_y = region.origin_y / subsample_y;
-        let cb_offset = luma_len;
-        let cr_offset = cb_offset + ctu_frame.chroma_len;
-        for y in 0..ctu_chroma_height {
-            let src = y * ctu_chroma_width;
-            let dst = (dst_origin_y + y) * frame_chroma_width + dst_origin_x;
-            self.cb[dst..dst + ctu_chroma_width]
-                .copy_from_slice(&ctu_yuv[cb_offset + src..cb_offset + src + ctu_chroma_width]);
-            self.cr[dst..dst + ctu_chroma_width]
-                .copy_from_slice(&ctu_yuv[cr_offset + src..cr_offset + src + ctu_chroma_width]);
-        }
-
-        Ok(())
     }
 
     fn into_yuv(self) -> Vec<u8> {
@@ -1901,7 +1652,7 @@ fn validate_vvc_input_format(format: PixelFormat) -> Result<VvcPictureFormat, St
             "VVC 4:2:2 input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
         ChromaSampling::Cs444 => Err(format!(
-            "VVC 4:4:4 palette input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
+            "VVC 4:4:4 input currently supports bit depths {VVC_MIN_BIT_DEPTH}..{VVC_MAX_BIT_DEPTH}; got {format}"
         )),
         ChromaSampling::Monochrome => Err(format!(
             "VVC monochrome input is not wired yet; got {format}"
@@ -2095,6 +1846,7 @@ fn vvc_cabac_bits_with_luma_max_leaf_size(
         color,
         luma_max_leaf_size,
         slice_config.coding_tree.chroma_sampling,
+        slice_config.coding_tree.dual_tree_intra,
     ) {
         return vvc_ctu_partition_cabac_bits(&params, slice_config);
     }
@@ -2113,6 +1865,7 @@ fn vvc_frame_cabac_bits(
     debug_assert_eq!(ctus.len(), vvc_picture_ctu_count(picture_geometry));
     let mut cabac = VvcCabacEncoder::new();
     let mut contexts = initial_vvc_cabac_contexts(slice_config);
+    let mut params_by_ctu = Vec::with_capacity(ctus.len());
     cabac.start();
     for (expected_slice_address, ctu) in ctus.iter().enumerate() {
         debug_assert_eq!(ctu.slice_address, expected_slice_address);
@@ -2121,6 +1874,7 @@ fn vvc_frame_cabac_bits(
             ctu.color.clone(),
             ctu.luma_max_leaf_size,
             slice_config.coding_tree.chroma_sampling,
+            slice_config.coding_tree.dual_tree_intra,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -2130,8 +1884,15 @@ fn vvc_frame_cabac_bits(
                 ctu.geometry.coded_height()
             )
         });
-        encode_ctu_partition_body_with_contexts(&mut cabac, &mut contexts, &params, slice_config);
+        params_by_ctu.push(params);
     }
+    encode_frame_partition_body_with_contexts(
+        &mut cabac,
+        &mut contexts,
+        picture_geometry,
+        &params_by_ctu,
+        slice_config,
+    );
     cabac.encode_bin_trm(true);
     cabac.finish()
 }
@@ -2165,6 +1926,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size(
         color,
         luma_max_leaf_size,
         ChromaSampling::Cs420,
+        true,
     )
 }
 
@@ -2173,6 +1935,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
     color: VvcQuantizedColor,
     luma_max_leaf_size: u16,
     chroma_sampling: ChromaSampling,
+    dual_tree_intra: bool,
 ) -> Option<VvcCtuPartitionParams> {
     let coded = geometry.coded();
     if coded.width > VVC_CTU_SIZE
@@ -2188,6 +1951,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         visible_width: coded.width as u16,
         visible_height: coded.height as u16,
         chroma_sampling,
+        dual_tree_intra,
     };
     let chroma_tu_count = if color.chroma_tu_count > 1 {
         color.chroma_tu_count
@@ -2202,13 +1966,20 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_dc_levels,
         luma_tu_ac_levels,
         luma_tu_has_ac,
-    ) = vvc_luma_residual_arrays_for_geometry(coded, chroma_sampling, luma_max_leaf_size, color);
+    ) = vvc_luma_residual_arrays_for_geometry(
+        coded,
+        chroma_sampling,
+        dual_tree_intra,
+        luma_max_leaf_size,
+        color,
+    );
     Some(VvcCtuPartitionParams {
         root_width: VVC_CTU_SIZE,
         root_height: VVC_CTU_SIZE,
         visible_width: coded.width,
         visible_height: coded.height,
         chroma_sampling,
+        dual_tree_intra,
         luma_max_leaf_size,
         chroma_tu_count,
         luma_tu_count,
@@ -2232,6 +2003,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
 fn vvc_luma_residual_arrays_for_geometry(
     coded: VvcCodedGeometry,
     chroma_sampling: ChromaSampling,
+    dual_tree_intra: bool,
     luma_max_leaf_size: u16,
     color: VvcQuantizedColor,
 ) -> (
@@ -2262,7 +2034,8 @@ fn vvc_luma_residual_arrays_for_geometry(
         );
     }
 
-    let leaf_count = vvc_luma_leaf_count(coded, chroma_sampling, luma_max_leaf_size);
+    let leaf_count =
+        vvc_luma_leaf_count(coded, chroma_sampling, dual_tree_intra, luma_max_leaf_size);
     luma_tu_count = leaf_count;
     for idx in 0..leaf_count.min(MAX_VVC_LUMA_TUS) {
         luma_tu_intra_modes[idx] = color.luma_tu_intra_modes[0];
@@ -2286,6 +2059,7 @@ fn vvc_luma_residual_arrays_for_geometry(
 fn vvc_luma_leaf_count(
     coded: VvcCodedGeometry,
     chroma_sampling: ChromaSampling,
+    dual_tree_intra: bool,
     luma_max_leaf_size: u16,
 ) -> usize {
     let shape = VvcCtuPartitionShape {
@@ -2294,6 +2068,7 @@ fn vvc_luma_leaf_count(
         visible_width: coded.width as u16,
         visible_height: coded.height as u16,
         chroma_sampling,
+        dual_tree_intra,
     };
     vvc_luma_transform_nodes(shape, luma_max_leaf_size).len()
 }

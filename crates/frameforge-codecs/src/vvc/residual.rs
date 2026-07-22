@@ -28,10 +28,9 @@ pub(super) use prediction::{
     predict_vvc_luma_intra_block_into, VvcDcPredictionScratch,
 };
 pub use quant::quantize_vvc_color;
-pub(super) use quant::{
-    quantize_vvc_frame, quantize_vvc_frame_with_reconstruction,
-    quantize_vvc_residual_ctu_into_frame_reconstruction,
-};
+#[cfg(test)]
+pub(super) use quant::quantize_vvc_frame_with_reconstruction;
+pub(super) use quant::{quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction};
 #[cfg(test)]
 pub(super) use recon::reconstruct_vvc_residual_frame;
 pub(super) use syntax::{

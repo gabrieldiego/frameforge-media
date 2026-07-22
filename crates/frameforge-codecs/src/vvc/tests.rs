@@ -152,12 +152,14 @@ fn vvc_sps_signals_srgb_gbr_vui_when_requested() {
 
 #[test]
 fn vvc_gbrp8_input_requests_srgb_vui_signal() {
-    let config =
-        vvc_slice_config_for_input_format(VvcSliceSyntaxConfig::palette_444(), PixelFormat::Gbrp8);
+    let config = vvc_slice_config_for_input_format(
+        VvcSliceSyntaxConfig::residual_lossy(ChromaSampling::Cs444),
+        PixelFormat::Gbrp8,
+    );
     assert_eq!(config.vui_signal, Some(VvcVuiSignal::srgb_gbr_compatible()));
 
     let yuv_config = vvc_slice_config_for_input_format(
-        VvcSliceSyntaxConfig::palette_444(),
+        VvcSliceSyntaxConfig::residual_lossy(ChromaSampling::Cs444),
         PixelFormat::Yuv444p8,
     );
     assert_eq!(yuv_config.vui_signal, None);
@@ -925,6 +927,7 @@ fn vvc_luma_transform_nodes_match_cabac_luma_leaves() {
                 black,
                 VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
                 chroma_sampling,
+                true,
             )
             .expect("partition parameters");
             let cabac_luma_nodes: Vec<_> = VvcCtuCabacOp::ctu_partition(&params)
@@ -1229,6 +1232,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             visible_width,
             visible_height,
             chroma_sampling: ChromaSampling::Cs420,
+            dual_tree_intra: true,
             luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
             chroma_tu_count: (visible_width * visible_height) / 16,
             luma_tu_count: 0,
@@ -1308,6 +1312,7 @@ fn vvc_lossless_cabac_body_uses_active_chroma_sampling() {
         black,
         VVC_LOSSLESS_LUMA_LEAF_SIZE,
         ChromaSampling::Cs422,
+        true,
     )
     .expect("4:2:2 partition parameters");
     assert_eq!(params.chroma_tu_count, 8);
@@ -1328,6 +1333,7 @@ fn vvc_lossless_cabac_body_uses_active_chroma_sampling() {
         black,
         VVC_LOSSLESS_LUMA_LEAF_SIZE,
         ChromaSampling::Cs420,
+        true,
     )
     .expect("4:2:0 partition parameters");
     assert_ne!(
@@ -1473,6 +1479,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             visible_width: 64,
             visible_height: 64,
             chroma_sampling,
+            dual_tree_intra: true,
             luma_max_leaf_size: VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
             chroma_tu_count: 0,
             luma_tu_count: 0,
@@ -1689,12 +1696,8 @@ fn vvc_coding_tree_plan_carries_chroma_sampling_parameter() {
     };
     let yuv420 =
         vvc_coding_tree_plan_with_config(geometry, VvcCodingTreeConfig::yuv(ChromaSampling::Cs420));
-    let yuv444 = vvc_coding_tree_plan_with_config(
-        geometry,
-        VvcCodingTreeConfig {
-            chroma_sampling: ChromaSampling::Cs444,
-        },
-    );
+    let yuv444 =
+        vvc_coding_tree_plan_with_config(geometry, VvcCodingTreeConfig::yuv(ChromaSampling::Cs444));
     assert_eq!(
         yuv420
             .iter()
@@ -1788,7 +1791,13 @@ fn vvc_lossless_input_path_accepts_16x16_gbrp8_frames() {
     assert_vvc_annex_b_sps_matches_config(
         &bitstream,
         geometry,
-        vvc_slice_config_for_input_format(VvcSliceSyntaxConfig::palette_444(), PixelFormat::Gbrp8),
+        vvc_slice_config_for_input_format(
+            VvcSliceSyntaxConfig::residual_lossless(
+                ChromaSampling::Cs444,
+                PixelFormat::Gbrp8.bit_depth(),
+            ),
+            PixelFormat::Gbrp8,
+        ),
         PixelFormat::Gbrp8.bit_depth(),
     );
     assert_eq!(reconstruction, input);

@@ -82,20 +82,6 @@ pub(in crate::vvc) fn vvc_pps_unit_with_partitioning(
     }
 }
 
-pub(in crate::vvc) fn vvc_picture_header_unit(
-    frame_idx: usize,
-    slice_config: VvcSliceSyntaxConfig,
-) -> VvcNalUnit {
-    let picture_kind = VvcPictureKind::for_frame_idx(frame_idx);
-    let poc_lsb = vvc_poc_lsb_for_frame_idx(frame_idx);
-    VvcNalUnit {
-        nal_unit_type: VvcNalUnitType::PictureHeader,
-        layer_id: 0,
-        temporal_id: 0,
-        rbsp_payload: vvc_picture_header_payload(picture_kind, poc_lsb, slice_config),
-    }
-}
-
 pub(in crate::vvc) fn vvc_slice_unit(
     frame_idx: usize,
     geometry: VvcVideoGeometry,
@@ -145,30 +131,6 @@ pub(in crate::vvc) fn vvc_frame_slice_unit(
             slice_config,
         ),
     })
-}
-
-pub(in crate::vvc) fn vvc_ctu_slice_unit_with_luma_max_leaf_size(
-    frame_idx: usize,
-    picture_geometry: VvcVideoGeometry,
-    slice_address: usize,
-    ctu_geometry: VvcVideoGeometry,
-    color: VvcQuantizedColor,
-    slice_config: VvcSliceSyntaxConfig,
-    luma_max_leaf_size: u16,
-) -> Result<VvcNalUnit, String> {
-    let picture_kind = VvcPictureKind::for_frame_idx(frame_idx);
-    let poc_lsb = vvc_poc_lsb_for_frame_idx(frame_idx);
-
-    vvc_ctu_slice_unit_with_poc(
-        picture_kind,
-        poc_lsb,
-        picture_geometry,
-        slice_address,
-        ctu_geometry,
-        color,
-        slice_config,
-        luma_max_leaf_size,
-    )
 }
 
 fn vvc_ctu_slice_unit_with_poc(
@@ -318,10 +280,11 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
     );
     writer.write_ue("sps_log2_diff_max_bt_min_qt_intra_slice_luma", 2);
     writer.write_ue("sps_log2_diff_max_tt_min_qt_intra_slice_luma", 2);
-    // sps_qtbtt_dual_tree_intra_flag is a chroma tree-configuration choice.
-    // Palette is a CU prediction mode below this tree, not the reason to pick
-    // single-tree vs dual-tree partitioning.
-    let dual_tree_intra = config.chroma_sampling != ChromaSampling::Cs444;
+    // sps_qtbtt_dual_tree_intra_flag is a coding-tree policy choice. The
+    // residual path uses dual-tree partitioning across chroma formats; palette
+    // remains a single-tree 4:4:4 tool.
+    let dual_tree_intra =
+        config.dual_tree_intra && config.chroma_sampling != ChromaSampling::Monochrome;
     writer.write_flag("sps_qtbtt_dual_tree_intra_flag", dual_tree_intra);
     if dual_tree_intra {
         writer.write_ue("sps_log2_diff_min_qt_min_cb_intra_slice_chroma", 1);
@@ -500,18 +463,6 @@ fn write_vvc_vui_parameters(writer: &mut VvcSyntaxWriter, vui_signal: VvcVuiSign
         writer.write_flag("vui_payload_bit_equal_to_one", true);
         writer.byte_align_zero("vui_payload_bit_equal_to_zero");
     }
-}
-
-fn vvc_picture_header_payload(
-    picture_kind: VvcPictureKind,
-    poc_lsb: u32,
-    slice_config: VvcSliceSyntaxConfig,
-) -> Vec<u8> {
-    let mut writer = VvcSyntaxWriter::new();
-    write_vvc_picture_header(&mut writer, picture_kind, poc_lsb, slice_config);
-    writer.rbsp_trailing_bits();
-    debug_assert!(writer.is_byte_aligned());
-    writer.finish().bytes
 }
 
 pub(in crate::vvc) fn write_vvc_picture_header(

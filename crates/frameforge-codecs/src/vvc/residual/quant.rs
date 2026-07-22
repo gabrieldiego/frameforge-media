@@ -92,6 +92,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
         visible_width: region.geometry.coded_width() as u16,
         visible_height: region.geometry.coded_height() as u16,
         chroma_sampling: source_frame.format.chroma_sampling,
+        dual_tree_intra: true,
     };
 
     let mut luma_tu_count = 0usize;

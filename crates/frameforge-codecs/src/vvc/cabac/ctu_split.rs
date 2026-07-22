@@ -16,6 +16,7 @@ pub(in crate::vvc) struct VvcCtuPartitionParams {
     pub(in crate::vvc) visible_width: usize,
     pub(in crate::vvc) visible_height: usize,
     pub(in crate::vvc) chroma_sampling: ChromaSampling,
+    pub(in crate::vvc) dual_tree_intra: bool,
     pub(in crate::vvc) luma_max_leaf_size: u16,
     pub(in crate::vvc) chroma_tu_count: usize,
     pub(in crate::vvc) luma_tu_count: usize,
@@ -43,6 +44,7 @@ impl VvcCtuPartitionParams {
             visible_width: self.visible_width as u16,
             visible_height: self.visible_height as u16,
             chroma_sampling: self.chroma_sampling,
+            dual_tree_intra: self.dual_tree_intra,
         }
     }
 
@@ -92,12 +94,7 @@ pub(in crate::vvc) fn vvc_luma_transform_nodes(
     max_leaf_size: u16,
 ) -> Vec<VvcCodingTreeNode> {
     let mut nodes = Vec::new();
-    let tree_type = match shape.chroma_sampling {
-        ChromaSampling::Cs444 => VvcTreeType::SingleTree,
-        ChromaSampling::Monochrome | ChromaSampling::Cs420 | ChromaSampling::Cs422 => {
-            VvcTreeType::DualTreeLuma
-        }
-    };
+    let tree_type = vvc_luma_tree_type(shape);
     append_visible_luma_transform_nodes(
         &mut nodes,
         VvcCodingTreeNode::root(shape.root_width, shape.root_height, tree_type),
@@ -628,6 +625,7 @@ pub(in crate::vvc) struct VvcCtuPartitionShape {
     pub(in crate::vvc) visible_width: u16,
     pub(in crate::vvc) visible_height: u16,
     pub(in crate::vvc) chroma_sampling: ChromaSampling,
+    pub(in crate::vvc) dual_tree_intra: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,6 +663,22 @@ impl VvcCodingTreeNode {
         Self {
             x: 0,
             y: 0,
+            width,
+            height,
+            cqt_depth: 0,
+            mtt_depth: 0,
+            depth_offset: 0,
+            part_idx: 0,
+            parent_split: VvcPartSplit::None,
+            tree_type,
+            split_history: [VvcPartSplit::None; 2],
+        }
+    }
+
+    fn root_at(x: u16, y: u16, width: u16, height: u16, tree_type: VvcTreeType) -> Self {
+        Self {
+            x,
+            y,
             width,
             height,
             cqt_depth: 0,
@@ -771,6 +785,14 @@ impl VvcCodingTreeNode {
     }
 }
 
+fn vvc_luma_tree_type(shape: VvcCtuPartitionShape) -> VvcTreeType {
+    if shape.dual_tree_intra && shape.chroma_sampling != ChromaSampling::Monochrome {
+        VvcTreeType::DualTreeLuma
+    } else {
+        VvcTreeType::SingleTree
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VvcLumaNeighbourInfo {
     cb_width: u16,
@@ -779,7 +801,7 @@ struct VvcLumaNeighbourInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct VvcLumaNeighbourState {
+pub(in crate::vvc) struct VvcLumaNeighbourState {
     width: u16,
     height: u16,
     valid: Vec<bool>,
@@ -789,7 +811,7 @@ struct VvcLumaNeighbourState {
 }
 
 impl VvcLumaNeighbourState {
-    fn new(width: u16, height: u16) -> Self {
+    pub(in crate::vvc) fn new(width: u16, height: u16) -> Self {
         let samples = usize::from(width) * usize::from(height);
         Self {
             width,
@@ -1017,37 +1039,60 @@ impl VvcCtuCabacOp {
         shape: VvcCtuPartitionShape,
         max_leaf_size: u16,
     ) -> Vec<Self> {
-        let tree_type = match shape.chroma_sampling {
-            ChromaSampling::Cs444 => VvcTreeType::SingleTree,
-            ChromaSampling::Monochrome | ChromaSampling::Cs420 | ChromaSampling::Cs422 => {
-                VvcTreeType::DualTreeLuma
-            }
-        };
-        let root = VvcCodingTreeNode::root(shape.root_width, shape.root_height, tree_type);
         let mut ops = Vec::new();
         let mut neighbours = VvcLumaNeighbourState::new(shape.visible_width, shape.visible_height);
-        Self::append_visible_luma_subtree(
+        Self::append_intra_ctu_partition_with_luma_neighbours(
             &mut ops,
             &mut neighbours,
-            root,
+            shape,
+            0,
+            0,
             shape.visible_width,
             shape.visible_height,
             max_leaf_size,
         );
-        if shape.chroma_sampling != ChromaSampling::Cs444
-            && shape.chroma_sampling != ChromaSampling::Monochrome
-        {
+        ops
+    }
+
+    pub(in crate::vvc) fn append_intra_ctu_partition_with_luma_neighbours(
+        ops: &mut Vec<Self>,
+        neighbours: &mut VvcLumaNeighbourState,
+        shape: VvcCtuPartitionShape,
+        origin_x: u16,
+        origin_y: u16,
+        picture_visible_width: u16,
+        picture_visible_height: u16,
+        max_leaf_size: u16,
+    ) {
+        let tree_type = vvc_luma_tree_type(shape);
+        let root = VvcCodingTreeNode::root_at(
+            origin_x,
+            origin_y,
+            shape.root_width,
+            shape.root_height,
+            tree_type,
+        );
+        Self::append_visible_luma_subtree(
+            ops,
+            neighbours,
+            root,
+            picture_visible_width,
+            picture_visible_height,
+            max_leaf_size,
+        );
+        if shape.dual_tree_intra && shape.chroma_sampling != ChromaSampling::Monochrome {
             ops.push(Self::ChromaTree {
-                node: VvcCodingTreeNode::root(
+                node: VvcCodingTreeNode::root_at(
+                    origin_x,
+                    origin_y,
                     shape.root_width,
                     shape.root_height,
                     VvcTreeType::DualTreeChroma,
                 ),
-                visible_width: shape.visible_width,
-                visible_height: shape.visible_height,
+                visible_width: picture_visible_width,
+                visible_height: picture_visible_height,
             });
         }
-        ops
     }
 
     fn append_visible_luma_subtree(
