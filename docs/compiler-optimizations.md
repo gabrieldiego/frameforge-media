@@ -2299,6 +2299,36 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-lossy-sse-mode-score-1f.json
 ```
 
+## VVC Co-Located Luma Mode Map
+
+Checkpoint: `vvc-colocated-mode-map-1f`.
+
+This checkpoint reuses the CTU-local luma mode map for chroma's co-located luma
+mode lookup. Chroma mode selection previously scanned the already-coded luma TU
+list for every chroma TU. The new lookup reads the same center sample from the
+mode map, so the candidate decisions and bitstreams stay unchanged while the
+lookup cost remains bounded as partitioning work expands.
+
+The first-frame matrix is byte-identical against `vvc-luma-mode-map-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.37 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-colocated-mode-map-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-mode-map-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

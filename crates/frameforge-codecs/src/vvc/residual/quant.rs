@@ -311,13 +311,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        let co_located_luma_mode = vvc_co_located_luma_mode_for_chroma_node(
-            &luma_nodes,
-            &luma_tu_intra_modes,
-            luma_tu_count,
-            node,
-            region,
-        );
+        let co_located_luma_mode =
+            luma_mode_search_state.co_located_mode_for_chroma_node(node, region);
         let initial_chroma_mode = VvcChromaIntraPredictionMode::Derived;
         predict_vvc_chroma_mode_block_into_with_availability(
             &mut predicted_cb,
@@ -730,6 +725,25 @@ impl VvcLumaModeSearchState {
             }
         }
     }
+
+    fn co_located_mode_for_chroma_node(
+        &self,
+        chroma_node: VvcCodingTreeNode,
+        region: VvcCtuRegion,
+    ) -> VvcIntraPredictionMode {
+        let ref_x = chroma_node
+            .x
+            .saturating_add(chroma_node.width >> 1)
+            .min((region.origin_x + region.geometry.coded_width()).saturating_sub(1) as u16);
+        let ref_y = chroma_node
+            .y
+            .saturating_add(chroma_node.height >> 1)
+            .min((region.origin_y + region.geometry.coded_height()).saturating_sub(1) as u16);
+        let local_x = ref_x.saturating_sub(region.origin_x as u16);
+        let local_y = ref_y.saturating_sub(region.origin_y as u16);
+        self.mode_at(local_x, local_y)
+            .unwrap_or(VvcIntraPredictionMode::Dc)
+    }
 }
 
 fn vvc_luma_directional_search_candidates(
@@ -1049,39 +1063,6 @@ fn vvc_global_ctu_node(mut node: VvcCodingTreeNode, region: VvcCtuRegion) -> Vvc
     node.x += region.origin_x as u16;
     node.y += region.origin_y as u16;
     node
-}
-
-fn vvc_co_located_luma_mode_for_chroma_node(
-    local_luma_nodes: &[VvcCodingTreeNode],
-    luma_modes: &[VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
-    luma_tu_count: usize,
-    chroma_node: VvcCodingTreeNode,
-    region: VvcCtuRegion,
-) -> VvcIntraPredictionMode {
-    let ref_x = chroma_node
-        .x
-        .saturating_add(chroma_node.width >> 1)
-        .min((region.origin_x + region.geometry.coded_width()).saturating_sub(1) as u16);
-    let ref_y = chroma_node
-        .y
-        .saturating_add(chroma_node.height >> 1)
-        .min((region.origin_y + region.geometry.coded_height()).saturating_sub(1) as u16);
-    for (idx, local_luma_node) in local_luma_nodes
-        .iter()
-        .copied()
-        .take(luma_tu_count)
-        .enumerate()
-    {
-        let luma_node = vvc_global_ctu_node(local_luma_node, region);
-        if ref_x >= luma_node.x
-            && ref_x < luma_node.x.saturating_add(luma_node.width)
-            && ref_y >= luma_node.y
-            && ref_y < luma_node.y.saturating_add(luma_node.height)
-        {
-            return luma_modes[idx];
-        }
-    }
-    VvcIntraPredictionMode::Dc
 }
 
 fn predict_vvc_chroma_mode_block_into_with_availability(
