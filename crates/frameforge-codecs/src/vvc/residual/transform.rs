@@ -23,6 +23,7 @@ const VVC_CHROMA_DC_LEVEL_LIMIT: i16 = 255;
 const VVC_CHROMA_AC_LEVEL_LIMIT: i16 = 2;
 const VVC_MAX_TRANSFORM_EDGE: usize = 32;
 const VVC_MAX_TRANSFORM_COEFFS: usize = VVC_MAX_TRANSFORM_EDGE * VVC_MAX_TRANSFORM_EDGE;
+const VVC_ENABLE_EXPERIMENTAL_LUMA_DCT_COEFF_SELECTION: bool = false;
 const VVC_DCT2_4: [[i32; 4]; 4] = [
     [64, 64, 64, 64],
     [83, 36, -36, -83],
@@ -134,7 +135,8 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp(
 
     let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth, qp);
 
-    let (ac_coeffs, has_ac) = quantize_direct_luma_ac_coeffs(residuals, width, height, qp);
+    let (ac_coeffs, has_ac) =
+        quantize_direct_luma_ac_coeffs(residuals, width, height, bit_depth, qp, dc_level);
     VvcQuantizedLumaTransformBlock {
         reconstructed_dc_coeff: dc_level,
         reconstructed_ac_coeffs: ac_coeffs,
@@ -795,13 +797,24 @@ fn quantize_direct_luma_ac_coeffs(
     residuals: &[i16],
     width: u16,
     height: u16,
+    bit_depth: SampleBitDepth,
     qp: i32,
+    dc_level: i16,
 ) -> ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool) {
-    // Keep the current first-subblock projection as the selected mode until the
-    // wider 8x8 candidate gets a rate/distortion selector. The widened storage
-    // and syntax paths below allow that choice to happen without adding a
-    // second lossy residual pipeline.
-    quantize_legacy_luma_ac_coeffs(residuals, width, height, qp)
+    let legacy = quantize_legacy_luma_ac_coeffs(residuals, width, height, qp);
+    if !VVC_ENABLE_EXPERIMENTAL_LUMA_DCT_COEFF_SELECTION
+        || width != 8
+        || height != 8
+        || !residuals_have_ac_energy(residuals)
+    {
+        let _selector_inputs = (bit_depth, dc_level);
+        return legacy;
+    }
+
+    let dct = quantize_dct_luma_ac_coeffs(residuals, width, height, qp);
+    select_luma_ac_coeff_candidate(
+        residuals, width, height, bit_depth, qp, dc_level, legacy, dct,
+    )
 }
 
 fn quantize_legacy_luma_ac_coeffs(
@@ -839,7 +852,6 @@ fn quantize_legacy_luma_ac_coeffs(
     (ac_coeffs, has_ac)
 }
 
-#[allow(dead_code)]
 fn quantize_dct_luma_ac_coeffs(
     residuals: &[i16],
     width: u16,
@@ -883,6 +895,105 @@ fn quantize_dct_luma_ac_coeffs(
         }
     }
     (ac_coeffs, has_ac)
+}
+
+fn select_luma_ac_coeff_candidate(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    qp: i32,
+    dc_level: i16,
+    legacy: ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool),
+    dct: ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool),
+) -> ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool) {
+    let legacy_sse = luma_reconstructed_residual_sse(
+        residuals, width, height, bit_depth, qp, dc_level, &legacy.0,
+    );
+    let dct_sse =
+        luma_reconstructed_residual_sse(residuals, width, height, bit_depth, qp, dc_level, &dct.0);
+    if dct_sse >= legacy_sse {
+        return legacy;
+    }
+
+    let lambda = luma_coeff_rd_lambda(qp, bit_depth);
+    let legacy_score = legacy_sse.saturating_add(
+        lambda.saturating_mul(luma_ac_syntax_cost_estimate(width, height, &legacy.0)),
+    );
+    let dct_score = dct_sse
+        .saturating_add(lambda.saturating_mul(luma_ac_syntax_cost_estimate(width, height, &dct.0)));
+    if dct_score < legacy_score {
+        dct
+    } else {
+        legacy
+    }
+}
+
+fn luma_reconstructed_residual_sse(
+    source_residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    qp: i32,
+    dc_level: i16,
+    ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
+) -> u64 {
+    let mut scratch = VvcInverseTransformScratch::default();
+    let mut reconstructed = Vec::new();
+    inverse_transform_vvc_luma_quantized_block_into_with_qp(
+        &mut reconstructed,
+        &mut scratch,
+        width,
+        height,
+        dc_level,
+        ac_levels,
+        bit_depth,
+        qp,
+    );
+    source_residuals
+        .iter()
+        .zip(reconstructed.iter())
+        .map(|(source, reconstructed)| {
+            let diff = i64::from(*source) - i64::from(*reconstructed);
+            (diff * diff) as u64
+        })
+        .sum()
+}
+
+fn luma_coeff_rd_lambda(qp: i32, bit_depth: SampleBitDepth) -> u64 {
+    let qp_scale = 1u64 << (qp.clamp(0, 63) / 6);
+    let bit_depth_delta = bit_depth.bits().saturating_sub(8) as u32;
+    let bit_depth_scale = 1u64 << (bit_depth_delta * 2);
+    qp_scale.saturating_mul(bit_depth_scale)
+}
+
+fn luma_ac_syntax_cost_estimate(
+    width: u16,
+    height: u16,
+    ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
+) -> u64 {
+    let (active_width, active_height) = luma_coded_coefficient_extent(width, height);
+    let mut nonzero = 0u64;
+    let mut abs_sum = 0u64;
+    let mut last_pos = 0u64;
+    for y in 0..active_height {
+        for x in 0..active_width {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            let idx = y * active_width + x - 1;
+            let abs_level = u64::from(ac_levels[idx].unsigned_abs());
+            if abs_level != 0 {
+                nonzero += 1;
+                abs_sum += abs_level;
+                last_pos = (y * active_width + x) as u64;
+            }
+        }
+    }
+    nonzero
+        .saturating_mul(18)
+        .saturating_add(abs_sum.saturating_mul(4))
+        .saturating_add(last_pos.saturating_mul(2))
 }
 
 fn luma_legacy_ac_quant_shift(qp: i32) -> u32 {

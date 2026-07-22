@@ -2850,6 +2850,52 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Gated Luma DCT Candidate
+
+Checkpoint: `vvc-luma-dct-selector-gated-1f`.
+
+This checkpoint adds the implementation pieces for a per-8x8 luma AC candidate
+selector: a direct DCT-II coefficient path, reconstructed-residual SSE scoring,
+and a QP/bit-depth scaled coefficient-cost estimate. The production selector is
+compile-time disabled by `VVC_ENABLE_EXPERIMENTAL_LUMA_DCT_COEFF_SELECTION`
+because enabling it exposed a residual syntax mismatch against VTM.
+
+The enabled trial was useful but not committable as production behavior:
+`smoke/checker_420` failed VTM decode with `Expecting a terminating bit`, and
+the first local SceneComposition vector decoded with a reconstruction checksum
+mismatch. The one-frame matrix from that enabled trial improved lossy PSNR by
+about 0.4 to 1.5 dB, but increased total lossy bytes by about 282 KiB and
+dropped FPS modestly. The next residual feature step should therefore fix
+multi-subblock residual syntax/reference compatibility before the selector is
+allowed to pick the DCT payload.
+
+With the selector gated off, the first-frame six-vector matrix was
+byte-identical against `vvc-luma-coeff-storage-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.35 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale"
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-dct-selector-gated-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-coeff-storage-1f.json
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:
