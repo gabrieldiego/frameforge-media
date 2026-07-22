@@ -37,7 +37,7 @@ pub(in crate::vvc) fn encode_ctu_partition_body_with_contexts(
     params: &VvcCtuPartitionParams,
     slice_config: VvcSliceSyntaxConfig,
 ) {
-    let ops = VvcCtuCabacOp::yuv420_ctu_partition(params);
+    let ops = VvcCtuCabacOp::ctu_partition(params);
     let mut ctu = VvcCtuCabacGenerator::new(contexts, params, slice_config);
     for op in ops {
         ctu.emit(cabac, op);

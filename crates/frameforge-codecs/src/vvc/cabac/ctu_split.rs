@@ -1009,7 +1009,7 @@ pub(in crate::vvc) enum VvcCtuCabacOp {
 }
 
 impl VvcCtuCabacOp {
-    pub(in crate::vvc) fn yuv420_ctu_partition(params: &VvcCtuPartitionParams) -> Vec<Self> {
+    pub(in crate::vvc) fn ctu_partition(params: &VvcCtuPartitionParams) -> Vec<Self> {
         Self::intra_ctu_partition(params.shape(), params.luma_max_leaf_size)
     }
 

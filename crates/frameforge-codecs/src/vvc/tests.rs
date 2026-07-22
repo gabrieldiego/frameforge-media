@@ -927,7 +927,7 @@ fn vvc_luma_transform_nodes_match_cabac_luma_leaves() {
                 chroma_sampling,
             )
             .expect("partition parameters");
-            let cabac_luma_nodes: Vec<_> = VvcCtuCabacOp::yuv420_ctu_partition(&params)
+            let cabac_luma_nodes: Vec<_> = VvcCtuCabacOp::ctu_partition(&params)
                 .into_iter()
                 .filter_map(|op| match op {
                     VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
@@ -1247,7 +1247,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
             cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         };
-        let ops = VvcCtuCabacOp::yuv420_ctu_partition(&params);
+        let ops = VvcCtuCabacOp::ctu_partition(&params);
         let chroma_nodes: Vec<_> = ops
             .iter()
             .filter_map(|op| match op {
@@ -1287,7 +1287,7 @@ fn vvc_ctu_cabac_generator_is_embedded_in_ctu_body() {
     let mut contexts = initial_vvc_cabac_contexts(vvc_test_slice_config());
     let mut ctu = VvcCtuCabacGenerator::new(&mut contexts, &params, vvc_test_slice_config());
     manual.start();
-    for op in VvcCtuCabacOp::yuv420_ctu_partition(&params) {
+    for op in VvcCtuCabacOp::ctu_partition(&params) {
         ctu.emit(&mut manual, op);
     }
     manual.encode_bin_trm(true);
@@ -1434,7 +1434,7 @@ fn vvc_boundary_partition_uses_qt_until_implicit_bt_is_allowed_for_thin_shapes()
         },
     ] {
         let params = vvc_ctu_partition_params(geometry, black).expect("thin rectangular params");
-        let ops = VvcCtuCabacOp::yuv420_ctu_partition(&params);
+        let ops = VvcCtuCabacOp::ctu_partition(&params);
         assert!(
             !ops.iter().any(|op| matches!(
                 op,
@@ -1581,7 +1581,7 @@ fn vvc_luma_partition_plan_splits_to_8x8_leaves() {
 }
 
 #[test]
-fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
+fn vvc_ctu_partition_accepts_4x4_luma_leaf_limit() {
     let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
     let mut params = vvc_ctu_partition_params(
         VvcVideoGeometry {
@@ -1593,7 +1593,7 @@ fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
     .expect("64x64 partition params");
     params.luma_max_leaf_size = 4;
 
-    let ops = VvcCtuCabacOp::yuv420_ctu_partition(&params);
+    let ops = VvcCtuCabacOp::ctu_partition(&params);
     assert!(ops.iter().any(|op| matches!(
         op,
         VvcCtuCabacOp::BtSplit {
