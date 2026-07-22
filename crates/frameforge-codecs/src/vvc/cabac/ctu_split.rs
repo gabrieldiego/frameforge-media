@@ -806,10 +806,13 @@ struct VvcLumaNeighbourInfo {
     cqt_depth: u8,
 }
 
+const VVC_LUMA_NEIGHBOUR_CELL_SIZE: u16 = VVC_CURRENT_MIN_LUMA_CB_SIZE;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcLumaNeighbourState {
     width: u16,
     height: u16,
+    cell_width: usize,
     valid: Vec<bool>,
     cb_width: Vec<u16>,
     cb_height: Vec<u16>,
@@ -818,14 +821,17 @@ pub(in crate::vvc) struct VvcLumaNeighbourState {
 
 impl VvcLumaNeighbourState {
     pub(in crate::vvc) fn new(width: u16, height: u16) -> Self {
-        let samples = usize::from(width) * usize::from(height);
+        let cell_width = usize::from(width.div_ceil(VVC_LUMA_NEIGHBOUR_CELL_SIZE));
+        let cell_height = usize::from(height.div_ceil(VVC_LUMA_NEIGHBOUR_CELL_SIZE));
+        let cells = cell_width * cell_height;
         Self {
             width,
             height,
-            valid: vec![false; samples],
-            cb_width: vec![0; samples],
-            cb_height: vec![0; samples],
-            cqt_depth: vec![0; samples],
+            cell_width,
+            valid: vec![false; cells],
+            cb_width: vec![0; cells],
+            cb_height: vec![0; cells],
+            cqt_depth: vec![0; cells],
         }
     }
 
@@ -833,7 +839,9 @@ impl VvcLumaNeighbourState {
         if x >= self.width || y >= self.height {
             return None;
         }
-        Some(usize::from(y) * usize::from(self.width) + usize::from(x))
+        let cell_x = usize::from(x / VVC_LUMA_NEIGHBOUR_CELL_SIZE);
+        let cell_y = usize::from(y / VVC_LUMA_NEIGHBOUR_CELL_SIZE);
+        Some(cell_y * self.cell_width + cell_x)
     }
 
     fn info_at(&self, x: u16, y: u16) -> Option<VvcLumaNeighbourInfo> {
@@ -856,9 +864,13 @@ impl VvcLumaNeighbourState {
     fn mark_leaf(&mut self, node: VvcCodingTreeNode) {
         let end_x = (node.x + node.width).min(self.width);
         let end_y = (node.y + node.height).min(self.height);
-        for y in node.y..end_y {
-            for x in node.x..end_x {
-                let index = self.index(x, y).expect("leaf coordinates are in range");
+        let start_cell_x = node.x / VVC_LUMA_NEIGHBOUR_CELL_SIZE;
+        let start_cell_y = node.y / VVC_LUMA_NEIGHBOUR_CELL_SIZE;
+        let end_cell_x = end_x.div_ceil(VVC_LUMA_NEIGHBOUR_CELL_SIZE);
+        let end_cell_y = end_y.div_ceil(VVC_LUMA_NEIGHBOUR_CELL_SIZE);
+        for cell_y in start_cell_y..end_cell_y {
+            for cell_x in start_cell_x..end_cell_x {
+                let index = usize::from(cell_y) * self.cell_width + usize::from(cell_x);
                 self.valid[index] = true;
                 self.cb_width[index] = node.width;
                 self.cb_height[index] = node.height;

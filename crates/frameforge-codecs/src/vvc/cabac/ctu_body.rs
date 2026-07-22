@@ -16,6 +16,7 @@ use crate::vvc::{
 
 const VVC_LUMA_ANGULAR_BASE: i16 = 2;
 const VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE: u16 = 4;
+const VVC_CHROMA_NEIGHBOUR_CELL_SIZE: u16 = 2;
 const VVC_NUM_LUMA_MODES: u32 = 67;
 const VVC_NUM_MOST_PROBABLE_LUMA_MODES: usize = 6;
 const VVC_REMAINING_LUMA_MODE_COUNT: u32 =
@@ -351,6 +352,7 @@ struct VvcChromaNeighbourState {
     width: u16,
     height: u16,
     chroma_sampling: ChromaSampling,
+    cell_width: usize,
     valid: Vec<bool>,
     cb_width: Vec<u16>,
     cb_height: Vec<u16>,
@@ -361,15 +363,18 @@ impl VvcChromaNeighbourState {
     fn new(visible_width: u16, visible_height: u16, chroma_sampling: ChromaSampling) -> Self {
         let width = visible_width / chroma_subsample_x(chroma_sampling) as u16;
         let height = visible_height / chroma_subsample_y(chroma_sampling) as u16;
-        let samples = usize::from(width) * usize::from(height);
+        let cell_width = usize::from(width.div_ceil(VVC_CHROMA_NEIGHBOUR_CELL_SIZE));
+        let cell_height = usize::from(height.div_ceil(VVC_CHROMA_NEIGHBOUR_CELL_SIZE));
+        let cells = cell_width * cell_height;
         Self {
             width,
             height,
             chroma_sampling,
-            valid: vec![false; samples],
-            cb_width: vec![0; samples],
-            cb_height: vec![0; samples],
-            cqt_depth: vec![0; samples],
+            cell_width,
+            valid: vec![false; cells],
+            cb_width: vec![0; cells],
+            cb_height: vec![0; cells],
+            cqt_depth: vec![0; cells],
         }
     }
 
@@ -393,7 +398,9 @@ impl VvcChromaNeighbourState {
         if x >= self.width || y >= self.height {
             return None;
         }
-        Some(usize::from(y) * usize::from(self.width) + usize::from(x))
+        let cell_x = usize::from(x / VVC_CHROMA_NEIGHBOUR_CELL_SIZE);
+        let cell_y = usize::from(y / VVC_CHROMA_NEIGHBOUR_CELL_SIZE);
+        Some(cell_y * self.cell_width + cell_x)
     }
 
     fn info_at(&self, x: u16, y: u16) -> Option<VvcChromaNeighbourInfo> {
@@ -426,11 +433,13 @@ impl VvcChromaNeighbourState {
         let node_height = self.node_height(node);
         let end_x = (start_x + node_width).min(self.width);
         let end_y = (start_y + node_height).min(self.height);
-        for y in start_y..end_y {
-            for x in start_x..end_x {
-                let index = self
-                    .index(x, y)
-                    .expect("chroma leaf coordinates are in range");
+        let start_cell_x = start_x / VVC_CHROMA_NEIGHBOUR_CELL_SIZE;
+        let start_cell_y = start_y / VVC_CHROMA_NEIGHBOUR_CELL_SIZE;
+        let end_cell_x = end_x.div_ceil(VVC_CHROMA_NEIGHBOUR_CELL_SIZE);
+        let end_cell_y = end_y.div_ceil(VVC_CHROMA_NEIGHBOUR_CELL_SIZE);
+        for cell_y in start_cell_y..end_cell_y {
+            for cell_x in start_cell_x..end_cell_x {
+                let index = usize::from(cell_y) * self.cell_width + usize::from(cell_x);
                 self.valid[index] = true;
                 self.cb_width[index] = node_width;
                 self.cb_height[index] = node_height;

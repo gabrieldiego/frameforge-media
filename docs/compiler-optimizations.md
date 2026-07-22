@@ -3131,6 +3131,45 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-integer-directional-seed-1f.json
 ```
 
+## VVC Split Neighbour Cell Maps
+
+Checkpoint: `vvc-neighbour-cell-map-1f`.
+
+This checkpoint extends the cell-map approach to the remaining split-context
+neighbour state. Luma split metadata now uses 4x4 cells, and chroma split
+metadata uses 2x2 chroma-sample cells so 4:2:0 boundary leaves still keep
+distinct context information. This removes per-sample neighbour writes from
+both lossy and lossless VVC coding-tree walks without changing syntax or
+reconstruction.
+
+The first-frame six-vector matrix is byte-neutral against
+`vvc-luma-mode-cell-map-1f`:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| VVC | lossless | 5,884,724 | 0 |
+| VVC | qp=24 | 5,714,171 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-neighbour-cell-map-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-mode-cell-map-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
