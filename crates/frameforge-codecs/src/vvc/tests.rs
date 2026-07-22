@@ -1420,6 +1420,36 @@ fn vvc_residual_intra_mode_selector_is_shared_across_formats_and_coding_modes() 
 }
 
 #[test]
+fn vvc_luma_leaf_size_selector_is_shared_across_formats() {
+    for chroma_sampling in [
+        ChromaSampling::Cs420,
+        ChromaSampling::Cs422,
+        ChromaSampling::Cs444,
+    ] {
+        for bit_depth in [8, 10, 12] {
+            let format = VvcPictureFormat {
+                chroma_sampling,
+                bit_depth: SampleBitDepth::new(bit_depth).expect("supported VVC bit depth"),
+            };
+            assert_eq!(
+                select_vvc_luma_max_leaf_size(VvcResidualModeDecisionContext::new(
+                    format,
+                    VvcResidualCodingMode::Lossy,
+                )),
+                VVC_CURRENT_MAX_LUMA_LEAF_SIZE
+            );
+            assert_eq!(
+                select_vvc_luma_max_leaf_size(VvcResidualModeDecisionContext::new(
+                    format,
+                    VvcResidualCodingMode::Lossless,
+                )),
+                VVC_LOSSLESS_LUMA_LEAF_SIZE
+            );
+        }
+    }
+}
+
+#[test]
 fn vvc_tu_residual_coding_selector_is_shared_across_formats() {
     let luma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
     let chroma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeChroma);

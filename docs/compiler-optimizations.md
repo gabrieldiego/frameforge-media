@@ -2462,6 +2462,38 @@ python3 scripts/summarize_encoder_instrumentation.py \
   --top 8
 ```
 
+## VVC Luma Partition Selector
+
+Checkpoint: `vvc-luma-partition-selector-1f`.
+
+This checkpoint moves the luma leaf-size decision into the shared
+`VvcResidualModeDecisionContext` selector layer. The current policy is still
+unchanged: lossy uses the current 8x8 luma leaf target, while lossless uses the
+4x4 transform-skip target. The practical effect is that future partition
+experiments can be made as mode-selection policy instead of as a separate
+lossless/lossy encode path.
+
+The first-frame matrix is byte-identical against
+`vvc-tu-residual-coding-selector-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.36 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.41 | 0 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-partition-selector-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-residual-coding-selector-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

@@ -2,11 +2,11 @@ use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, select_vvc_chroma_tu_residual_coding,
-    select_vvc_luma_tu_residual_coding, select_vvc_residual_chroma_intra_mode_from_costs,
-    select_vvc_residual_luma_intra_mode, vvc_chroma_explicit_candidates,
-    vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_intra_mode_from_index,
-    vvc_luma_transform_nodes, vvc_neutral_sample, vvc_residual_chroma_cclm_candidate_allowed,
-    vvc_residual_chroma_explicit_candidate_allowed,
+    select_vvc_luma_max_leaf_size, select_vvc_luma_tu_residual_coding,
+    select_vvc_residual_chroma_intra_mode_from_costs, select_vvc_residual_luma_intra_mode,
+    vvc_chroma_explicit_candidates, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
+    vvc_luma_intra_mode_from_index, vvc_luma_transform_nodes, vvc_neutral_sample,
+    vvc_residual_chroma_cclm_candidate_allowed, vvc_residual_chroma_explicit_candidate_allowed,
     vvc_residual_luma_directional_candidate_allowed, vvc_residual_luma_planar_candidate_allowed,
     VvcChromaCclmMode, VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode,
     VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
@@ -125,7 +125,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     let mut intra_search_stats = VvcIntraSearchStats::default();
 
     let mode_context = VvcResidualModeDecisionContext::new(source_frame.format, residual_mode);
-    let luma_max_leaf_size = residual_mode.luma_max_leaf_size();
+    let luma_max_leaf_size = select_vvc_luma_max_leaf_size(mode_context);
     let ctu_shape = VvcCtuPartitionShape {
         root_width: VVC_CTU_SIZE as u16,
         root_height: VVC_CTU_SIZE as u16,

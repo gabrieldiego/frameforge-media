@@ -1155,13 +1155,6 @@ impl VvcResidualCodingMode {
     const fn is_lossless(self) -> bool {
         matches!(self, Self::Lossless)
     }
-
-    const fn luma_max_leaf_size(self) -> u16 {
-        match self {
-            Self::Lossy => VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
-            Self::Lossless => VVC_LOSSLESS_LUMA_LEAF_SIZE,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1447,6 +1440,15 @@ pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
         }
     }
     best_mode
+}
+
+pub(in crate::vvc) fn select_vvc_luma_max_leaf_size(
+    context: VvcResidualModeDecisionContext,
+) -> u16 {
+    match context.residual_mode() {
+        VvcResidualCodingMode::Lossy => VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+        VvcResidualCodingMode::Lossless => VVC_LOSSLESS_LUMA_LEAF_SIZE,
+    }
 }
 
 pub(in crate::vvc) fn select_vvc_luma_tu_residual_coding(
@@ -1883,6 +1885,8 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     )?;
     let frame_len = stream_layout.frame_len();
     let residual_mode = VvcResidualCodingMode::for_encode_options(options);
+    let mode_context = VvcResidualModeDecisionContext::new(stream_format, residual_mode);
+    let luma_max_leaf_size = select_vvc_luma_max_leaf_size(mode_context);
     let slice_config = vvc_slice_config_for_input_format(
         residual_mode.slice_config(stream_format, options.qp),
         format,
@@ -1979,7 +1983,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             slice_config.slice_qp,
                             chroma_qp,
                             &quantized,
-                            residual_mode.luma_max_leaf_size(),
+                            luma_max_leaf_size,
                             slice_config,
                         )?;
                     }
@@ -1989,7 +1993,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                         slice_address: region.slice_address,
                         geometry: region.geometry,
                         color: quantized,
-                        luma_max_leaf_size: residual_mode.luma_max_leaf_size(),
+                        luma_max_leaf_size,
                     });
                 }
                 #[cfg(feature = "vvc-stats")]
