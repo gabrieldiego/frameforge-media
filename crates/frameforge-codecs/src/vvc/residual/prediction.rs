@@ -17,6 +17,41 @@ const VVC_INTRA_INV_ANG_TABLE: [i32; 32] = [
     0, 16384, 8192, 5461, 4096, 2731, 2048, 1638, 1365, 1170, 1024, 910, 819, 712, 630, 565, 512,
     468, 420, 364, 321, 287, 256, 224, 191, 161, 128, 96, 64, 48, 32, 16,
 ];
+const VVC_INTRA_REFERENCE_FILTER_THRESHOLD: [u8; 8] = [24, 24, 24, 14, 2, 0, 0, 0];
+const VVC_CHROMA_4TAP_INTERPOLATION_FILTER: [[i32; 4]; 32] = [
+    [0, 64, 0, 0],
+    [-1, 63, 2, 0],
+    [-2, 62, 4, 0],
+    [-2, 60, 7, -1],
+    [-2, 58, 10, -2],
+    [-3, 57, 12, -2],
+    [-4, 56, 14, -2],
+    [-4, 55, 15, -2],
+    [-4, 54, 16, -2],
+    [-5, 53, 18, -2],
+    [-6, 52, 20, -2],
+    [-6, 49, 24, -3],
+    [-6, 46, 28, -4],
+    [-5, 44, 29, -4],
+    [-4, 42, 30, -4],
+    [-4, 39, 33, -4],
+    [-4, 36, 36, -4],
+    [-4, 33, 39, -4],
+    [-4, 30, 42, -4],
+    [-4, 29, 44, -5],
+    [-4, 28, 46, -6],
+    [-3, 24, 49, -6],
+    [-2, 20, 52, -6],
+    [-2, 18, 53, -5],
+    [-2, 16, 54, -4],
+    [-2, 15, 55, -4],
+    [-2, 14, 56, -4],
+    [-2, 12, 57, -3],
+    [-2, 10, 58, -2],
+    [-1, 7, 60, -2],
+    [0, 4, 62, -2],
+    [0, 2, 63, -1],
+];
 const VVC_CHROMA_422_INTRA_ANGLE_MAPPING_TABLE: [u8; 67] = [
     0, 1, 61, 62, 63, 64, 65, 66, 2, 3, 5, 6, 8, 10, 12, 13, 14, 16, 18, 20, 22, 23, 24, 26, 28,
     30, 31, 33, 34, 35, 36, 37, 38, 39, 40, 41, 41, 42, 43, 43, 44, 44, 45, 45, 46, 47, 48, 48, 49,
@@ -139,6 +174,7 @@ fn predict_vvc_luma_angular_block_into(
         usize::from(node.height),
         mode_index,
         bit_depth,
+        true,
         availability,
     );
 }
@@ -940,6 +976,7 @@ fn predict_vvc_chroma_angular_block_into(
         usize::from(node.height) / subsample_y,
         mode_index,
         bit_depth,
+        false,
         availability,
     );
 }
@@ -1140,12 +1177,13 @@ fn predict_vvc_angular_block_into(
     height: usize,
     mode_index: u8,
     bit_depth: SampleBitDepth,
+    is_luma: bool,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     debug_assert!(width <= VVC_CTU_SIZE);
     debug_assert!(height <= VVC_CTU_SIZE);
     debug_assert!((2..=66).contains(&mode_index));
-    let reference_len = width + height + 4;
+    let reference_len = ((width.max(height)) << 1) + 4;
     top_references_into(
         &mut scratch.top,
         plane,
@@ -1168,7 +1206,7 @@ fn predict_vvc_angular_block_into(
         bit_depth,
         availability,
     );
-    let top_left = top_left_reference(
+    let mut top_left = top_left_reference(
         plane,
         plane_width,
         plane_height,
@@ -1177,24 +1215,20 @@ fn predict_vvc_angular_block_into(
         bit_depth,
         availability,
     );
-    let is_vertical_mode = mode_index >= VVC_LUMA_MODE_DIAGONAL;
-    let intra_pred_angle_mode = if is_vertical_mode {
-        i32::from(mode_index) - i32::from(VVC_LUMA_MODE_VERTICAL)
-    } else {
-        i32::from(VVC_LUMA_MODE_HORIZONTAL) - i32::from(mode_index)
-    };
-    let abs_ang_mode = intra_pred_angle_mode.unsigned_abs() as usize;
-    let abs_ang = VVC_INTRA_ANG_TABLE[abs_ang_mode];
-    let angle = if intra_pred_angle_mode < 0 {
-        -abs_ang
-    } else {
-        abs_ang
-    };
-    let abs_inv_angle = VVC_INTRA_INV_ANG_TABLE[abs_ang_mode];
+    let params = vvc_angular_prediction_params(width, height, mode_index, is_luma);
+    if params.filter_luma_references {
+        top_left = filter_vvc_angular_references_in_place(
+            &mut scratch.top,
+            &mut scratch.left,
+            top_left,
+            width << 1,
+            height << 1,
+        );
+    }
 
     prediction.clear();
     prediction.resize(width * height, 0);
-    if is_vertical_mode {
+    if params.is_vertical {
         predict_vvc_vertical_oriented_angular_block(
             prediction,
             &scratch.top[..reference_len],
@@ -1202,8 +1236,10 @@ fn predict_vvc_angular_block_into(
             top_left,
             width,
             height,
-            angle,
-            abs_inv_angle,
+            params.angle,
+            params.abs_inv_angle,
+            params.interpolation,
+            params.pdpc_scale,
             bit_depth,
         );
     } else {
@@ -1214,10 +1250,106 @@ fn predict_vvc_angular_block_into(
             top_left,
             width,
             height,
-            angle,
-            abs_inv_angle,
+            params.angle,
+            params.abs_inv_angle,
+            params.interpolation,
+            params.pdpc_scale,
             bit_depth,
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VvcAngularInterpolation {
+    Linear,
+    FourTapDct,
+    FourTapSmoothing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcAngularPredictionParams {
+    is_vertical: bool,
+    angle: i32,
+    abs_inv_angle: i32,
+    interpolation: VvcAngularInterpolation,
+    pdpc_scale: Option<u32>,
+    filter_luma_references: bool,
+}
+
+fn vvc_angular_prediction_params(
+    width: usize,
+    height: usize,
+    mode_index: u8,
+    is_luma: bool,
+) -> VvcAngularPredictionParams {
+    let pred_mode = vvc_modified_wide_angle(width, height, mode_index);
+    let is_vertical = pred_mode >= i16::from(VVC_LUMA_MODE_DIAGONAL);
+    let intra_pred_angle_mode = if is_vertical {
+        pred_mode - i16::from(VVC_LUMA_MODE_VERTICAL)
+    } else {
+        -(pred_mode - i16::from(VVC_LUMA_MODE_HORIZONTAL))
+    };
+    let abs_ang_mode = intra_pred_angle_mode.unsigned_abs() as usize;
+    let abs_angle = VVC_INTRA_ANG_TABLE[abs_ang_mode];
+    let angle = if intra_pred_angle_mode < 0 {
+        -abs_angle
+    } else {
+        abs_angle
+    };
+    let abs_inv_angle = VVC_INTRA_INV_ANG_TABLE[abs_ang_mode];
+    let pdpc_scale = vvc_angular_pdpc_scale(width, height, angle, abs_inv_angle, is_vertical);
+    let (interpolation, filter_luma_references) = if is_luma {
+        vvc_luma_angular_filter_params(width, height, pred_mode, abs_angle)
+    } else {
+        (VvcAngularInterpolation::Linear, false)
+    };
+
+    VvcAngularPredictionParams {
+        is_vertical,
+        angle,
+        abs_inv_angle,
+        interpolation,
+        pdpc_scale,
+        filter_luma_references,
+    }
+}
+
+fn vvc_modified_wide_angle(width: usize, height: usize, mode_index: u8) -> i16 {
+    let mut pred_mode = i16::from(mode_index);
+    if (2..=66).contains(&mode_index) {
+        const MODE_SHIFT: [i16; 6] = [0, 6, 10, 12, 14, 15];
+        let delta_size = width.ilog2().abs_diff(height.ilog2()) as usize;
+        let shift = MODE_SHIFT[delta_size.min(MODE_SHIFT.len() - 1)];
+        if width > height && pred_mode < 2 + shift {
+            pred_mode += 65;
+        } else if height > width && pred_mode > 66 - shift {
+            pred_mode -= 65;
+        }
+    }
+    pred_mode
+}
+
+fn vvc_luma_angular_filter_params(
+    width: usize,
+    height: usize,
+    pred_mode: i16,
+    abs_angle: i32,
+) -> (VvcAngularInterpolation, bool) {
+    let diff = (pred_mode - i16::from(VVC_LUMA_MODE_HORIZONTAL))
+        .abs()
+        .min((pred_mode - i16::from(VVC_LUMA_MODE_VERTICAL)).abs());
+    let log2_size = ((width.ilog2() + height.ilog2()) >> 1) as usize;
+    let threshold = i16::from(
+        VVC_INTRA_REFERENCE_FILTER_THRESHOLD
+            [log2_size.min(VVC_INTRA_REFERENCE_FILTER_THRESHOLD.len() - 1)],
+    );
+    if diff <= threshold {
+        return (VvcAngularInterpolation::FourTapDct, false);
+    }
+    if vvc_angular_integer_slope(abs_angle) {
+        (VvcAngularInterpolation::FourTapDct, true)
+    } else {
+        (VvcAngularInterpolation::FourTapSmoothing, false)
     }
 }
 
@@ -1230,6 +1362,8 @@ fn predict_vvc_vertical_oriented_angular_block(
     height: usize,
     angle: i32,
     abs_inv_angle: i32,
+    interpolation: VvcAngularInterpolation,
+    pdpc_scale: Option<u32>,
     bit_depth: SampleBitDepth,
 ) {
     for y in 0..height {
@@ -1244,6 +1378,9 @@ fn predict_vvc_vertical_oriented_angular_block(
                 delta_int + x as i32 + 1,
                 delta_fract,
                 abs_inv_angle,
+                height,
+                interpolation,
+                bit_depth,
             );
         }
         apply_vvc_angular_pdpc_to_vertical_row(
@@ -1252,9 +1389,9 @@ fn predict_vvc_vertical_oriented_angular_block(
             top_left,
             y,
             width,
-            height,
             angle,
             abs_inv_angle,
+            pdpc_scale,
             bit_depth,
         );
     }
@@ -1269,6 +1406,8 @@ fn predict_vvc_horizontal_oriented_angular_block(
     height: usize,
     angle: i32,
     abs_inv_angle: i32,
+    interpolation: VvcAngularInterpolation,
+    pdpc_scale: Option<u32>,
     bit_depth: SampleBitDepth,
 ) {
     for x in 0..width {
@@ -1283,6 +1422,9 @@ fn predict_vvc_horizontal_oriented_angular_block(
                 delta_int + y as i32 + 1,
                 delta_fract,
                 abs_inv_angle,
+                width,
+                interpolation,
+                bit_depth,
             );
         }
         apply_vvc_angular_pdpc_to_horizontal_column(
@@ -1294,6 +1436,7 @@ fn predict_vvc_horizontal_oriented_angular_block(
             height,
             angle,
             abs_inv_angle,
+            pdpc_scale,
             bit_depth,
         );
     }
@@ -1306,25 +1449,89 @@ fn angular_reference_prediction(
     reference_index: i32,
     fract: i32,
     abs_inv_angle: i32,
+    side_size: usize,
+    interpolation: VvcAngularInterpolation,
+    bit_depth: SampleBitDepth,
 ) -> VvcSample {
     if fract == 0 {
-        return angular_reference_sample(main, side, top_left, reference_index, abs_inv_angle);
+        return angular_reference_sample(
+            main,
+            side,
+            top_left,
+            reference_index,
+            abs_inv_angle,
+            side_size,
+        );
     }
-    let a = i32::from(angular_reference_sample(
-        main,
-        side,
-        top_left,
-        reference_index,
-        abs_inv_angle,
-    ));
-    let b = i32::from(angular_reference_sample(
-        main,
-        side,
-        top_left,
-        reference_index + 1,
-        abs_inv_angle,
-    ));
-    (a + ((fract * (b - a) + 16) >> 5)) as VvcSample
+    match interpolation {
+        VvcAngularInterpolation::Linear => {
+            let a = i32::from(angular_reference_sample(
+                main,
+                side,
+                top_left,
+                reference_index,
+                abs_inv_angle,
+                side_size,
+            ));
+            let b = i32::from(angular_reference_sample(
+                main,
+                side,
+                top_left,
+                reference_index + 1,
+                abs_inv_angle,
+                side_size,
+            ));
+            (a + ((fract * (b - a) + 16) >> 5)) as VvcSample
+        }
+        VvcAngularInterpolation::FourTapDct | VvcAngularInterpolation::FourTapSmoothing => {
+            let filter = match interpolation {
+                VvcAngularInterpolation::FourTapDct => {
+                    VVC_CHROMA_4TAP_INTERPOLATION_FILTER[fract as usize]
+                }
+                VvcAngularInterpolation::FourTapSmoothing => [
+                    16 - (fract >> 1),
+                    32 - (fract >> 1),
+                    16 + (fract >> 1),
+                    fract >> 1,
+                ],
+                VvcAngularInterpolation::Linear => unreachable!(),
+            };
+            let p0 = i32::from(angular_reference_sample(
+                main,
+                side,
+                top_left,
+                reference_index - 1,
+                abs_inv_angle,
+                side_size,
+            ));
+            let p1 = i32::from(angular_reference_sample(
+                main,
+                side,
+                top_left,
+                reference_index,
+                abs_inv_angle,
+                side_size,
+            ));
+            let p2 = i32::from(angular_reference_sample(
+                main,
+                side,
+                top_left,
+                reference_index + 1,
+                abs_inv_angle,
+                side_size,
+            ));
+            let p3 = i32::from(angular_reference_sample(
+                main,
+                side,
+                top_left,
+                reference_index + 2,
+                abs_inv_angle,
+                side_size,
+            ));
+            ((filter[0] * p0 + filter[1] * p1 + filter[2] * p2 + filter[3] * p3 + 32) >> 6)
+                .clamp(0, i32::from(bit_depth.max_sample())) as VvcSample
+        }
+    }
 }
 
 fn angular_reference_sample(
@@ -1333,6 +1540,7 @@ fn angular_reference_sample(
     top_left: VvcSample,
     index: i32,
     abs_inv_angle: i32,
+    side_size: usize,
 ) -> VvcSample {
     if index == 0 {
         return top_left;
@@ -1340,7 +1548,7 @@ fn angular_reference_sample(
     if index > 0 {
         return main[(index as usize - 1).min(main.len().saturating_sub(1))];
     }
-    let side_index = ((-index * abs_inv_angle + 256) >> 9).max(0) as usize;
+    let side_index = (((-index * abs_inv_angle + 256) >> 9).max(0) as usize).min(side_size);
     if side_index == 0 {
         top_left
     } else {
@@ -1378,12 +1586,12 @@ fn apply_vvc_angular_pdpc_to_vertical_row(
     top_left: VvcSample,
     y: usize,
     width: usize,
-    height: usize,
     angle: i32,
     abs_inv_angle: i32,
+    pdpc_scale: Option<u32>,
     bit_depth: SampleBitDepth,
 ) {
-    let Some(scale) = vvc_angular_pdpc_scale(width, height, angle, abs_inv_angle, height) else {
+    let Some(scale) = pdpc_scale else {
         return;
     };
     let span = (3usize << scale).min(width);
@@ -1400,8 +1608,9 @@ fn apply_vvc_angular_pdpc_to_vertical_row(
         let weight = 32i32 >> ((2 * x) >> scale).min(31);
         let val = i32::from(*sample);
         let side_sample = i32::from(angular_side_reference_sample(side, side_index));
-        *sample = (val + ((weight * (side_sample - top_left) + 32) >> 6)).clamp(0, max_sample)
-            as VvcSample;
+        let anchor = if angle == 0 { top_left } else { val };
+        *sample =
+            (val + ((weight * (side_sample - anchor) + 32) >> 6)).clamp(0, max_sample) as VvcSample;
     }
 }
 
@@ -1414,9 +1623,10 @@ fn apply_vvc_angular_pdpc_to_horizontal_column(
     height: usize,
     angle: i32,
     abs_inv_angle: i32,
+    pdpc_scale: Option<u32>,
     bit_depth: SampleBitDepth,
 ) {
-    let Some(scale) = vvc_angular_pdpc_scale(width, height, angle, abs_inv_angle, width) else {
+    let Some(scale) = pdpc_scale else {
         return;
     };
     let span = (3usize << scale).min(height);
@@ -1434,8 +1644,9 @@ fn apply_vvc_angular_pdpc_to_horizontal_column(
         let idx = y * width + x;
         let val = i32::from(prediction[idx]);
         let side_sample = i32::from(angular_side_reference_sample(side, side_index));
-        prediction[idx] = (val + ((weight * (side_sample - top_left) + 32) >> 6))
-            .clamp(0, max_sample) as VvcSample;
+        let anchor = if angle == 0 { top_left } else { val };
+        prediction[idx] =
+            (val + ((weight * (side_sample - anchor) + 32) >> 6)).clamp(0, max_sample) as VvcSample;
     }
 }
 
@@ -1444,7 +1655,7 @@ fn vvc_angular_pdpc_scale(
     height: usize,
     angle: i32,
     abs_inv_angle: i32,
-    side_size: usize,
+    is_vertical: bool,
 ) -> Option<u32> {
     if width < 4 || height < 4 || angle < 0 {
         return None;
@@ -1452,8 +1663,13 @@ fn vvc_angular_pdpc_scale(
     if angle == 0 {
         return Some(((width.ilog2() + height.ilog2() - 2) >> 2).min(31));
     }
+    let side_size = if is_vertical { height } else { width };
     let scale = (side_size.ilog2() as i32 - ((3 * abs_inv_angle - 2).ilog2() as i32 - 8)).min(2);
     (scale >= 0).then_some(scale as u32)
+}
+
+fn vvc_angular_integer_slope(abs_angle: i32) -> bool {
+    (abs_angle & 0x1f) == 0
 }
 
 fn angular_side_reference_sample(side: &[VvcSample], index: usize) -> VvcSample {
@@ -1643,6 +1859,37 @@ fn reference_sample_available(
     y: usize,
 ) -> bool {
     availability.map_or(true, |availability| availability.is_available(x, y))
+}
+
+fn filter_vvc_angular_references_in_place(
+    top: &mut [VvcSample],
+    left: &mut [VvcSample],
+    top_left: VvcSample,
+    top_ref_len: usize,
+    left_ref_len: usize,
+) -> VvcSample {
+    let filtered_top_left =
+        ((u32::from(top_left) * 2 + u32::from(top[0]) + u32::from(left[0]) + 2) >> 2) as VvcSample;
+
+    let mut previous = top_left;
+    for index in 0..top_ref_len.saturating_sub(1) {
+        let current = top[index];
+        top[index] =
+            ((u32::from(previous) + u32::from(current) * 2 + u32::from(top[index + 1]) + 2) >> 2)
+                as VvcSample;
+        previous = current;
+    }
+
+    previous = top_left;
+    for index in 0..left_ref_len.saturating_sub(1) {
+        let current = left[index];
+        left[index] =
+            ((u32::from(previous) + u32::from(current) * 2 + u32::from(left[index + 1]) + 2) >> 2)
+                as VvcSample;
+        previous = current;
+    }
+
+    filtered_top_left
 }
 
 fn filter_vvc_planar_references_in_place(

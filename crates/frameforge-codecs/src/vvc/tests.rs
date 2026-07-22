@@ -1531,7 +1531,7 @@ fn vvc_chroma_explicit_candidates_replace_co_located_luma_mode() {
 }
 
 #[test]
-fn vvc_chroma_explicit_default_search_uses_reference_proven_modes() {
+fn vvc_chroma_explicit_default_search_accepts_vvc_intra_modes() {
     assert!(vvc_residual_chroma_explicit_candidate_allowed(
         VvcIntraPredictionMode::Planar
     ));
@@ -1544,7 +1544,7 @@ fn vvc_chroma_explicit_default_search_uses_reference_proven_modes() {
     assert!(vvc_residual_chroma_explicit_candidate_allowed(
         VvcIntraPredictionMode::Vertical
     ));
-    assert!(!vvc_residual_chroma_explicit_candidate_allowed(
+    assert!(vvc_residual_chroma_explicit_candidate_allowed(
         VvcIntraPredictionMode::Angular(66)
     ));
 }

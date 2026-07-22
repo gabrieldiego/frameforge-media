@@ -1910,6 +1910,95 @@ make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE
 make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
 ```
 
+## VVC Full Angular Intra Modes
+
+Checkpoint: `vvc-full-angular-1f`.
+
+Changes retained:
+
+- VVC luma intra search now evaluates the full angular mode range 2..66
+  instead of only the cardinal horizontal/vertical directional modes.
+- Chroma explicit-mode validation now accepts the full VVC angular range,
+  including the VDIA replacement candidate used when the co-located luma mode
+  collides with the chroma candidate list.
+- Angular prediction now uses VVC-style modified-wide-angle remapping for
+  rectangular blocks.
+- Luma angular prediction now has the VVC four-tap interpolation path,
+  smoothing interpolation path, and filtered-reference path used by the
+  non-planar angular predictors.
+- The negative-angle reference extension now clamps against the physical side
+  reference length instead of the scratch buffer length. This fixed the
+  reference-decoder mismatch exposed by `blocks_444`.
+- `vvc-stats` now emits per-angular-index counters such as
+  `luma_mode_angular_21` and `chroma_mode_angular_66` so later search work can
+  compare mode distribution directly.
+
+This checkpoint intentionally does not tune thresholds or constants. It expands
+the implemented VVC feature surface first; later work should make the expanded
+mode set faster with rate-aware pruning or staged candidate generation.
+
+First-frame six-vector matrix versus `vvc-mdlm-candidates-1f`:
+
+| Codec | Mode | Total bytes | FPS | Notes |
+|---|---|---:|---:|---|
+| AV2 | lossless | 6,586,445 | 2.68 | unchanged reference context |
+| AV2 | qp=24 | 2,400,148 | 1.17 | unchanged reference context |
+| VVC | lossless | 6,009,752 | 0.18 | -385,528 bytes versus prior VVC checkpoint |
+| VVC | qp=24 | 6,715,559 | 0.18 | +32,270 bytes versus prior VVC checkpoint |
+
+The lossless path gets a broad bitrate win from the complete angular mode set.
+The lossy path is mixed because exhaustive SAD selection now has more choices
+but no rate-aware angular syntax cost yet: three rows shrink, two high-depth
+rows grow, and total bytes rise slightly. FPS drops substantially in both VVC
+modes because the current implementation evaluates all 65 luma angular
+directions per candidate block.
+
+Per-row VVC deltas versus `vvc-mdlm-candidates-1f`:
+
+| Mode | Vector | Bytes | Delta bytes | FPS | PSNR mean |
+|---|---|---:|---:|---:|---:|
+| lossless | SceneComposition 420 8-bit | 357,191 | -28,049 | 0.22 | inf |
+| lossless | SceneComposition 422 8-bit | 431,535 | -31,741 | 0.22 | inf |
+| lossless | Wayland RGB 8-bit | 504,666 | -32,621 | 0.11 | inf |
+| lossless | MissionControl 420 10-bit | 1,227,075 | -88,685 | 0.21 | inf |
+| lossless | MissionControl 422 10-bit | 1,510,580 | -100,052 | 0.21 | inf |
+| lossless | MissionControl 444 10-bit | 1,978,705 | -104,380 | 0.18 | inf |
+| qp=24 | SceneComposition 420 8-bit | 192,454 | -8,805 | 0.27 | 24.650 |
+| qp=24 | SceneComposition 422 8-bit | 987,467 | -10,348 | 0.22 | 20.057 |
+| qp=24 | Wayland RGB 8-bit | 721,414 | -39,198 | 0.10 | 24.507 |
+| qp=24 | MissionControl 420 10-bit | 883,257 | +19,115 | 0.25 | 15.721 |
+| qp=24 | MissionControl 422 10-bit | 1,603,833 | -648 | 0.22 | 14.405 |
+| qp=24 | MissionControl 444 10-bit | 2,327,134 | +72,154 | 0.15 | 14.773 |
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-full-angular-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mdlm-candidates-1f.json
+```
+
+Generated report:
+
+```text
+verification/generated/encode_matrix/vvc-full-angular-1f.md
+```
+
+Validation:
+
+```sh
+cargo test -p frameforge-codecs vvc --features "vvc"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+make build
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
+```
+
 ## References
 
 - Cargo profile settings:

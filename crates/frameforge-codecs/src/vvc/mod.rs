@@ -253,6 +253,10 @@ impl VvcFrameStats {
     }
 
     fn add_counter(&mut self, name: &'static str, value: u64) {
+        self.add_counter_named(name, value);
+    }
+
+    fn add_counter_named(&mut self, name: &str, value: u64) {
         if let Some(counter) = self
             .counters
             .iter_mut()
@@ -260,7 +264,10 @@ impl VvcFrameStats {
         {
             counter.value += value;
         } else {
-            self.counters.push(VvcCounterStats { name, value });
+            self.counters.push(VvcCounterStats {
+                name: name.to_owned(),
+                value,
+            });
         }
     }
 
@@ -311,7 +318,7 @@ struct VvcStageStats {
 
 #[cfg(feature = "vvc-stats")]
 struct VvcCounterStats {
-    name: &'static str,
+    name: String,
     value: u64,
 }
 
@@ -577,6 +584,7 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
     stats.add_counter("luma_mode_horizontal", modes.horizontal as u64);
     stats.add_counter("luma_mode_vertical", modes.vertical as u64);
     stats.add_counter("luma_mode_angular", modes.angular as u64);
+    add_vvc_mode_index_counters(stats, "luma_mode_angular_", &modes.angular_by_index);
     let chroma_modes = vvc_chroma_mode_counts(quantized);
     stats.add_counter("chroma_mode_derived", chroma_modes.derived as u64);
     stats.add_counter("chroma_mode_dc", chroma_modes.dc as u64);
@@ -584,6 +592,11 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
     stats.add_counter("chroma_mode_horizontal", chroma_modes.horizontal as u64);
     stats.add_counter("chroma_mode_vertical", chroma_modes.vertical as u64);
     stats.add_counter("chroma_mode_angular", chroma_modes.angular as u64);
+    add_vvc_mode_index_counters(
+        stats,
+        "chroma_mode_angular_",
+        &chroma_modes.angular_by_index,
+    );
     stats.add_counter("chroma_mode_cclm", chroma_modes.cclm as u64);
     stats.add_counter("chroma_mode_cclm_linear", chroma_modes.cclm_linear as u64);
     stats.add_counter("chroma_mode_mdlm_left", chroma_modes.mdlm_left as u64);
@@ -631,13 +644,38 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
 }
 
 #[cfg(feature = "vvc-stats")]
-#[derive(Debug, Clone, Copy, Default)]
+fn add_vvc_mode_index_counters(stats: &mut VvcFrameStats, prefix: &str, counts: &[usize; 67]) {
+    for (index, count) in counts.iter().copied().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        stats.add_counter_named(&format!("{prefix}{index:02}"), count as u64);
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Clone, Copy)]
 struct VvcLumaModeCounts {
     dc: usize,
     planar: usize,
     horizontal: usize,
     vertical: usize,
     angular: usize,
+    angular_by_index: [usize; 67],
+}
+
+#[cfg(feature = "vvc-stats")]
+impl Default for VvcLumaModeCounts {
+    fn default() -> Self {
+        Self {
+            dc: 0,
+            planar: 0,
+            horizontal: 0,
+            vertical: 0,
+            angular: 0,
+            angular_by_index: [0; 67],
+        }
+    }
 }
 
 #[cfg(feature = "vvc-stats")]
@@ -649,14 +687,17 @@ fn vvc_luma_mode_counts(quantized: &VvcQuantizedColor) -> VvcLumaModeCounts {
             VvcIntraPredictionMode::Planar => counts.planar += 1,
             VvcIntraPredictionMode::Horizontal => counts.horizontal += 1,
             VvcIntraPredictionMode::Vertical => counts.vertical += 1,
-            VvcIntraPredictionMode::Angular(_) => counts.angular += 1,
+            VvcIntraPredictionMode::Angular(index) => {
+                counts.angular += 1;
+                counts.angular_by_index[usize::from(index)] += 1;
+            }
         }
     }
     counts
 }
 
 #[cfg(feature = "vvc-stats")]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct VvcChromaModeCounts {
     derived: usize,
     dc: usize,
@@ -664,10 +705,30 @@ struct VvcChromaModeCounts {
     horizontal: usize,
     vertical: usize,
     angular: usize,
+    angular_by_index: [usize; 67],
     cclm: usize,
     cclm_linear: usize,
     mdlm_left: usize,
     mdlm_top: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl Default for VvcChromaModeCounts {
+    fn default() -> Self {
+        Self {
+            derived: 0,
+            dc: 0,
+            planar: 0,
+            horizontal: 0,
+            vertical: 0,
+            angular: 0,
+            angular_by_index: [0; 67],
+            cclm: 0,
+            cclm_linear: 0,
+            mdlm_left: 0,
+            mdlm_top: 0,
+        }
+    }
 }
 
 #[cfg(feature = "vvc-stats")]
@@ -686,8 +747,9 @@ fn vvc_chroma_mode_counts(quantized: &VvcQuantizedColor) -> VvcChromaModeCounts 
             VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Vertical) => {
                 counts.vertical += 1
             }
-            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Angular(_)) => {
-                counts.angular += 1
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Angular(index)) => {
+                counts.angular += 1;
+                counts.angular_by_index[usize::from(index)] += 1;
             }
             VvcChromaIntraPredictionMode::Cclm(mode) => {
                 counts.cclm += 1;
@@ -1018,13 +1080,29 @@ pub(in crate::vvc) enum VvcChromaCclmMode {
     MdlmTop,
 }
 
-// Non-cardinal `Angular(index)` prediction and syntax are wired, but those
-// modes need reference filtering and rate-aware selection before becoming a
-// default search set. H/V are broadly useful with the current SAD selector.
-const VVC_LOSSY_LUMA_ANGULAR_CANDIDATES: [VvcIntraPredictionMode; 2] = [
-    VvcIntraPredictionMode::Horizontal,
-    VvcIntraPredictionMode::Vertical,
-];
+const VVC_LUMA_ANGULAR_CANDIDATE_COUNT: usize = 65;
+
+const fn vvc_luma_intra_mode_from_index(index: u8) -> VvcIntraPredictionMode {
+    match index {
+        18 => VvcIntraPredictionMode::Horizontal,
+        50 => VvcIntraPredictionMode::Vertical,
+        _ => VvcIntraPredictionMode::Angular(index),
+    }
+}
+
+const fn vvc_luma_angular_candidates() -> [VvcIntraPredictionMode; VVC_LUMA_ANGULAR_CANDIDATE_COUNT]
+{
+    let mut candidates = [VvcIntraPredictionMode::Angular(2); VVC_LUMA_ANGULAR_CANDIDATE_COUNT];
+    let mut idx = 0;
+    while idx < VVC_LUMA_ANGULAR_CANDIDATE_COUNT {
+        candidates[idx] = vvc_luma_intra_mode_from_index((idx + 2) as u8);
+        idx += 1;
+    }
+    candidates
+}
+
+const VVC_LUMA_ANGULAR_CANDIDATES: [VvcIntraPredictionMode; VVC_LUMA_ANGULAR_CANDIDATE_COUNT] =
+    vvc_luma_angular_candidates();
 
 const VVC_CHROMA_EXPLICIT_MODE_COUNT: usize = 4;
 const VVC_CHROMA_VDIA_REPLACEMENT_MODE: VvcIntraPredictionMode =
@@ -1070,9 +1148,7 @@ pub(in crate::vvc) fn vvc_residual_chroma_explicit_candidate_allowed(
         | VvcIntraPredictionMode::Horizontal
         | VvcIntraPredictionMode::Vertical => true,
         VvcIntraPredictionMode::Dc => true,
-        // TODO: enable non-cardinal Angular after its prediction and
-        // reference-sample handling are VTM-exact.
-        VvcIntraPredictionMode::Angular(_) => false,
+        VvcIntraPredictionMode::Angular(index) => (2..=66).contains(&index),
     }
 }
 
@@ -1106,7 +1182,7 @@ pub(in crate::vvc) fn vvc_residual_chroma_cclm_candidate_allowed(
     )
 }
 
-const VVC_LUMA_INTRA_CANDIDATE_CAPACITY: usize = 8;
+const VVC_LUMA_INTRA_CANDIDATE_CAPACITY: usize = 2 + VVC_LUMA_ANGULAR_CANDIDATE_COUNT;
 const VVC_CHROMA_INTRA_CANDIDATE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

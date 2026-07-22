@@ -11,7 +11,7 @@ use super::super::{
     VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
     VvcLumaIntraCandidateCosts, VvcPictureFormat, VvcReconstructionFrame, VvcResidualCodingMode,
     VvcResidualModeDecisionContext, VvcSample, VvcSampledColor, VvcSampledFrame, VvcVideoGeometry,
-    VVC_CTU_SIZE, VVC_LOSSY_LUMA_ANGULAR_CANDIDATES,
+    VVC_CTU_SIZE, VVC_LUMA_ANGULAR_CANDIDATES,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
@@ -188,7 +188,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             }
         }
         if vvc_residual_luma_directional_candidate_allowed(mode_context, node) {
-            for mode in VVC_LOSSY_LUMA_ANGULAR_CANDIDATES {
+            for mode in VVC_LUMA_ANGULAR_CANDIDATES {
                 predict_vvc_luma_intra_block_into_with_availability(
                     &mut candidate_luma_prediction,
                     &mut prediction_scratch,
