@@ -466,7 +466,7 @@ fn pixel_format_filename_candidates() -> Vec<String> {
         }
     }
     tokens.extend(
-        ["rgb24", "i420", "i422", "i444"]
+        ["gbrp8", "gbrp", "rgb24", "i420", "i422", "i444"]
             .into_iter()
             .map(str::to_string),
     );

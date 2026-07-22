@@ -60,7 +60,8 @@ checks are expected to pass.
 For AV2 `rgb24` lossless vectors, FrameForge writes packed RGB reconstruction
 bytes while AVM's raw decoder output is planar identity GBR. The validation
 runner normalizes that reference output back to packed `rgb24` before comparing
-checksums.
+checksums. For `gbrp8` vectors, the source and internal reconstruction are
+already planar GBR, so validation compares the bytes directly.
 
 Additional encoder settings can be passed to validation with
 `VALIDATION_SETTINGS="key key=value"`. This is intended for codec experiments

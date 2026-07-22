@@ -27,8 +27,12 @@ pub(super) use prediction::{
     predict_vvc_luma_dc_block_into, VvcDcPredictionScratch,
 };
 pub use quant::quantize_vvc_color;
-pub(super) use quant::quantize_vvc_frame_lossless_residual;
-pub(super) use quant::{quantize_vvc_frame, quantize_vvc_frame_with_reconstruction};
+pub(super) use quant::quantize_vvc_frame;
+pub(super) use quant::quantize_vvc_frame_with_reconstruction;
+pub(super) use quant::{
+    lossless_chroma_ac_levels_and_flag, lossless_luma_ac_levels_and_flag,
+    residual_chroma_tu_at_into, residual_luma_tu_at_into,
+};
 #[cfg(test)]
 pub(super) use recon::reconstruct_vvc_residual_frame;
 pub(super) use syntax::{
@@ -48,12 +52,15 @@ pub struct VvcQuantizedColor {
     pub(super) luma_tu_negative: [bool; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
+    pub(super) luma_tu_has_ac: [bool; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_count: usize,
     pub(super) chroma_tu_count: usize,
     pub(super) cb_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
     pub(super) cr_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
     pub(super) cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     pub(super) cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
+    pub(super) cb_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
+    pub(super) cr_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
     pub(super) cb_rem: u8,
     pub(super) cr_rem: u8,
 }
@@ -96,6 +103,7 @@ pub(super) struct VvcTuTransformBlock {
 pub(super) struct VvcQuantizedTransformBlock {
     pub(super) reconstructed_dc_coeff: i16,
     pub(super) reconstructed_ac_coeffs: [i16; 15],
+    pub(super) has_ac: bool,
     pub(super) abs_remainder: u8,
 }
 

@@ -364,7 +364,7 @@ def codec_extension(codec: str) -> str:
 
 
 def raw_extension(vector: generate_test_vectors.TestVector) -> str:
-    return "rgb" if vector.fmt == "rgb24" else "yuv"
+    return "rgb" if vector.fmt in {"gbrp8", "rgb24"} else "yuv"
 
 
 def require_non_empty(path: Path, label: str, vector_name: str, log: Path) -> None:

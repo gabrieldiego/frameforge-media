@@ -8,47 +8,48 @@ use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
     chroma_subsample_x, chroma_subsample_y, VvcResidualComponent, VvcSliceSyntaxConfig,
-    MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
-    VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
-    VVC_LUMA_AC_COEFFS_PER_TU,
+    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
+    VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
 pub(in crate::vvc) fn encode_ctu_partition_body(
     cabac: &mut VvcCabacEncoder,
-    params: VvcCtuPartitionParams,
+    params: &VvcCtuPartitionParams,
     slice_config: VvcSliceSyntaxConfig,
 ) {
-    let mut ctu = VvcCtuCabacGenerator::new(
-        params.luma_tu_count,
-        params.luma_tu_dc_levels,
-        params.luma_tu_ac_levels,
-        params.chroma_tu_count,
-        params.cb_tu_dc_levels,
-        params.cr_tu_dc_levels,
-        params.cb_tu_ac_levels,
-        params.cr_tu_ac_levels,
-        params.chroma_sampling,
-        slice_config,
-    );
-    for op in VvcCtuCabacOp::yuv420_ctu_partition(params) {
+    let mut contexts = initial_vvc_cabac_contexts(slice_config);
+    encode_ctu_partition_body_with_contexts(cabac, &mut contexts, params, slice_config);
+}
+
+pub(in crate::vvc) fn initial_vvc_cabac_contexts(
+    slice_config: VvcSliceSyntaxConfig,
+) -> VvcCabacContexts {
+    if slice_config.tools.transform_skip_enabled {
+        VvcCabacContexts::with_slice_qp(slice_config.slice_qp)
+    } else {
+        VvcCabacContexts::new()
+    }
+}
+
+pub(in crate::vvc) fn encode_ctu_partition_body_with_contexts(
+    cabac: &mut VvcCabacEncoder,
+    contexts: &mut VvcCabacContexts,
+    params: &VvcCtuPartitionParams,
+    slice_config: VvcSliceSyntaxConfig,
+) {
+    let ops = VvcCtuCabacOp::yuv420_ctu_partition(params);
+    let mut ctu = VvcCtuCabacGenerator::new(contexts, params, slice_config);
+    for op in ops {
         ctu.emit(cabac, op);
     }
 }
 
-#[derive(Debug, Clone)]
-pub(in crate::vvc) struct VvcCtuCabacGenerator {
-    contexts: VvcCabacContexts,
-    luma_tu_count: usize,
-    luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
-    luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
+#[derive(Debug)]
+pub(in crate::vvc) struct VvcCtuCabacGenerator<'a, 'p> {
+    contexts: &'a mut VvcCabacContexts,
+    params: &'p VvcCtuPartitionParams,
     luma_tu_index: usize,
-    chroma_tu_count: usize,
-    cb_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
-    cr_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
-    cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-    cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     chroma_tu_index: usize,
-    chroma_sampling: ChromaSampling,
     slice_config: VvcSliceSyntaxConfig,
 }
 
@@ -153,37 +154,17 @@ impl VvcChromaNeighbourState {
     }
 }
 
-impl VvcCtuCabacGenerator {
+impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
     pub(in crate::vvc) fn new(
-        luma_tu_count: usize,
-        luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
-        luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
-        chroma_tu_count: usize,
-        cb_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
-        cr_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
-        cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-        cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
-        chroma_sampling: ChromaSampling,
+        contexts: &'a mut VvcCabacContexts,
+        params: &'p VvcCtuPartitionParams,
         slice_config: VvcSliceSyntaxConfig,
     ) -> Self {
-        let contexts = if slice_config.tools.transform_skip_enabled {
-            VvcCabacContexts::with_slice_qp(slice_config.slice_qp)
-        } else {
-            VvcCabacContexts::new()
-        };
         Self {
             contexts,
-            luma_tu_count,
-            luma_tu_dc_levels,
-            luma_tu_ac_levels,
+            params,
             luma_tu_index: 0,
-            chroma_tu_count,
-            cb_tu_dc_levels,
-            cr_tu_dc_levels,
-            cb_tu_ac_levels,
-            cr_tu_ac_levels,
             chroma_tu_index: 0,
-            chroma_sampling,
             slice_config,
         }
     }
@@ -352,13 +333,11 @@ impl VvcCtuCabacGenerator {
         let tu_idx = self.luma_tu_index;
         self.luma_tu_index += 1;
         assert!(
-            tu_idx < self.luma_tu_count,
+            tu_idx < self.params.luma_tu_count,
             "missing luma TU coefficient data for coding-tree leaf {tu_idx}"
         );
-        let dc_level = self.luma_tu_dc_levels[tu_idx];
-        let ac_levels = self.luma_tu_ac_levels[tu_idx];
-        let has_ac = ac_levels.iter().any(|level| *level != 0);
-        let cbf = dc_level != 0 || has_ac;
+        let dc_level = self.params.luma_tu_dc_levels[tu_idx];
+        let cbf = dc_level != 0 || self.params.luma_tu_has_ac[tu_idx];
         self.emit_luma_cbf(cabac, node, cbf);
         if !cbf {
             return;
@@ -366,37 +345,27 @@ impl VvcCtuCabacGenerator {
 
         let log2_width = node.width.ilog2() as u8;
         let log2_height = node.height.ilog2() as u8;
-        let width = usize::from(node.width);
-        let height = usize::from(node.height);
-        let mut coeff_levels = vec![0; width * height];
-        coeff_levels[0] = dc_level;
-        // The current transform side exposes the first 4x4 AC positions. Keep
-        // them wired through the normal residual coefficient path even when
-        // they are all zero; future transform work should only change the
-        // coefficient values, not reselect a different CABAC writer.
-        for (ac_idx, level) in ac_levels.iter().enumerate() {
-            let local = ac_idx + 1;
-            let x = local % 4;
-            let y = local / 4;
-            if x < width && y < height {
-                coeff_levels[y * width + x] = *level;
-            }
-        }
+        let ac_levels = &self.params.luma_tu_ac_levels[tu_idx];
+        let has_ac = self.params.luma_tu_has_ac[tu_idx];
         let mut residual =
-            VvcResidualCabacEncoder::new(&mut self.contexts, self.slice_config.residual_options());
+            VvcResidualCabacEncoder::new(&mut *self.contexts, self.slice_config.residual_options());
         if self.slice_config.tools.transform_skip_enabled {
-            VvcResidualCabacSymbolStream::emit_luma_transform_skip_coefficients(
+            VvcResidualCabacSymbolStream::emit_luma_transform_skip_first4x4_coefficients(
                 log2_width,
                 log2_height,
-                &coeff_levels,
+                dc_level,
+                ac_levels,
+                has_ac,
                 &mut residual,
                 cabac,
             );
         } else {
-            VvcResidualCabacSymbolStream::emit_luma_coefficients(
+            VvcResidualCabacSymbolStream::emit_luma_first4x4_coefficients(
                 log2_width,
                 log2_height,
-                &coeff_levels,
+                dc_level,
+                ac_levels,
+                has_ac,
                 &mut residual,
                 cabac,
             );
@@ -411,8 +380,11 @@ impl VvcCtuCabacGenerator {
         visible_height: u16,
     ) {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeChroma);
-        let mut neighbours =
-            VvcChromaNeighbourState::new(visible_width, visible_height, self.chroma_sampling);
+        let mut neighbours = VvcChromaNeighbourState::new(
+            visible_width,
+            visible_height,
+            self.params.chroma_sampling,
+        );
         self.emit_chroma_visible_qt_subtree(
             cabac,
             node,
@@ -444,7 +416,7 @@ impl VvcCtuCabacGenerator {
                     node,
                     visible_width,
                     visible_height,
-                    self.chroma_sampling,
+                    self.params.chroma_sampling,
                 ),
                 0,
                 neighbours,
@@ -468,7 +440,7 @@ impl VvcCtuCabacGenerator {
             node,
             visible_width,
             visible_height,
-            self.chroma_sampling,
+            self.params.chroma_sampling,
         );
         if split.allow_qt {
             self.emit_chroma_visible_qt_split(cabac, node, split, neighbours);
@@ -515,7 +487,7 @@ impl VvcCtuCabacGenerator {
             node,
             visible_width,
             visible_height,
-            self.chroma_sampling,
+            self.params.chroma_sampling,
         );
         if split.allow_qt {
             if split.allow_btt() {
@@ -677,42 +649,40 @@ impl VvcCtuCabacGenerator {
     }
 
     fn emit_chroma_residual(
-        &mut self,
+        contexts: &mut VvcCabacContexts,
+        slice_config: VvcSliceSyntaxConfig,
+        chroma_sampling: ChromaSampling,
         cabac: &mut VvcCabacEncoder,
         component: VvcResidualComponent,
         node: VvcCodingTreeNode,
         dc_level: i16,
-        ac_levels: [i16; VVC_CHROMA_AC_COEFFS_PER_TU],
+        ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
+        has_ac: bool,
     ) {
-        let width = usize::from(vvc_chroma_width(node, self.chroma_sampling));
-        let height = usize::from(vvc_chroma_height(node, self.chroma_sampling));
-        let mut coeff_levels = vec![0; width * height];
-        coeff_levels[0] = dc_level;
-        for (slot, level) in ac_levels.iter().enumerate() {
-            let (x, y) = VVC_CHROMA_AC_POSITIONS_4X4[slot];
-            if x < width && y < height {
-                coeff_levels[y * width + x] = *level;
-            }
-        }
+        let width = usize::from(vvc_chroma_width(node, chroma_sampling));
+        let height = usize::from(vvc_chroma_height(node, chroma_sampling));
         let log2_width = (width as u16).ilog2() as u8;
         let log2_height = (height as u16).ilog2() as u8;
-        let mut residual =
-            VvcResidualCabacEncoder::new(&mut self.contexts, self.slice_config.residual_options());
-        if self.slice_config.tools.transform_skip_enabled {
-            VvcResidualCabacSymbolStream::emit_chroma_transform_skip_coefficients(
+        let mut residual = VvcResidualCabacEncoder::new(contexts, slice_config.residual_options());
+        if slice_config.tools.transform_skip_enabled {
+            VvcResidualCabacSymbolStream::emit_chroma_transform_skip_first4x4_coefficients(
                 component,
                 log2_width,
                 log2_height,
-                &coeff_levels,
+                dc_level,
+                ac_levels,
+                has_ac,
                 &mut residual,
                 cabac,
             );
         } else {
-            VvcResidualCabacSymbolStream::emit_chroma_coefficients(
+            VvcResidualCabacSymbolStream::emit_chroma_first4x4_coefficients(
                 component,
                 log2_width,
                 log2_height,
-                &coeff_levels,
+                dc_level,
+                ac_levels,
+                has_ac,
                 &mut residual,
                 cabac,
             );
@@ -744,43 +714,49 @@ impl VvcCtuCabacGenerator {
         let tu_idx = self.chroma_tu_index;
         self.chroma_tu_index += 1;
         assert!(
-            tu_idx < self.chroma_tu_count,
+            tu_idx < self.params.chroma_tu_count,
             "missing chroma TU coefficient data for coding-tree leaf {tu_idx}"
         );
-        let cb_dc_level = self.cb_tu_dc_levels[tu_idx];
-        let cr_dc_level = self.cr_tu_dc_levels[tu_idx];
-        let cb_ac_levels = self.cb_tu_ac_levels[tu_idx];
-        let cr_ac_levels = self.cr_tu_ac_levels[tu_idx];
-        let cbf_cb = cb_dc_level != 0 || cb_ac_levels.iter().any(|level| *level != 0);
-        let cbf_cr = cr_dc_level != 0 || cr_ac_levels.iter().any(|level| *level != 0);
+        let cb_dc_level = self.params.cb_tu_dc_levels[tu_idx];
+        let cr_dc_level = self.params.cr_tu_dc_levels[tu_idx];
+        let cbf_cb = cb_dc_level != 0 || self.params.cb_tu_has_ac[tu_idx];
+        let cbf_cr = cr_dc_level != 0 || self.params.cr_tu_has_ac[tu_idx];
         self.contexts
             .encode(cabac, VvcCabacContext::QtCbfCb(cbf_cb_ctx), cbf_cb);
         self.contexts
             .encode(cabac, VvcCabacContext::QtCbfCr(u8::from(cbf_cb)), cbf_cr);
         if cbf_cb {
-            self.emit_chroma_residual(
+            Self::emit_chroma_residual(
+                &mut *self.contexts,
+                self.slice_config,
+                self.params.chroma_sampling,
                 cabac,
                 VvcResidualComponent::ChromaCb,
                 node,
                 cb_dc_level,
-                cb_ac_levels,
+                &self.params.cb_tu_ac_levels[tu_idx],
+                self.params.cb_tu_has_ac[tu_idx],
             );
         }
         if cbf_cr {
-            self.emit_chroma_residual(
+            Self::emit_chroma_residual(
+                &mut *self.contexts,
+                self.slice_config,
+                self.params.chroma_sampling,
                 cabac,
                 VvcResidualComponent::ChromaCr,
                 node,
                 cr_dc_level,
-                cr_ac_levels,
+                &self.params.cr_tu_ac_levels[tu_idx],
+                self.params.cr_tu_has_ac[tu_idx],
             );
         }
         neighbours.mark_leaf(node);
     }
 
     fn chroma_leaf_allowed(&self, node: VvcCodingTreeNode) -> bool {
-        let chroma_width = vvc_chroma_width(node, self.chroma_sampling);
-        let chroma_height = vvc_chroma_height(node, self.chroma_sampling);
+        let chroma_width = vvc_chroma_width(node, self.params.chroma_sampling);
+        let chroma_height = vvc_chroma_height(node, self.params.chroma_sampling);
         // H.266 7.3.11.10 transform_unit() is reached after the encoder's
         // chosen legal coding-tree split. The spec maximum for this SPS remains
         // MaxTbSizeY/SubWidthC by MaxTbSizeY/SubHeightC, but this hardware

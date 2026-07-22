@@ -1,9 +1,10 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::{
-    vvc_cabac_bits_with_luma_max_leaf_size, VvcCodingTreeConfig, VvcNalUnit, VvcNalUnitType,
-    VvcQuantizedColor, VvcSliceSyntaxConfig, VvcSyntaxRbsp, VvcSyntaxWriter, VvcVideoGeometry,
-    VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    vvc_cabac_bits_with_luma_max_leaf_size, vvc_frame_cabac_bits, VvcCodingTreeConfig, VvcNalUnit,
+    VvcNalUnitType, VvcQuantizedColor, VvcQuantizedCtu, VvcSliceSyntaxConfig, VvcSyntaxRbsp,
+    VvcSyntaxWriter, VvcVideoGeometry, VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+    VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,12 @@ const VVC_SPS_LOG2_MAX_POC_LSB_MINUS4: u8 = 12;
 const VVC_PPS_INIT_QP: i32 = 32;
 pub(in crate::vvc) const VVC_POC_LSB_BITS: u8 = VVC_SPS_LOG2_MAX_POC_LSB_MINUS4 + 4;
 pub(in crate::vvc) const VVC_LOSSLESS_SH_QP_DELTA: i32 = -28;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcPicturePartitioning {
+    SingleSlice,
+    OneSlicePerCtu,
+}
 
 impl VvcPictureKind {
     pub(in crate::vvc) fn for_frame_idx(frame_idx: usize) -> Self {
@@ -61,11 +68,18 @@ pub(in crate::vvc) fn vvc_sps_unit(
 }
 
 pub(in crate::vvc) fn vvc_pps_unit(geometry: VvcVideoGeometry) -> VvcNalUnit {
+    vvc_pps_unit_with_partitioning(geometry, VvcPicturePartitioning::OneSlicePerCtu)
+}
+
+pub(in crate::vvc) fn vvc_pps_unit_with_partitioning(
+    geometry: VvcVideoGeometry,
+    partitioning: VvcPicturePartitioning,
+) -> VvcNalUnit {
     VvcNalUnit {
         nal_unit_type: VvcNalUnitType::Pps,
         layer_id: 0,
         temporal_id: 0,
-        rbsp_payload: vvc_pps_payload(geometry),
+        rbsp_payload: vvc_pps_payload_with_partitioning(geometry, partitioning),
     }
 }
 
@@ -104,27 +118,34 @@ pub(in crate::vvc) fn vvc_slice_unit(
     )
 }
 
-pub(in crate::vvc) fn vvc_ctu_slice_unit(
+pub(in crate::vvc) fn vvc_frame_slice_unit(
     frame_idx: usize,
     picture_geometry: VvcVideoGeometry,
-    slice_address: usize,
-    ctu_geometry: VvcVideoGeometry,
-    color: VvcQuantizedColor,
+    ctus: &[VvcQuantizedCtu],
     slice_config: VvcSliceSyntaxConfig,
 ) -> Result<VvcNalUnit, String> {
     let picture_kind = VvcPictureKind::for_frame_idx(frame_idx);
     let poc_lsb = vvc_poc_lsb_for_frame_idx(frame_idx);
+    let expected_ctus = vvc_picture_ctu_count(picture_geometry);
+    if ctus.len() != expected_ctus {
+        return Err(format!(
+            "VVC frame slice expected {expected_ctus} CTU payload(s), got {}",
+            ctus.len()
+        ));
+    }
 
-    vvc_ctu_slice_unit_with_poc(
-        picture_kind,
-        poc_lsb,
-        picture_geometry,
-        slice_address,
-        ctu_geometry,
-        color,
-        slice_config,
-        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
-    )
+    Ok(VvcNalUnit {
+        nal_unit_type: picture_kind.nal_unit_type(),
+        layer_id: 0,
+        temporal_id: 0,
+        rbsp_payload: vvc_frame_slice_payload_with_poc(
+            picture_kind,
+            poc_lsb,
+            picture_geometry,
+            ctus,
+            slice_config,
+        ),
+    })
 }
 
 pub(in crate::vvc) fn vvc_ctu_slice_unit_with_luma_max_leaf_size(
@@ -292,7 +313,10 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
     writer.write_ue("sps_log2_min_luma_coding_block_size_minus2", 0);
     writer.write_flag("sps_partition_constraints_override_enabled_flag", true);
     writer.write_ue("sps_log2_diff_min_qt_min_cb_intra_slice_luma", 1);
-    writer.write_ue("sps_max_mtt_hierarchy_depth_intra_slice_luma", 3);
+    writer.write_ue(
+        "sps_max_mtt_hierarchy_depth_intra_slice_luma",
+        u32::from(VVC_CURRENT_MAX_LUMA_MTT_DEPTH),
+    );
     writer.write_ue("sps_log2_diff_max_bt_min_qt_intra_slice_luma", 2);
     writer.write_ue("sps_log2_diff_max_tt_min_qt_intra_slice_luma", 2);
     // sps_qtbtt_dual_tree_intra_flag is a chroma tree-configuration choice.
@@ -521,15 +545,28 @@ fn vvc_general_profile_idc(
     }
 }
 
-fn vvc_pps_payload(geometry: VvcVideoGeometry) -> Vec<u8> {
-    vvc_pps_rbsp(geometry).bytes
+fn vvc_pps_payload_with_partitioning(
+    geometry: VvcVideoGeometry,
+    partitioning: VvcPicturePartitioning,
+) -> Vec<u8> {
+    vvc_pps_rbsp_with_partitioning(geometry, partitioning).bytes
 }
 
+#[cfg(test)]
 pub(in crate::vvc) fn vvc_pps_rbsp(geometry: VvcVideoGeometry) -> VvcSyntaxRbsp {
+    vvc_pps_rbsp_with_partitioning(geometry, VvcPicturePartitioning::OneSlicePerCtu)
+}
+
+pub(in crate::vvc) fn vvc_pps_rbsp_with_partitioning(
+    geometry: VvcVideoGeometry,
+    partitioning: VvcPicturePartitioning,
+) -> VvcSyntaxRbsp {
     let mut writer = VvcSyntaxWriter::new();
     let ctu_cols = vvc_picture_ctu_cols(geometry);
     let ctu_rows = vvc_picture_ctu_rows(geometry);
     let has_multiple_ctus = ctu_cols * ctu_rows > 1;
+    let use_picture_partitioning =
+        has_multiple_ctus && partitioning == VvcPicturePartitioning::OneSlicePerCtu;
     writer.write_u("pps_pic_parameter_set_id", 0, 6);
     writer.write_u("pps_seq_parameter_set_id", 0, 4);
     writer.write_flag("pps_mixed_nalu_types_in_pic_flag", false);
@@ -544,9 +581,9 @@ pub(in crate::vvc) fn vvc_pps_rbsp(geometry: VvcVideoGeometry) -> VvcSyntaxRbsp 
     writer.write_flag("pps_conformance_window_flag", false);
     writer.write_flag("pps_scaling_window_explicit_signalling_flag", false);
     writer.write_flag("pps_output_flag_present_flag", false);
-    writer.write_flag("pps_no_pic_partition_flag", !has_multiple_ctus);
+    writer.write_flag("pps_no_pic_partition_flag", !use_picture_partitioning);
     writer.write_flag("pps_subpic_id_mapping_present_flag", false);
-    if has_multiple_ctus {
+    if use_picture_partitioning {
         // One tile per 64x64 CTU, one rectangular slice per tile. This keeps
         // each CABAC body local to a CTU while avoiding any full-picture
         // working buffer in the current software encoder.
@@ -598,7 +635,7 @@ pub(in crate::vvc) fn vvc_pps_rbsp(geometry: VvcVideoGeometry) -> VvcSyntaxRbsp 
     writer.write_flag("pps_deblocking_filter_control_present_flag", true);
     writer.write_flag("pps_deblocking_filter_override_enabled_flag", false);
     writer.write_flag("pps_deblocking_filter_disabled_flag", true);
-    if has_multiple_ctus {
+    if use_picture_partitioning {
         // H.266 picture_parameter_set_rbsp(): when picture partitioning is
         // present, these flags declare whether later syntax is carried in the
         // picture header. Keep them false for the current picture-header
@@ -658,6 +695,16 @@ pub(in crate::vvc) fn vvc_slice_payload_with_poc(
     .bytes
 }
 
+fn vvc_frame_slice_payload_with_poc(
+    picture_kind: VvcPictureKind,
+    poc_lsb: u32,
+    picture_geometry: VvcVideoGeometry,
+    ctus: &[VvcQuantizedCtu],
+    slice_config: VvcSliceSyntaxConfig,
+) -> Vec<u8> {
+    vvc_frame_slice_rbsp_with_poc(picture_kind, poc_lsb, picture_geometry, ctus, slice_config).bytes
+}
+
 #[cfg(test)]
 pub(in crate::vvc) fn vvc_slice_rbsp(
     picture_kind: VvcPictureKind,
@@ -683,6 +730,39 @@ fn vvc_test_poc_lsb(picture_kind: VvcPictureKind) -> u32 {
         VvcPictureKind::Idr => 0,
         VvcPictureKind::Cra => 1,
     }
+}
+
+fn vvc_frame_slice_rbsp_with_poc(
+    picture_kind: VvcPictureKind,
+    poc_lsb: u32,
+    picture_geometry: VvcVideoGeometry,
+    ctus: &[VvcQuantizedCtu],
+    slice_config: VvcSliceSyntaxConfig,
+) -> VvcSyntaxRbsp {
+    let mut writer = VvcSyntaxWriter::new();
+    let tool_flags = slice_config.tools;
+    writer.write_flag("sh_picture_header_in_slice_header_flag", true);
+    write_vvc_picture_header(&mut writer, picture_kind, poc_lsb, slice_config);
+    writer.write_flag("sh_no_output_of_prior_pics_flag", false);
+    write_vvc_slice_header_ref_pic_lists(&mut writer, picture_kind);
+    writer.write_se("sh_qp_delta", slice_config.slice_qp - VVC_PPS_INIT_QP);
+    if tool_flags.dependent_quantization_enabled {
+        writer.write_flag("sh_dep_quant_used_flag", true);
+    }
+    if tool_flags.sign_data_hiding_enabled && !tool_flags.dependent_quantization_enabled {
+        writer.write_flag("sh_sign_data_hiding_used_flag", true);
+    }
+    if tool_flags.transform_skip_enabled
+        && !tool_flags.dependent_quantization_enabled
+        && !tool_flags.sign_data_hiding_enabled
+    {
+        writer.write_flag("sh_ts_residual_coding_disabled_flag", true);
+    }
+    write_vvc_slice_header_byte_alignment(&mut writer);
+    write_vvc_frame_coding_tree_entropy(&mut writer, picture_geometry, ctus, slice_config);
+    writer.rbsp_trailing_bits();
+    debug_assert!(writer.is_byte_aligned());
+    writer.finish()
 }
 
 pub(in crate::vvc) fn vvc_slice_rbsp_with_poc(
@@ -767,6 +847,16 @@ pub(in crate::vvc) fn write_vvc_coding_tree_entropy_with_luma_max_leaf_size(
     let bits =
         vvc_cabac_bits_with_luma_max_leaf_size(geometry, color, slice_config, luma_max_leaf_size);
     writer.write_cabac_bits("cabac_vvc_quantized_residual_bits", &bits);
+}
+
+fn write_vvc_frame_coding_tree_entropy(
+    writer: &mut VvcSyntaxWriter,
+    picture_geometry: VvcVideoGeometry,
+    ctus: &[VvcQuantizedCtu],
+    slice_config: VvcSliceSyntaxConfig,
+) {
+    let bits = vvc_frame_cabac_bits(picture_geometry, ctus, slice_config);
+    writer.write_cabac_bits("cabac_vvc_frame_quantized_residual_bits", &bits);
 }
 
 pub(in crate::vvc) fn vvc_picture_ctu_cols(geometry: VvcVideoGeometry) -> usize {

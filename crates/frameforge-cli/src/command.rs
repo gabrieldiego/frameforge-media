@@ -736,7 +736,7 @@ fn print_frame_metrics(
     let bits = bitstream_bytes * 8;
     match frame_psnr(job, source, reconstruction) {
         Some(psnr) => {
-            if job.format == PixelFormat::Rgb24 {
+            if job.format.is_rgb() {
                 eprintln!(
                     "frame: codec={} index={}/{} bits={} bytes={} psnr_r={} psnr_g={} psnr_b={} psnr_all={}",
                     codec,
@@ -779,6 +779,9 @@ fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<F
     let y_samples = job.width.checked_mul(job.height)?;
     if job.format == PixelFormat::Rgb24 {
         return rgb24_frame_psnr(y_samples, source, reconstruction);
+    }
+    if job.format == PixelFormat::Gbrp8 {
+        return gbrp8_frame_psnr(y_samples, source, reconstruction);
     }
     let chroma_sampling = job.format.chroma_sampling()?;
     let chroma_width = job.width.checked_div(chroma_sampling.subsample_x())?;
@@ -823,6 +826,36 @@ fn frame_psnr(job: &EncodeJob, source: &[u8], reconstruction: &[u8]) -> Option<F
             y_samples + chroma_samples * 2,
             max_sample,
         ),
+    })
+}
+
+fn gbrp8_frame_psnr(pixels: usize, source: &[u8], reconstruction: &[u8]) -> Option<FramePsnr> {
+    let plane_len = pixels;
+    let frame_len = plane_len.checked_mul(3)?;
+    if source.len() != frame_len || reconstruction.len() != frame_len {
+        return None;
+    }
+    if source == reconstruction {
+        return Some(FramePsnr {
+            y: f64::INFINITY,
+            u: f64::INFINITY,
+            v: f64::INFINITY,
+            all: f64::INFINITY,
+        });
+    }
+
+    let (source_g, source_chroma) = source.split_at(plane_len);
+    let (source_b, source_r) = source_chroma.split_at(plane_len);
+    let (recon_g, recon_chroma) = reconstruction.split_at(plane_len);
+    let (recon_b, recon_r) = recon_chroma.split_at(plane_len);
+    let r_sse = planar_sample_sse(source_r, recon_r, SampleBitDepth::new(8).unwrap())?;
+    let g_sse = planar_sample_sse(source_g, recon_g, SampleBitDepth::new(8).unwrap())?;
+    let b_sse = planar_sample_sse(source_b, recon_b, SampleBitDepth::new(8).unwrap())?;
+    Some(FramePsnr {
+        y: psnr_from_sse(r_sse, pixels, 255.0),
+        u: psnr_from_sse(g_sse, pixels, 255.0),
+        v: psnr_from_sse(b_sse, pixels, 255.0),
+        all: psnr_from_sse(r_sse + g_sse + b_sse, frame_len, 255.0),
     })
 }
 
@@ -974,7 +1007,10 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     let _ = boolean_setting_enabled(&args.settings, "predictive")?;
     if source_format == PixelFormat::Rgb24 {
         if codec != "av2" {
-            return Err("rgb24 encode is currently implemented for AV2 only".to_string());
+            return Err(
+                "packed rgb24 encode is currently implemented for AV2 only; use planar gbrp8 for VVC"
+                    .to_string(),
+            );
         }
     }
     let format = if lossless {
@@ -1084,18 +1120,21 @@ fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
 fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
     match codec {
         "av2" => {
-            format == PixelFormat::Rgb24
+            matches!(format, PixelFormat::Gbrp8 | PixelFormat::Rgb24)
                 || (matches!(
                     format.chroma_sampling(),
                     Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
                 ) && matches!(format.bit_depth().bits(), 8 | 10))
         }
-        "vvc" => match format.chroma_sampling() {
-            Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444) => {
-                vvc_accepts_bit_depth(format)
-            }
-            _ => false,
-        },
+        "vvc" => {
+            format == PixelFormat::Gbrp8
+                || match format.chroma_sampling() {
+                    Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444) => {
+                        vvc_accepts_bit_depth(format)
+                    }
+                    _ => false,
+                }
+        }
         _ => false,
     }
 }
@@ -1103,17 +1142,18 @@ fn codec_accepts_format(codec: &str, format: PixelFormat) -> bool {
 fn codec_supports_lossless_stream(codec: &str, format: PixelFormat) -> bool {
     match codec {
         "av2" => {
-            format == PixelFormat::Rgb24
+            matches!(format, PixelFormat::Gbrp8 | PixelFormat::Rgb24)
                 || (matches!(
                     format.chroma_sampling(),
                     Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
                 ) && matches!(format.bit_depth().bits(), 8 | 10))
         }
         "vvc" => {
-            matches!(
-                format.chroma_sampling(),
-                Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
-            ) && vvc_accepts_bit_depth(format)
+            format == PixelFormat::Gbrp8
+                || (matches!(
+                    format.chroma_sampling(),
+                    Some(ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444)
+                ) && vvc_accepts_bit_depth(format))
         }
         _ => false,
     }
@@ -1322,9 +1362,9 @@ fn encode_av2(_job: EncodeJob) -> Result<(), String> {
 
 #[cfg(feature = "codec-vvc")]
 fn encode_vvc(job: EncodeJob) -> Result<(), String> {
-    if !job.format.is_yuv() {
+    if !job.format.is_yuv() && job.format != PixelFormat::Gbrp8 {
         return Err(format!(
-            "VVC encoder expects planar YUV input; got {}x{} {}",
+            "VVC encoder expects planar YUV or gbrp8 input; got {}x{} {}",
             job.width, job.height, job.format
         ));
     }
@@ -2042,6 +2082,45 @@ mod tests {
     }
 
     #[test]
+    fn encode_job_accepts_lossless_gbrp8_for_av2_and_vvc_paths() {
+        for codec in ["av2", "vvc"] {
+            let path = temp_input_path(&format!("one_frame_8x8_gbrp8_{codec}"), "rgb");
+            let input = (0..PixelFormat::Gbrp8.frame_len(8, 8).unwrap())
+                .map(|index| ((index * 29 + 7) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            let mut file = File::create(&path).expect("create temp gbrp8");
+            file.write_all(&input).expect("write temp gbrp8");
+            drop(file);
+
+            let args = EncodeArgs {
+                input: Some(path.to_string_lossy().to_string()),
+                output: Some(format!("out.{codec}")),
+                codec: Some(codec.to_string()),
+                video: Some(args::VideoSpec {
+                    width: 8,
+                    height: 8,
+                    pixel_format: Some("gbrp8".to_string()),
+                }),
+                settings: vec!["lossless=true".to_string()],
+                frames: None,
+                ..EncodeArgs::default()
+            };
+
+            let job = encode_job(&args).expect("lossless gbrp8 is native");
+            assert!(job.lossless);
+            assert_eq!(job.source_format, PixelFormat::Gbrp8);
+            assert_eq!(job.format, PixelFormat::Gbrp8);
+            let mut reader = open_job_reader(&job).expect("open gbrp8 reader");
+            let mut forwarded = Vec::new();
+            reader
+                .read_to_end(&mut forwarded)
+                .expect("read forwarded gbrp8 frame");
+            assert_eq!(forwarded, input);
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
     fn encode_job_rejects_rgb24_for_vvc_path() {
         let path = temp_input_path("one_frame_8x8_rgb24_vvc", "rgb");
         let mut file = File::create(&path).expect("create temp rgb");
@@ -2065,7 +2144,7 @@ mod tests {
 
         let err = encode_job(&args).expect_err("VVC rgb24 path should be rejected");
         assert!(
-            err.contains("rgb24 encode is currently implemented for AV2 only"),
+            err.contains("packed rgb24 encode is currently implemented for AV2 only"),
             "{err}"
         );
         let _ = fs::remove_file(path);

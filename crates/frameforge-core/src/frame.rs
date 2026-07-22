@@ -23,6 +23,7 @@ pub enum PixelFormat {
     Gray {
         bit_depth: SampleBitDepth,
     },
+    Gbrp8,
     Rgb24,
 }
 
@@ -163,6 +164,7 @@ impl PixelFormat {
                     format!("gray{}le", bit_depth.bits())
                 }
             }
+            Self::Gbrp8 => "gbrp8".to_string(),
             Self::Rgb24 => "rgb24".to_string(),
         }
     }
@@ -170,7 +172,7 @@ impl PixelFormat {
     pub fn bit_depth(self) -> SampleBitDepth {
         match self {
             Self::PlanarYuv { bit_depth, .. } | Self::Gray { bit_depth } => bit_depth,
-            Self::Rgb24 => SampleBitDepth::new_unchecked(8),
+            Self::Gbrp8 | Self::Rgb24 => SampleBitDepth::new_unchecked(8),
         }
     }
 
@@ -187,13 +189,21 @@ impl PixelFormat {
             .is_some_and(|sampling| sampling != ChromaSampling::Monochrome)
     }
 
+    pub fn is_planar_rgb(self) -> bool {
+        self == Self::Gbrp8
+    }
+
+    pub fn is_rgb(self) -> bool {
+        matches!(self, Self::Gbrp8 | Self::Rgb24)
+    }
+
     pub fn chroma_sampling(self) -> Option<ChromaSampling> {
         match self {
             Self::PlanarYuv {
                 chroma_sampling, ..
             } => Some(chroma_sampling),
             Self::Gray { .. } => Some(ChromaSampling::Monochrome),
-            Self::Rgb24 => None,
+            Self::Gbrp8 | Self::Rgb24 => None,
         }
     }
 
@@ -402,6 +412,7 @@ impl FromStr for PixelFormat {
             "yuv422p" | "yuv422p8" | "i422" => Ok(Self::Yuv422p8),
             "yuv444p" | "yuv444p8" | "i444" => Ok(Self::Yuv444p8),
             "gray8" | "y8" => Ok(Self::Gray8),
+            "gbrp" | "gbrp8" => Ok(Self::Gbrp8),
             "rgb24" => Ok(Self::Rgb24),
             other => {
                 if let Some(format) = parse_planar_yuv_pixel_format(other)? {
@@ -414,7 +425,7 @@ impl FromStr for PixelFormat {
                     return Ok(format);
                 }
                 Err(format!(
-                    "unsupported format '{other}'; supported formats: yuv420p8..16le, yuv422p8..16le, yuv444p8..16le, gray8..16le, and rgb24"
+                    "unsupported format '{other}'; supported formats: yuv420p8..16le, yuv422p8..16le, yuv444p8..16le, gray8..16le, gbrp8, and rgb24"
                 ))
             }
         }
@@ -564,6 +575,7 @@ mod tests {
     fn computes_common_frame_lengths() {
         assert_eq!(PixelFormat::Yuv420p8.frame_len(16, 16), Some(384));
         assert_eq!(PixelFormat::Yuv444p8.frame_len(16, 16), Some(768));
+        assert_eq!(PixelFormat::Gbrp8.frame_len(16, 16), Some(768));
         assert_eq!(PixelFormat::Rgb24.frame_len(16, 16), Some(768));
         assert_eq!(PixelFormat::yuv420(9).unwrap().frame_len(16, 16), Some(768));
         assert_eq!(
@@ -652,6 +664,8 @@ mod tests {
             Ok(PixelFormat::yuv420(10).unwrap())
         );
         assert_eq!("yuv444p".parse::<PixelFormat>(), Ok(PixelFormat::Yuv444p8));
+        assert_eq!("gbrp".parse::<PixelFormat>(), Ok(PixelFormat::Gbrp8));
+        assert_eq!("gbrp8".parse::<PixelFormat>(), Ok(PixelFormat::Gbrp8));
         assert_eq!("rgb24".parse::<PixelFormat>(), Ok(PixelFormat::Rgb24));
     }
 
@@ -693,6 +707,10 @@ mod tests {
         );
         assert_eq!(
             PixelFormat::Rgb24.with_bit_depth(SampleBitDepth::new(8).unwrap()),
+            None
+        );
+        assert_eq!(
+            PixelFormat::Gbrp8.with_bit_depth(SampleBitDepth::new(8).unwrap()),
             None
         );
     }

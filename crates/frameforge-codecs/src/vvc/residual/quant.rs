@@ -2,7 +2,7 @@ use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
     vvc_luma_transform_nodes, vvc_neutral_sample, VvcCodingTreeNode, VvcCtuPartitionShape,
     VvcPictureFormat, VvcSample, VvcSampledColor, VvcSampledFrame, VvcVideoGeometry, VVC_CTU_SIZE,
-    VVC_CURRENT_MAX_LUMA_LEAF_SIZE, VVC_LOSSLESS_LUMA_LEAF_SIZE,
+    VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
@@ -30,6 +30,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_ac_levels = [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS];
+    let mut luma_tu_has_ac = [false; MAX_VVC_LUMA_TUS];
     let neutral = vvc_neutral_sample(frame.format.bit_depth);
     let mut reconstructed_luma = vec![neutral; frame.geometry.luma_samples()];
     let mut luma_tu_count = 0;
@@ -38,6 +39,8 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
     let mut chroma_tu_count = 0;
     let mut cb_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
     let mut cr_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
+    let mut cb_tu_has_ac = [false; MAX_VVC_CHROMA_TUS];
+    let mut cr_tu_has_ac = [false; MAX_VVC_CHROMA_TUS];
     let mut reconstructed_cb = vec![neutral; frame.chroma_len];
     let mut reconstructed_cr = vec![neutral; frame.chroma_len];
     let mut prediction_scratch = VvcDcPredictionScratch::default();
@@ -46,7 +49,11 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
     let mut predicted_cr = Vec::new();
     let mut transform_scratch = VvcInverseTransformScratch::default();
     let mut reconstructed_residual = Vec::new();
+    let mut luma_residuals = Vec::new();
+    let mut cb_residuals = Vec::new();
+    let mut cr_residuals = Vec::new();
 
+    let partition_shape = chroma_partition_shape(frame.geometry, frame.format.chroma_sampling);
     for node in vvc_luma_tu_nodes(frame.geometry, frame.format.chroma_sampling) {
         if luma_tu_count >= MAX_VVC_LUMA_TUS {
             break;
@@ -59,7 +66,8 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
             node,
             frame.format.bit_depth,
         );
-        let residuals = residual_luma_tu_at(
+        residual_luma_tu_at_into(
+            &mut luma_residuals,
             frame,
             usize::from(node.x),
             usize::from(node.y),
@@ -68,7 +76,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
             &predicted_luma,
         );
         let quantized = quantize_vvc_luma_residual_greedy(
-            &residuals,
+            &luma_residuals,
             node.width,
             node.height,
             frame.format.bit_depth,
@@ -78,6 +86,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
             quantized.reconstructed_dc_coeff < 0 && quantized.abs_remainder != 0;
         luma_tu_dc_levels[luma_tu_count] = quantized.reconstructed_dc_coeff;
         luma_tu_ac_levels[luma_tu_count] = quantized.reconstructed_ac_coeffs;
+        luma_tu_has_ac[luma_tu_count] = quantized.has_ac;
         inverse_transform_vvc_luma_quantized_block_into(
             &mut reconstructed_residual,
             &mut transform_scratch,
@@ -98,10 +107,7 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
         luma_tu_count += 1;
     }
 
-    for node in vvc_chroma_transform_nodes(chroma_partition_shape(
-        frame.geometry,
-        frame.format.chroma_sampling,
-    )) {
+    for node in vvc_chroma_transform_nodes(partition_shape) {
         if chroma_tu_count >= MAX_VVC_CHROMA_TUS {
             break;
         }
@@ -129,7 +135,8 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
             frame.format.chroma_sampling,
             frame.format.bit_depth,
         );
-        let cb_residuals = residual_chroma_tu_at(
+        residual_chroma_tu_at_into(
+            &mut cb_residuals,
             &frame.cb,
             frame.geometry,
             frame.format,
@@ -139,7 +146,8 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
             chroma_height,
             &predicted_cb,
         );
-        let cr_residuals = residual_chroma_tu_at(
+        residual_chroma_tu_at_into(
+            &mut cr_residuals,
             &frame.cr,
             frame.geometry,
             frame.format,
@@ -165,6 +173,8 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
         cr_tu_dc_levels[chroma_tu_count] = cr_quantized.reconstructed_dc_coeff;
         cb_tu_ac_levels[chroma_tu_count] = cb_quantized.reconstructed_ac_coeffs;
         cr_tu_ac_levels[chroma_tu_count] = cr_quantized.reconstructed_ac_coeffs;
+        cb_tu_has_ac[chroma_tu_count] = cb_quantized.has_ac;
+        cr_tu_has_ac[chroma_tu_count] = cr_quantized.has_ac;
         inverse_transform_vvc_chroma_quantized_block_into(
             &mut reconstructed_residual,
             &mut transform_scratch,
@@ -229,12 +239,15 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
             luma_tu_negative,
             luma_tu_dc_levels,
             luma_tu_ac_levels,
+            luma_tu_has_ac,
             luma_tu_count,
             chroma_tu_count,
             cb_tu_dc_levels,
             cr_tu_dc_levels,
             cb_tu_ac_levels,
             cr_tu_ac_levels,
+            cb_tu_has_ac,
+            cr_tu_has_ac,
             cb_rem,
             cr_rem,
         },
@@ -242,178 +255,12 @@ pub(in crate::vvc) fn quantize_vvc_frame_with_reconstruction(
     }
 }
 
-pub(in crate::vvc) fn quantize_vvc_frame_lossless_residual(
-    frame: &VvcSampledFrame,
-) -> VvcQuantizedColor {
-    debug_assert!(matches!(
-        frame.format.chroma_sampling,
-        crate::picture::ChromaSampling::Cs420 | crate::picture::ChromaSampling::Cs422
-    ));
-    let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
-    let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
-    let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
-    let mut luma_tu_ac_levels = [[0; super::VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS];
-    let mut cb_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
-    let mut cr_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
-    let mut cb_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
-    let mut cr_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
-    let neutral = vvc_neutral_sample(frame.format.bit_depth);
-    let mut reconstructed_luma = vec![neutral; frame.geometry.luma_samples()];
-    let mut reconstructed_cb = vec![neutral; frame.chroma_len];
-    let mut reconstructed_cr = vec![neutral; frame.chroma_len];
-    let mut prediction_scratch = VvcDcPredictionScratch::default();
-    let mut predicted_luma = Vec::new();
-    let mut predicted_cb = Vec::new();
-    let mut predicted_cr = Vec::new();
-
-    let mut luma_tu_count = 0;
-    for node in vvc_luma_tu_nodes_with_leaf_size(
-        frame.geometry,
-        frame.format.chroma_sampling,
-        VVC_LOSSLESS_LUMA_LEAF_SIZE,
-    ) {
-        if luma_tu_count >= MAX_VVC_LUMA_TUS {
-            break;
-        }
-        predict_vvc_luma_dc_block_into(
-            &mut predicted_luma,
-            &mut prediction_scratch,
-            &reconstructed_luma,
-            frame.geometry,
-            node,
-            frame.format.bit_depth,
-        );
-        let residuals = residual_luma_tu_at(
-            frame,
-            usize::from(node.x),
-            usize::from(node.y),
-            usize::from(node.width),
-            usize::from(node.height),
-            &predicted_luma,
-        );
-        let dc_level = residuals.first().copied().unwrap_or(0);
-        luma_tu_remainders[luma_tu_count] = dc_level.unsigned_abs().min(u8::MAX as u16) as u8;
-        luma_tu_negative[luma_tu_count] = dc_level < 0;
-        luma_tu_dc_levels[luma_tu_count] = dc_level;
-        luma_tu_ac_levels[luma_tu_count] =
-            lossless_luma_ac_levels(&residuals, usize::from(node.width));
-        fill_visible_luma_node(
-            &mut reconstructed_luma,
-            frame.geometry,
-            node,
-            &predicted_luma,
-            &residuals,
-            frame.format.bit_depth,
-        );
-        luma_tu_count += 1;
-    }
-
-    let mut chroma_tu_count = 0;
-    for node in vvc_chroma_transform_nodes(chroma_partition_shape(
-        frame.geometry,
-        frame.format.chroma_sampling,
-    )) {
-        if chroma_tu_count >= MAX_VVC_CHROMA_TUS {
-            break;
-        }
-        let subsample_x = chroma_subsample_x(frame.format.chroma_sampling);
-        let subsample_y = chroma_subsample_y(frame.format.chroma_sampling);
-        let chroma_x = usize::from(node.x) / subsample_x;
-        let chroma_y = usize::from(node.y) / subsample_y;
-        let chroma_width = usize::from(node.width) / subsample_x;
-        let chroma_height = usize::from(node.height) / subsample_y;
-        predict_vvc_chroma_dc_block_into(
-            &mut predicted_cb,
-            &mut prediction_scratch,
-            &reconstructed_cb,
-            frame.geometry,
-            node,
-            frame.format.chroma_sampling,
-            frame.format.bit_depth,
-        );
-        predict_vvc_chroma_dc_block_into(
-            &mut predicted_cr,
-            &mut prediction_scratch,
-            &reconstructed_cr,
-            frame.geometry,
-            node,
-            frame.format.chroma_sampling,
-            frame.format.bit_depth,
-        );
-        let cb_residuals = residual_chroma_tu_at(
-            &frame.cb,
-            frame.geometry,
-            frame.format,
-            chroma_x,
-            chroma_y,
-            chroma_width,
-            chroma_height,
-            &predicted_cb,
-        );
-        let cr_residuals = residual_chroma_tu_at(
-            &frame.cr,
-            frame.geometry,
-            frame.format,
-            chroma_x,
-            chroma_y,
-            chroma_width,
-            chroma_height,
-            &predicted_cr,
-        );
-        cb_tu_dc_levels[chroma_tu_count] = cb_residuals.first().copied().unwrap_or(0);
-        cr_tu_dc_levels[chroma_tu_count] = cr_residuals.first().copied().unwrap_or(0);
-        cb_tu_ac_levels[chroma_tu_count] = lossless_chroma_ac_levels(&cb_residuals, chroma_width);
-        cr_tu_ac_levels[chroma_tu_count] = lossless_chroma_ac_levels(&cr_residuals, chroma_width);
-        fill_visible_chroma_node(
-            &mut reconstructed_cb,
-            frame.geometry,
-            node,
-            frame.format.chroma_sampling,
-            &predicted_cb,
-            &cb_residuals,
-            frame.format.bit_depth,
-        );
-        fill_visible_chroma_node(
-            &mut reconstructed_cr,
-            frame.geometry,
-            node,
-            frame.format.chroma_sampling,
-            &predicted_cr,
-            &cr_residuals,
-            frame.format.bit_depth,
-        );
-        chroma_tu_count += 1;
-    }
-
-    let color = frame.sampled_color();
-    let cb_rem =
-        quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.u, frame.format.bit_depth));
-    let cr_rem =
-        quantize_vvc_chroma_sample(vvc_downshift_sample_to_u8(color.v, frame.format.bit_depth));
-    VvcQuantizedColor {
-        y: vvc_downshift_sample_to_u8(color.y, frame.format.bit_depth),
-        u: vvc_downshift_sample_to_u8(color.u, frame.format.bit_depth),
-        v: vvc_downshift_sample_to_u8(color.v, frame.format.bit_depth),
-        luma_tu_remainders,
-        luma_tu_negative,
-        luma_tu_dc_levels,
-        luma_tu_ac_levels,
-        luma_tu_count,
-        chroma_tu_count,
-        cb_tu_dc_levels,
-        cr_tu_dc_levels,
-        cb_tu_ac_levels,
-        cr_tu_ac_levels,
-        cb_rem,
-        cr_rem,
-    }
-}
-
-fn lossless_luma_ac_levels(
+pub(in crate::vvc) fn lossless_luma_ac_levels_and_flag(
     residuals: &[i16],
     width: usize,
-) -> [i16; super::VVC_LUMA_AC_COEFFS_PER_TU] {
+) -> ([i16; super::VVC_LUMA_AC_COEFFS_PER_TU], bool) {
     let mut levels = [0; super::VVC_LUMA_AC_COEFFS_PER_TU];
+    let mut has_ac = false;
     for y in 0..4 {
         for x in 0..4 {
             if x == 0 && y == 0 {
@@ -421,25 +268,30 @@ fn lossless_luma_ac_levels(
             }
             let raster_idx = y * width + x;
             if raster_idx < residuals.len() {
-                levels[y * 4 + x - 1] = residuals[raster_idx];
+                let level = residuals[raster_idx];
+                levels[y * 4 + x - 1] = level;
+                has_ac |= level != 0;
             }
         }
     }
-    levels
+    (levels, has_ac)
 }
 
-fn lossless_chroma_ac_levels(
+pub(in crate::vvc) fn lossless_chroma_ac_levels_and_flag(
     residuals: &[i16],
     width: usize,
-) -> [i16; VVC_CHROMA_AC_COEFFS_PER_TU] {
+) -> ([i16; VVC_CHROMA_AC_COEFFS_PER_TU], bool) {
     let mut levels = [0; VVC_CHROMA_AC_COEFFS_PER_TU];
+    let mut has_ac = false;
     for (slot, (x, y)) in VVC_CHROMA_AC_POSITIONS_4X4.iter().copied().enumerate() {
         let raster_idx = y * width + x;
         if raster_idx < residuals.len() {
-            levels[slot] = residuals[raster_idx];
+            let level = residuals[raster_idx];
+            levels[slot] = level;
+            has_ac |= level != 0;
         }
     }
-    levels
+    (levels, has_ac)
 }
 
 fn chroma_partition_shape(
@@ -473,19 +325,22 @@ fn vvc_luma_tu_nodes_with_leaf_size(
     )
 }
 
-fn residual_luma_tu_at(
+pub(in crate::vvc) fn residual_luma_tu_at_into(
+    residuals: &mut Vec<i16>,
     frame: &VvcSampledFrame,
     origin_x: usize,
     origin_y: usize,
     width: usize,
     height: usize,
     predicted: &[VvcSample],
-) -> Vec<i16> {
+) {
     debug_assert_eq!(predicted.len(), width * height);
-    let mut residuals: Vec<i16> = predicted
-        .iter()
-        .map(|predicted| vvc_sample_delta_i16(0, *predicted))
-        .collect();
+    residuals.clear();
+    residuals.extend(
+        predicted
+            .iter()
+            .map(|predicted| vvc_sample_delta_i16(0, *predicted)),
+    );
     let copy_width = width.min(frame.geometry.width.saturating_sub(origin_x));
     let copy_height = height.min(frame.geometry.height.saturating_sub(origin_y));
     for y in 0..copy_height {
@@ -499,10 +354,10 @@ fn residual_luma_tu_at(
             *residual = vvc_sample_delta_i16(*sample, *predicted);
         }
     }
-    residuals
 }
 
-fn residual_chroma_tu_at(
+pub(in crate::vvc) fn residual_chroma_tu_at_into(
+    residuals: &mut Vec<i16>,
     samples: &[VvcSample],
     geometry: VvcVideoGeometry,
     format: VvcPictureFormat,
@@ -511,15 +366,17 @@ fn residual_chroma_tu_at(
     width: usize,
     height: usize,
     predicted: &[VvcSample],
-) -> Vec<i16> {
+) {
     debug_assert_eq!(predicted.len(), width * height);
     let chroma_width = geometry.width / chroma_subsample_x(format.chroma_sampling);
     let chroma_height = geometry.height / chroma_subsample_y(format.chroma_sampling);
     let neutral = vvc_neutral_sample(format.bit_depth);
-    let mut residuals: Vec<i16> = predicted
-        .iter()
-        .map(|predicted| vvc_sample_delta_i16(neutral, *predicted))
-        .collect();
+    residuals.clear();
+    residuals.extend(
+        predicted
+            .iter()
+            .map(|predicted| vvc_sample_delta_i16(neutral, *predicted)),
+    );
     let copy_width = width.min(chroma_width.saturating_sub(origin_x));
     let copy_height = height.min(chroma_height.saturating_sub(origin_y));
     for y in 0..copy_height {
@@ -533,7 +390,6 @@ fn residual_chroma_tu_at(
             *residual = vvc_sample_delta_i16(*sample, *predicted);
         }
     }
-    residuals
 }
 
 fn vvc_sample_delta_i16(sample: VvcSample, predicted: VvcSample) -> i16 {

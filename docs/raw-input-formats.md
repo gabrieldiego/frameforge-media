@@ -55,6 +55,7 @@ Supported planar input families:
 - `yuv422p8` through `yuv422p16le`
 - `yuv444p8` through `yuv444p16le`
 - `gray8` through `gray16le`
+- `gbrp8` for 8-bit planar RGB-family input in green, blue, red plane order
 
 For bit depths above 8, raw samples are currently little-endian 16-bit words
 with the meaningful sample value stored in the low bits. Big-endian sample
@@ -67,12 +68,18 @@ Short aliases remain accepted:
 - Hardware-style aliases such as `i010`, `i212`, and `i416` map to the matching
   planar YUV layout and numeric bit depth.
 
-`rgb24` is accepted as packed 8-bit RGB for AV2 streams. The encoder re-packs
-RGB into codec-internal planar GBR identity planes and signals sRGB identity
-color metadata in the AV2 bitstream; it does not convert RGB to YUV. The
-internal reconstruction written with `--recon` is packed back to `rgb24` so
-validation compares the same byte layout as the source. VVC does not yet accept
-RGB input.
+`gbrp8` is accepted as 8-bit planar RGB-family input for AV2 and VVC plumbing:
+the byte layout is one full-resolution green plane, then blue, then red. AV2
+signals sRGB identity color metadata for `gbrp8` and keeps the internal
+reconstruction in the same planar layout. VVC currently accepts the same planar
+bytes through its 4:4:4 component interface; VVC RGB bitstream color signaling
+is still a follow-up.
+
+`rgb24` remains accepted as packed 8-bit RGB for AV2 streams. The encoder
+re-packs RGB into codec-internal planar GBR identity planes and signals sRGB
+identity color metadata in the AV2 bitstream; it does not convert RGB to YUV.
+The internal reconstruction written with `--recon` is packed back to `rgb24` so
+validation compares the same byte layout as the source. Use `gbrp8` for VVC.
 
 ## Rust API
 
@@ -124,9 +131,11 @@ Current behavior:
   emit exact residuals when that is cheaper. Higher AV2 depths are scaled to
   the matching 8-bit format before non-lossless encoding until a
   reference-valid 12-bit profile path is added.
-- AV2 accepts `rgb24` by coding the three RGB components as 8-bit 4:4:4
-  identity planes, signaling sRGB identity color metadata, and writing packed
-  `rgb24` reconstruction bytes. `--set lossless` keeps the RGB byte stream
+- AV2 accepts `gbrp8` by coding the three RGB components as 8-bit 4:4:4
+  identity planes, signaling sRGB identity color metadata, and writing planar
+  `gbrp8` reconstruction bytes. AV2 also accepts legacy packed `rgb24` by
+  re-packing it to the same identity planes before encoding and re-packing the
+  reconstruction back to `rgb24`. `--set lossless` keeps the RGB byte stream
   exact; `--qp <1..255>` uses the same identity-plane interpretation with the
   experimental lossy residual path.
 - VVC accepts `yuv420p8` through `yuv420p12le` natively for the current 4:2:0
@@ -138,6 +147,8 @@ Current behavior:
   upconverts but can quantize arbitrary high-depth escape samples.
 - VVC accepts `yuv422p8` through `yuv422p12le` natively for both stream-exact
   lossless 4:2:2 encoding and the current non-lossless residual path.
+- VVC accepts `gbrp8` through the same 8-bit 4:4:4 component pipeline used by
+  planar 4:4:4 input. Bitstream-level RGB color signaling is not wired yet.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 
@@ -147,8 +158,9 @@ emitted stream reconstructs exactly through the reference decoder. Lossless
 mode never uses the 8-bit fallback converter; unsupported exact source formats
 fail before encoding. The current lossless stream paths are AV2 `yuv420p8` and
 `yuv420p10le`, AV2 `yuv422p8` and `yuv422p10le`, AV2 `yuv444p8` and
-`yuv444p10le`, AV2 `rgb24`, VVC `yuv420p8` through `yuv420p12le`, VVC
-`yuv422p8` through `yuv422p12le`, and VVC `yuv444p8` through `yuv444p12le`.
+`yuv444p10le`, AV2 `gbrp8` and `rgb24`, VVC `yuv420p8` through
+`yuv420p12le`, VVC `yuv422p8` through `yuv422p12le`, VVC `yuv444p8` through
+`yuv444p12le`, and VVC `gbrp8`.
 
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without

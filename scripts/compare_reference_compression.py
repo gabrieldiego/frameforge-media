@@ -740,7 +740,7 @@ def ffmpeg_libaom_reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
-    bit_depth = 8 if vector.fmt == "rgb24" else av1_pixel_format(vector.fmt)[0]
+    bit_depth = 8 if vector.fmt in {"gbrp8", "rgb24"} else av1_pixel_format(vector.fmt)[0]
     if bit_depth not in {8, 10, 12}:
         raise SystemExit(f"unsupported ffmpeg/libaom reference encode pixel format: {vector.fmt}")
 
@@ -759,14 +759,9 @@ def ffmpeg_libaom_reference_encode_command(
         ]
     )
     if vector.fmt == "rgb24":
-        command.extend(
-            [
-                "-vf",
-                "format=gbrp",
-                "-color_range",
-                "pc",
-            ]
-        )
+        command.extend(["-vf", "format=gbrp"])
+    if vector.fmt in {"gbrp8", "rgb24"}:
+        command.extend(["-color_range", "pc"])
     command.extend(
         [
             "-c:v",
@@ -785,12 +780,13 @@ def ffmpeg_libaom_input_args(
     vector_path: Path,
     output: Path,
 ) -> list[str]:
-    if vector.fmt == "rgb24" and vector_path.suffix.lower() != ".y4m":
+    if vector.fmt in {"gbrp8", "rgb24"} and vector_path.suffix.lower() != ".y4m":
+        pix_fmt = "gbrp" if vector.fmt == "gbrp8" else "rgb24"
         return [
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "rgb24",
+            pix_fmt,
             "-video_size",
             f"{vector.width}x{vector.height}",
             "-framerate",
@@ -976,6 +972,8 @@ def y4m_chroma_tag(fmt: str) -> str:
 
 
 def av1_pixel_format(fmt: str) -> tuple[int, str]:
+    if fmt == "gbrp8":
+        return 8, "444"
     bit_depth = generate_test_vectors.yuv420_bit_depth(fmt)
     if bit_depth is not None:
         return bit_depth, "420"
@@ -1004,6 +1002,10 @@ def av2_reference_encode_command(
         profile_args = ["--profile=3"]
     if bit_depth is None:
         bit_depth = generate_test_vectors.yuv444_bit_depth(vector.fmt)
+        chroma_flag = "--i444"
+        profile_args = ["--profile=4"]
+    if bit_depth is None and vector.fmt == "gbrp8":
+        bit_depth = 8
         chroma_flag = "--i444"
         profile_args = ["--profile=4"]
     if bit_depth is None or bit_depth not in {8, 10}:
@@ -1114,6 +1116,8 @@ def vvc_reference_encode_command(
 
     if bit_depth is None:
         bit_depth = generate_test_vectors.yuv444_bit_depth(vector.fmt)
+        if bit_depth is None and vector.fmt == "gbrp8":
+            bit_depth = 8
         if bit_depth is None:
             raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
         chroma_format = "444"

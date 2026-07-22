@@ -24,12 +24,12 @@ as `av2|vvc` to enable a row only for selected codec validation and compression
 comparison runs, or `none` to keep the vector generateable while no codec path
 currently claims support for it.
 Local manifests may use `pattern=source_file` with a `path` column. Raw YUV
-sources require explicit width, height, format, and frame count. Y4M source
+and raw RGB-family sources require explicit width, height, format, and frame count. Y4M source
 rows may leave width, height, format, and fps empty; the generator reads those
 from the Y4M header and strips the Y4M container markers when writing raw
 generated fixtures. Source-file generation supports planar 4:2:0, 4:2:2, and
 4:4:4 rows with the same 8-through-16-bit format spelling accepted by the
-fixture generator.
+fixture generator, plus `gbrp8` planar RGB rows.
 
 Manifest `format` values follow the CLI raw input contract. Planar YUV and gray
 formats use checked numeric bit depths from 8 through 16, such as
@@ -41,6 +41,7 @@ Supported generated formats:
 - `yuv420p8` through `yuv420p16le`
 - `yuv422p8` through `yuv422p16le`
 - `yuv444p8` through `yuv444p16le`
+- `gbrp8` source-file clips
 
 Supported patterns:
 

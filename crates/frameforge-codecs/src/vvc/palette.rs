@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::picture::{ChromaSampling, PixelFormat, SampleBitDepth};
 
 use super::{
@@ -292,6 +294,12 @@ fn vvc_transform_skip_residual_444_left_8x8(
                 return None;
             }
             if in_residual_subset {
+                if !vvc_palette_transform_skip_coeff_is_exact(y_diff, frame.format.bit_depth)
+                    || !vvc_palette_transform_skip_coeff_is_exact(cb_diff, frame.format.bit_depth)
+                    || !vvc_palette_transform_skip_coeff_is_exact(cr_diff, frame.format.bit_depth)
+                {
+                    return None;
+                }
                 let local = y_off * 8 + x_off;
                 y_coeffs[local] = y_diff;
                 cb_coeffs[local] = cb_diff;
@@ -370,12 +378,27 @@ fn vvc_bdpcm_horizontal_444_8x8(
         return None;
     }
 
-    let (y_coeffs, cbf_y) =
-        vvc_bdpcm_horizontal_coefficients(&frame.luma, frame.geometry.width, origin_x, origin_y)?;
-    let (cb_coeffs, cbf_cb) =
-        vvc_bdpcm_horizontal_coefficients(&frame.cb, frame.geometry.width, origin_x, origin_y)?;
-    let (cr_coeffs, cbf_cr) =
-        vvc_bdpcm_horizontal_coefficients(&frame.cr, frame.geometry.width, origin_x, origin_y)?;
+    let (y_coeffs, cbf_y) = vvc_bdpcm_horizontal_coefficients(
+        &frame.luma,
+        frame.geometry.width,
+        origin_x,
+        origin_y,
+        frame.format.bit_depth,
+    )?;
+    let (cb_coeffs, cbf_cb) = vvc_bdpcm_horizontal_coefficients(
+        &frame.cb,
+        frame.geometry.width,
+        origin_x,
+        origin_y,
+        frame.format.bit_depth,
+    )?;
+    let (cr_coeffs, cbf_cr) = vvc_bdpcm_horizontal_coefficients(
+        &frame.cr,
+        frame.geometry.width,
+        origin_x,
+        origin_y,
+        frame.format.bit_depth,
+    )?;
 
     if !cbf_y && !cbf_cb && !cbf_cr {
         return None;
@@ -396,6 +419,7 @@ fn vvc_bdpcm_horizontal_coefficients(
     stride: usize,
     origin_x: usize,
     origin_y: usize,
+    bit_depth: SampleBitDepth,
 ) -> Option<(Vec<i16>, bool)> {
     let mut coeffs = vec![0i16; 64];
     let mut cbf = false;
@@ -417,8 +441,11 @@ fn vvc_bdpcm_horizontal_coefficients(
                 return None;
             }
             if in_residual_subset {
-                coeffs[y_off * 8 + x_off] =
-                    coeff.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                let coeff = coeff.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                if !vvc_palette_transform_skip_coeff_is_exact(coeff, bit_depth) {
+                    return None;
+                }
+                coeffs[y_off * 8 + x_off] = coeff;
                 cbf |= coeff != 0;
             }
             prev_residual = residual;
@@ -466,6 +493,50 @@ fn vvc_palette_escape_level(sample: VvcSample, bit_depth: SampleBitDepth) -> Vvc
 fn vvc_palette_reconstruct_escape_level(level: VvcSample, bit_depth: SampleBitDepth) -> VvcSample {
     let shift = u32::from(bit_depth.bits().saturating_sub(8));
     (u32::from(level) << shift).min(u32::from(bit_depth.max_sample())) as VvcSample
+}
+
+fn vvc_palette_transform_skip_coeff_is_exact(coeff: i16, bit_depth: SampleBitDepth) -> bool {
+    vvc_palette_transform_skip_coded_coeff(coeff, bit_depth).is_some()
+}
+
+fn vvc_palette_transform_skip_coded_coeff(coeff: i16, bit_depth: SampleBitDepth) -> Option<i16> {
+    let shift = bit_depth.bits().saturating_sub(8);
+    if shift == 0 {
+        return Some(coeff);
+    }
+    let scale = 1i32 << shift;
+    let coeff = i32::from(coeff);
+    if coeff % scale != 0 {
+        return None;
+    }
+    Some((coeff / scale) as i16)
+}
+
+fn vvc_palette_transform_skip_coded_coefficients<'a>(
+    coeffs: &'a [i16],
+    bit_depth: SampleBitDepth,
+) -> Cow<'a, [i16]> {
+    if bit_depth.bits() <= 8 {
+        return Cow::Borrowed(coeffs);
+    }
+    Cow::Owned(
+        coeffs
+            .iter()
+            .copied()
+            .map(|coeff| {
+                vvc_palette_transform_skip_coded_coeff(coeff, bit_depth)
+                    .expect("selected high-depth transform-skip residual must be exact")
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn vvc_palette_transform_skip_coded_coeff_for_test(
+    coeff: i16,
+    bit_depth: SampleBitDepth,
+) -> Option<i16> {
+    vvc_palette_transform_skip_coded_coeff(coeff, bit_depth)
 }
 
 fn add_i16_to_sample(sample: VvcSample, delta: i16, bit_depth: SampleBitDepth) -> VvcSample {
@@ -793,6 +864,7 @@ fn append_vvc_palette_444_8x8_cu_with_events(
             cabac,
             ctx,
             VvcSliceSyntaxConfig::palette_444(),
+            frame.format.bit_depth,
             &residual,
         );
         ibc_search.record_ibc_8x8(frame, residual.decision);
@@ -805,7 +877,13 @@ fn append_vvc_palette_444_8x8_cu_with_events(
             false,
         );
         ctx.encode(cabac, VvcCabacContext::PredModePltFlag, false);
-        append_vvc_bdpcm_444_8x8_cu(cabac, ctx, VvcSliceSyntaxConfig::palette_444(), &bdpcm);
+        append_vvc_bdpcm_444_8x8_cu(
+            cabac,
+            ctx,
+            VvcSliceSyntaxConfig::palette_444(),
+            frame.format.bit_depth,
+            &bdpcm,
+        );
         ibc_search.record_palette_8x8(frame, origin_x, origin_y);
         return false;
     }
@@ -872,6 +950,7 @@ fn append_vvc_bdpcm_444_8x8_cu(
     cabac: &mut VvcCabacEncoder,
     ctx: &mut VvcCabacContexts,
     slice_config: VvcSliceSyntaxConfig,
+    bit_depth: SampleBitDepth,
     residual: &VvcBdpcm444Cu,
 ) {
     // H.266 7.3.11.4/7.4.12.5: an intra BDPCM CU first signals
@@ -890,11 +969,14 @@ fn append_vvc_bdpcm_444_8x8_cu(
     ctx.encode(cabac, VvcCabacContext::QtCbfY(1), residual.cbf_y);
 
     let mut encoder = VvcResidualCabacEncoder::new(ctx, slice_config.residual_options());
+    let y_coeffs = vvc_palette_transform_skip_coded_coefficients(&residual.y_coeffs, bit_depth);
+    let cb_coeffs = vvc_palette_transform_skip_coded_coefficients(&residual.cb_coeffs, bit_depth);
+    let cr_coeffs = vvc_palette_transform_skip_coded_coefficients(&residual.cr_coeffs, bit_depth);
     if residual.cbf_y {
         VvcResidualCabacSymbolStream::emit_luma_bdpcm_transform_skip_coefficients(
             3,
             3,
-            &residual.y_coeffs,
+            &y_coeffs,
             &mut encoder,
             cabac,
         )
@@ -904,7 +986,7 @@ fn append_vvc_bdpcm_444_8x8_cu(
             VvcResidualComponent::ChromaCb,
             3,
             3,
-            &residual.cb_coeffs,
+            &cb_coeffs,
             &mut encoder,
             cabac,
         )
@@ -914,7 +996,7 @@ fn append_vvc_bdpcm_444_8x8_cu(
             VvcResidualComponent::ChromaCr,
             3,
             3,
-            &residual.cr_coeffs,
+            &cr_coeffs,
             &mut encoder,
             cabac,
         )
@@ -925,6 +1007,7 @@ fn append_vvc_ibc_444_8x8_cu_residual(
     cabac: &mut VvcCabacEncoder,
     ctx: &mut VvcCabacContexts,
     slice_config: VvcSliceSyntaxConfig,
+    bit_depth: SampleBitDepth,
     residual: &VvcTransformSkipResidual444Cu,
 ) {
     append_vvc_ibc_444_8x8_prediction(cabac, ctx, residual.decision);
@@ -947,11 +1030,14 @@ fn append_vvc_ibc_444_8x8_cu_residual(
     }
 
     let mut encoder = VvcResidualCabacEncoder::new(ctx, slice_config.residual_options());
+    let y_coeffs = vvc_palette_transform_skip_coded_coefficients(&residual.y_coeffs, bit_depth);
+    let cb_coeffs = vvc_palette_transform_skip_coded_coefficients(&residual.cb_coeffs, bit_depth);
+    let cr_coeffs = vvc_palette_transform_skip_coded_coefficients(&residual.cr_coeffs, bit_depth);
     if residual.cbf_y {
         VvcResidualCabacSymbolStream::emit_luma_transform_skip_coefficients(
             3,
             3,
-            &residual.y_coeffs,
+            &y_coeffs,
             &mut encoder,
             cabac,
         );
@@ -961,7 +1047,7 @@ fn append_vvc_ibc_444_8x8_cu_residual(
             VvcResidualComponent::ChromaCb,
             3,
             3,
-            &residual.cb_coeffs,
+            &cb_coeffs,
             &mut encoder,
             cabac,
         )
@@ -971,7 +1057,7 @@ fn append_vvc_ibc_444_8x8_cu_residual(
             VvcResidualComponent::ChromaCr,
             3,
             3,
-            &residual.cr_coeffs,
+            &cr_coeffs,
             &mut encoder,
             cabac,
         )

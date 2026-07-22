@@ -348,16 +348,6 @@ impl VvcResidualCtxConfig {
         1usize << self.log2_zo_tb_height
     }
 
-    fn coefficient_count(self) -> usize {
-        self.tb_width() * self.tb_height()
-    }
-
-    fn coefficient_index(self, x: u8, y: u8) -> usize {
-        assert!((x as usize) < self.tb_width());
-        assert!((y as usize) < self.tb_height());
-        y as usize * self.tb_width() + x as usize
-    }
-
     fn log2_sb_width(self) -> u8 {
         let mut log2_sb_width = if self.log2_zo_tb_width.min(self.log2_zo_tb_height) < 2 {
             1
@@ -405,12 +395,15 @@ impl VvcResidualCtxConfig {
     }
 }
 
+const VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS: usize = 16;
+const VVC_MAX_RESIDUAL_SUBBLOCKS: usize = 256;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcResidualPass1State {
     pub(in crate::vvc) config: VvcResidualCtxConfig,
-    pub(in crate::vvc) sig_coeff: Vec<bool>,
-    pub(in crate::vvc) abs_level_pass1: Vec<u8>,
-    pub(in crate::vvc) sb_coded: Vec<bool>,
+    pub(in crate::vvc) sig_coeff: [bool; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
+    pub(in crate::vvc) abs_level_pass1: [u8; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
+    pub(in crate::vvc) sb_coded: [bool; VVC_MAX_RESIDUAL_SUBBLOCKS],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,19 +599,112 @@ struct VvcResidualCoefficientPlan {
     #[cfg(test)]
     config: VvcResidualCtxConfig,
     pass1_state: VvcResidualPass1State,
-    scan: [VvcScanPosition; 16],
+    scan: &'static [VvcScanPosition; 16],
     last_scan_pos: usize,
+}
+
+trait VvcCoeffAccessor {
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+    fn level_at(&self, x: usize, y: usize) -> i16;
+    fn any_nonzero(&self) -> bool;
+}
+
+struct VvcRasterCoeffAccessor<'a> {
+    coeff_levels: &'a [i16],
     width: usize,
     height: usize,
 }
 
+impl<'a> VvcRasterCoeffAccessor<'a> {
+    fn new(coeff_levels: &'a [i16], width: usize, height: usize) -> Self {
+        assert_eq!(coeff_levels.len(), width * height);
+        Self {
+            coeff_levels,
+            width,
+            height,
+        }
+    }
+}
+
+impl VvcCoeffAccessor for VvcRasterCoeffAccessor<'_> {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn level_at(&self, x: usize, y: usize) -> i16 {
+        self.coeff_levels[y * self.width + x]
+    }
+
+    fn any_nonzero(&self) -> bool {
+        self.coeff_levels.iter().any(|level| *level != 0)
+    }
+}
+
+struct VvcFirst4x4CoeffAccessor<'a> {
+    width: usize,
+    height: usize,
+    dc_level: i16,
+    ac_levels: &'a [i16; 15],
+    any_nonzero: bool,
+}
+
+impl<'a> VvcFirst4x4CoeffAccessor<'a> {
+    fn new(
+        width: usize,
+        height: usize,
+        dc_level: i16,
+        ac_levels: &'a [i16; 15],
+        has_ac: bool,
+    ) -> Self {
+        debug_assert_eq!(has_ac, ac_levels.iter().any(|level| *level != 0));
+        Self {
+            width,
+            height,
+            dc_level,
+            ac_levels,
+            any_nonzero: dc_level != 0 || has_ac,
+        }
+    }
+}
+
+impl VvcCoeffAccessor for VvcFirst4x4CoeffAccessor<'_> {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn level_at(&self, x: usize, y: usize) -> i16 {
+        if x >= 4 || y >= 4 || x >= self.width || y >= self.height {
+            return 0;
+        }
+        if x == 0 && y == 0 {
+            self.dc_level
+        } else {
+            self.ac_levels[y * 4 + x - 1]
+        }
+    }
+
+    fn any_nonzero(&self) -> bool {
+        self.any_nonzero
+    }
+}
+
 impl VvcResidualPass1State {
     pub(in crate::vvc) fn new(config: VvcResidualCtxConfig) -> Self {
+        debug_assert!(config.subblock_count() <= VVC_MAX_RESIDUAL_SUBBLOCKS);
         Self {
             config,
-            sig_coeff: vec![false; config.coefficient_count()],
-            abs_level_pass1: vec![0; config.coefficient_count()],
-            sb_coded: vec![false; config.subblock_count()],
+            sig_coeff: [false; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
+            abs_level_pass1: [0; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
+            sb_coded: [false; VVC_MAX_RESIDUAL_SUBBLOCKS],
         }
     }
 
@@ -629,7 +715,8 @@ impl VvcResidualPass1State {
         abs_level: u16,
         _negative: bool,
     ) {
-        let index = self.config.coefficient_index(x, y);
+        let index = first4x4_coeff_index(x, y)
+            .expect("current VVC residual subset only tracks first 4x4 pass-1 coefficients");
         self.sig_coeff[index] = abs_level != 0;
         // VTM CoeffCodingContext::sigCtxIdAbs uses
         // min(4 + (absLevel & 1), absLevel) for the local template sum and
@@ -641,7 +728,10 @@ impl VvcResidualPass1State {
 
     pub(in crate::vvc) fn set_sb_coded(&mut self, x_s: u8, y_s: u8, coded: bool) {
         let index = self.config.subblock_index(x_s, y_s);
-        self.sb_coded[index] = coded;
+        debug_assert!(index < VVC_MAX_RESIDUAL_SUBBLOCKS);
+        if index < VVC_MAX_RESIDUAL_SUBBLOCKS {
+            self.sb_coded[index] = coded;
+        }
     }
 
     pub(in crate::vvc) fn sb_coded_flag_ctx_inc(&self, x_s: u8, y_s: u8) -> u8 {
@@ -808,15 +898,16 @@ impl VvcResidualPass1State {
     }
 
     pub(in crate::vvc) fn sig_coeff_at(&self, x: u8, y: u8) -> bool {
-        self.sig_coeff[self.config.coefficient_index(x, y)]
+        first4x4_coeff_index(x, y).is_some_and(|index| self.sig_coeff[index])
     }
 
     pub(in crate::vvc) fn abs_level_pass1_at(&self, x: u8, y: u8) -> u8 {
-        self.abs_level_pass1[self.config.coefficient_index(x, y)]
+        first4x4_coeff_index(x, y).map_or(0, |index| self.abs_level_pass1[index])
     }
 
     pub(in crate::vvc) fn sb_coded_at(&self, x_s: u8, y_s: u8) -> bool {
-        self.sb_coded[self.config.subblock_index(x_s, y_s)]
+        let index = self.config.subblock_index(x_s, y_s);
+        index < VVC_MAX_RESIDUAL_SUBBLOCKS && self.sb_coded[index]
     }
 }
 
@@ -925,23 +1016,6 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
-    pub(in crate::vvc) fn emit_luma_coefficients(
-        log2_tb_width: u8,
-        log2_tb_height: u8,
-        coeff_levels: &[i16],
-        encoder: &mut VvcResidualCabacEncoder<'_>,
-        cabac: &mut VvcCabacEncoder,
-    ) {
-        Self::emit_coefficients(
-            VvcResidualComponent::Luma,
-            log2_tb_width,
-            log2_tb_height,
-            coeff_levels,
-            encoder,
-            cabac,
-        );
-    }
-
     pub(in crate::vvc) fn emit_luma_transform_skip_coefficients(
         log2_tb_width: u8,
         log2_tb_height: u8,
@@ -955,6 +1029,52 @@ impl VvcResidualCabacSymbolStream {
             log2_tb_height,
             coeff_levels,
             true,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_luma_first4x4_coefficients(
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        dc_level: i16,
+        ac_levels: &[i16; 15],
+        has_ac: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_first4x4_coefficients_with_tool_flags(
+            VvcResidualComponent::Luma,
+            log2_tb_width,
+            log2_tb_height,
+            dc_level,
+            ac_levels,
+            has_ac,
+            false,
+            false,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_luma_transform_skip_first4x4_coefficients(
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        dc_level: i16,
+        ac_levels: &[i16; 15],
+        has_ac: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        Self::emit_first4x4_coefficients_with_tool_flags(
+            VvcResidualComponent::Luma,
+            log2_tb_width,
+            log2_tb_height,
+            dc_level,
+            ac_levels,
+            has_ac,
+            true,
+            false,
             encoder,
             cabac,
         );
@@ -979,28 +1099,6 @@ impl VvcResidualCabacSymbolStream {
         );
     }
 
-    pub(in crate::vvc) fn emit_chroma_coefficients(
-        component: VvcResidualComponent,
-        log2_tb_width: u8,
-        log2_tb_height: u8,
-        coeff_levels: &[i16],
-        encoder: &mut VvcResidualCabacEncoder<'_>,
-        cabac: &mut VvcCabacEncoder,
-    ) {
-        debug_assert!(matches!(
-            component,
-            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
-        ));
-        Self::emit_coefficients(
-            component,
-            log2_tb_width,
-            log2_tb_height,
-            coeff_levels,
-            encoder,
-            cabac,
-        );
-    }
-
     pub(in crate::vvc) fn emit_chroma_transform_skip_coefficients(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -1019,6 +1117,62 @@ impl VvcResidualCabacSymbolStream {
             log2_tb_height,
             coeff_levels,
             true,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_chroma_first4x4_coefficients(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        dc_level: i16,
+        ac_levels: &[i16; 15],
+        has_ac: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        debug_assert!(matches!(
+            component,
+            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
+        ));
+        Self::emit_first4x4_coefficients_with_tool_flags(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            dc_level,
+            ac_levels,
+            has_ac,
+            false,
+            false,
+            encoder,
+            cabac,
+        );
+    }
+
+    pub(in crate::vvc) fn emit_chroma_transform_skip_first4x4_coefficients(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        dc_level: i16,
+        ac_levels: &[i16; 15],
+        has_ac: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        debug_assert!(matches!(
+            component,
+            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
+        ));
+        Self::emit_first4x4_coefficients_with_tool_flags(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            dc_level,
+            ac_levels,
+            has_ac,
+            true,
+            false,
             encoder,
             cabac,
         );
@@ -1082,25 +1236,6 @@ impl VvcResidualCabacSymbolStream {
         )
     }
 
-    fn emit_coefficients(
-        component: VvcResidualComponent,
-        log2_tb_width: u8,
-        log2_tb_height: u8,
-        coeff_levels: &[i16],
-        encoder: &mut VvcResidualCabacEncoder<'_>,
-        cabac: &mut VvcCabacEncoder,
-    ) {
-        Self::emit_coefficients_with_transform_skip(
-            component,
-            log2_tb_width,
-            log2_tb_height,
-            coeff_levels,
-            false,
-            encoder,
-            cabac,
-        );
-    }
-
     fn emit_coefficients_with_transform_skip(
         component: VvcResidualComponent,
         log2_tb_width: u8,
@@ -1132,11 +1267,63 @@ impl VvcResidualCabacSymbolStream {
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
-        let plan = Self::coefficient_plan_with_tool_flags(
+        let width = 1usize << log2_tb_width;
+        let height = 1usize << log2_tb_height;
+        let coeffs = VvcRasterCoeffAccessor::new(coeff_levels, width, height);
+        Self::emit_coefficients_from_accessor(
             component,
             log2_tb_width,
             log2_tb_height,
-            coeff_levels,
+            &coeffs,
+            transform_skip,
+            bdpcm,
+            encoder,
+            cabac,
+        );
+    }
+
+    fn emit_first4x4_coefficients_with_tool_flags(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        dc_level: i16,
+        ac_levels: &[i16; 15],
+        has_ac: bool,
+        transform_skip: bool,
+        bdpcm: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        let width = 1usize << log2_tb_width;
+        let height = 1usize << log2_tb_height;
+        let coeffs = VvcFirst4x4CoeffAccessor::new(width, height, dc_level, ac_levels, has_ac);
+        Self::emit_coefficients_from_accessor(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            &coeffs,
+            transform_skip,
+            bdpcm,
+            encoder,
+            cabac,
+        );
+    }
+
+    fn emit_coefficients_from_accessor(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeffs: &impl VvcCoeffAccessor,
+        transform_skip: bool,
+        bdpcm: bool,
+        encoder: &mut VvcResidualCabacEncoder<'_>,
+        cabac: &mut VvcCabacEncoder,
+    ) {
+        let plan = Self::coefficient_plan_for_accessor(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            coeffs,
             transform_skip,
             bdpcm,
         );
@@ -1148,11 +1335,9 @@ impl VvcResidualCabacSymbolStream {
         };
         Self::append_coefficient_symbols(
             &mut sink,
-            coeff_levels,
+            coeffs,
             log2_tb_width,
             log2_tb_height,
-            plan.width,
-            plan.height,
             &plan.scan,
             plan.last_scan_pos,
         );
@@ -1176,13 +1361,14 @@ impl VvcResidualCabacSymbolStream {
             bdpcm,
         );
         let mut symbols = Vec::new();
+        let width = 1usize << log2_tb_width;
+        let height = 1usize << log2_tb_height;
+        let coeffs = VvcRasterCoeffAccessor::new(coeff_levels, width, height);
         Self::append_coefficient_symbols(
             &mut symbols,
-            coeff_levels,
+            &coeffs,
             log2_tb_width,
             log2_tb_height,
-            plan.width,
-            plan.height,
             &plan.scan,
             plan.last_scan_pos,
         );
@@ -1194,11 +1380,33 @@ impl VvcResidualCabacSymbolStream {
         }
     }
 
+    #[cfg(test)]
     fn coefficient_plan_with_tool_flags(
         component: VvcResidualComponent,
         log2_tb_width: u8,
         log2_tb_height: u8,
         coeff_levels: &[i16],
+        transform_skip: bool,
+        bdpcm: bool,
+    ) -> VvcResidualCoefficientPlan {
+        let width = 1usize << log2_tb_width;
+        let height = 1usize << log2_tb_height;
+        let coeffs = VvcRasterCoeffAccessor::new(coeff_levels, width, height);
+        Self::coefficient_plan_for_accessor(
+            component,
+            log2_tb_width,
+            log2_tb_height,
+            &coeffs,
+            transform_skip,
+            bdpcm,
+        )
+    }
+
+    fn coefficient_plan_for_accessor(
+        component: VvcResidualComponent,
+        log2_tb_width: u8,
+        log2_tb_height: u8,
+        coeffs: &impl VvcCoeffAccessor,
         transform_skip: bool,
         bdpcm: bool,
     ) -> VvcResidualCoefficientPlan {
@@ -1216,14 +1424,15 @@ impl VvcResidualCabacSymbolStream {
         // switch so transform_skip_flag affects reconstruction without adding
         // residual_codingTS()'s separate sign-context and neighbour-modulated
         // level syntax yet.
-        let width = 1usize << log2_tb_width;
-        let height = 1usize << log2_tb_height;
-        assert_eq!(coeff_levels.len(), width * height);
+        let width = coeffs.width();
+        let height = coeffs.height();
+        debug_assert_eq!(width, 1usize << log2_tb_width);
+        debug_assert_eq!(height, 1usize << log2_tb_height);
 
-        let scan = first_4x4_diag_scan(width);
+        let scan = &VVC_FIRST_4X4_DIAG_SCAN;
         let last_scan_pos = scan
             .iter()
-            .rposition(|pos| coeff_levels[pos.raster_index] != 0)
+            .rposition(|pos| coeffs.level_at(pos.x, pos.y) != 0)
             .unwrap_or(0);
         let last_x = scan[last_scan_pos].x as u8;
         let last_y = scan[last_scan_pos].y as u8;
@@ -1239,13 +1448,13 @@ impl VvcResidualCabacSymbolStream {
         config.bdpcm = bdpcm;
         let mut pass1_state = VvcResidualPass1State::new(config);
         for pos in scan.iter().take(last_scan_pos + 1) {
-            let level = coeff_levels[pos.raster_index];
+            let level = coeffs.level_at(pos.x, pos.y);
             let x = pos.x as u8;
             let y = pos.y as u8;
             let abs_level = level.unsigned_abs();
             pass1_state.set_pass1_coeff(x, y, abs_level, level < 0);
         }
-        pass1_state.set_sb_coded(0, 0, coeff_levels.iter().any(|level| *level != 0));
+        pass1_state.set_sb_coded(0, 0, coeffs.any_nonzero());
 
         VvcResidualCoefficientPlan {
             #[cfg(test)]
@@ -1253,28 +1462,28 @@ impl VvcResidualCabacSymbolStream {
             pass1_state,
             scan,
             last_scan_pos,
-            width,
-            height,
         }
     }
 
     fn append_coefficient_symbols<S: VvcResidualSymbolSink>(
         symbols: &mut S,
-        coeff_levels: &[i16],
+        coeffs: &impl VvcCoeffAccessor,
         log2_tb_width: u8,
         log2_tb_height: u8,
-        width: usize,
-        height: usize,
         scan: &[VvcScanPosition; 16],
         last_scan_pos: usize,
     ) {
+        let width = coeffs.width();
+        let height = coeffs.height();
         let last_x = scan[last_scan_pos].x as u8;
         let last_y = scan[last_scan_pos].y as u8;
         Self::append_last_sig_coeff_prefix(symbols, true, log2_tb_width, last_x);
         Self::append_last_sig_coeff_prefix(symbols, false, log2_tb_height, last_y);
 
-        let mut remainder_symbols = Vec::new();
-        let mut bypass_symbols = Vec::new();
+        let mut remainder_symbols = [None; 16];
+        let mut remainder_count = 0usize;
+        let mut bypass_symbols = [None; 16];
+        let mut bypass_count = 0usize;
         let mut sign_bits = 0u32;
         let mut sign_count = 0u8;
         let mut residual_state = 0u8;
@@ -1289,7 +1498,7 @@ impl VvcResidualCabacSymbolStream {
             let pos = scan[scan_pos];
             let x = pos.x as u8;
             let y = pos.y as u8;
-            let level = coeff_levels[pos.raster_index];
+            let level = coeffs.level_at(pos.x, pos.y);
             let abs_level = level.unsigned_abs();
             let significant = abs_level != 0;
             if num_nonzero != 0 || next_scan_pos != infer_sig_pos {
@@ -1314,16 +1523,19 @@ impl VvcResidualCabacSymbolStream {
         if let Some(first_pos_2nd_pass) = first_pos_2nd_pass {
             for scan_pos in ((min_pos_2nd_pass + 1) as usize..=first_pos_2nd_pass).rev() {
                 let pos = scan[scan_pos];
-                let abs_level = coeff_levels[pos.raster_index].unsigned_abs();
+                let abs_level = coeffs.level_at(pos.x, pos.y).unsigned_abs();
                 if abs_level >= 4 {
                     let x = pos.x as u8;
                     let y = pos.y as u8;
-                    remainder_symbols.push(VvcResidualCabacSymbol::AbsRemainder {
-                        x,
-                        y,
-                        value: u32::from((abs_level - 4) >> 1),
-                        rice_param: derive_rice_param(scan_pos, coeff_levels, width, scan, 4),
-                    });
+                    debug_assert!(remainder_count < remainder_symbols.len());
+                    remainder_symbols[remainder_count] =
+                        Some(VvcResidualCabacSymbol::AbsRemainder {
+                            x,
+                            y,
+                            value: u32::from((abs_level - 4) >> 1),
+                            rice_param: derive_rice_param(scan_pos, coeffs, scan, 4),
+                        });
+                    remainder_count += 1;
                 }
             }
         }
@@ -1331,9 +1543,9 @@ impl VvcResidualCabacSymbolStream {
         if min_pos_2nd_pass >= 0 {
             for scan_pos in (0..=min_pos_2nd_pass as usize).rev() {
                 let pos = scan[scan_pos];
-                let level = coeff_levels[pos.raster_index];
+                let level = coeffs.level_at(pos.x, pos.y);
                 let abs_level = level.unsigned_abs();
-                let rice_param = derive_rice_param(scan_pos, coeff_levels, width, scan, 0);
+                let rice_param = derive_rice_param(scan_pos, coeffs, scan, 0);
                 let zero_pos = go_rice_zero_position(residual_state, rice_param);
                 let rem_value = if abs_level == 0 {
                     zero_pos
@@ -1342,12 +1554,14 @@ impl VvcResidualCabacSymbolStream {
                 } else {
                     u32::from(abs_level)
                 };
-                bypass_symbols.push(VvcResidualCabacSymbol::BypassAbsLevel {
+                debug_assert!(bypass_count < bypass_symbols.len());
+                bypass_symbols[bypass_count] = Some(VvcResidualCabacSymbol::BypassAbsLevel {
                     x: pos.x as u8,
                     y: pos.y as u8,
                     value: rem_value,
                     rice_param,
                 });
+                bypass_count += 1;
                 residual_state = disabled_dep_quant_state_transition(residual_state, abs_level);
                 if abs_level != 0 {
                     append_sign_bit(&mut sign_bits, &mut sign_count, level < 0);
@@ -1359,11 +1573,11 @@ impl VvcResidualCabacSymbolStream {
         // bins for the subblock. If the regular-bin budget is exhausted, the
         // remaining dec_abs_level values are bypass-coded before the grouped
         // coefficient signs. See VTM CABACWriter::residual_coding_subblock().
-        for symbol in remainder_symbols {
-            Self::append_delayed_symbol(symbols, symbol);
+        for symbol in remainder_symbols.iter().take(remainder_count).flatten() {
+            Self::append_delayed_symbol(symbols, *symbol);
         }
-        for symbol in bypass_symbols {
-            Self::append_delayed_symbol(symbols, symbol);
+        for symbol in bypass_symbols.iter().take(bypass_count).flatten() {
+            Self::append_delayed_symbol(symbols, *symbol);
         }
         if sign_count > 0 {
             symbols.coeff_sign_pattern(sign_bits, sign_count);
@@ -1478,43 +1692,33 @@ impl VvcResidualCabacSymbolStream {
 struct VvcScanPosition {
     x: usize,
     y: usize,
-    raster_index: usize,
 }
 
-const VVC_FIRST_4X4_DIAG_SCAN_XY: [(usize, usize); 16] = [
-    (0, 0),
-    (0, 1),
-    (1, 0),
-    (0, 2),
-    (1, 1),
-    (2, 0),
-    (0, 3),
-    (1, 2),
-    (2, 1),
-    (3, 0),
-    (1, 3),
-    (2, 2),
-    (3, 1),
-    (2, 3),
-    (3, 2),
-    (3, 3),
+const VVC_FIRST_4X4_DIAG_SCAN: [VvcScanPosition; 16] = [
+    VvcScanPosition { x: 0, y: 0 },
+    VvcScanPosition { x: 0, y: 1 },
+    VvcScanPosition { x: 1, y: 0 },
+    VvcScanPosition { x: 0, y: 2 },
+    VvcScanPosition { x: 1, y: 1 },
+    VvcScanPosition { x: 2, y: 0 },
+    VvcScanPosition { x: 0, y: 3 },
+    VvcScanPosition { x: 1, y: 2 },
+    VvcScanPosition { x: 2, y: 1 },
+    VvcScanPosition { x: 3, y: 0 },
+    VvcScanPosition { x: 1, y: 3 },
+    VvcScanPosition { x: 2, y: 2 },
+    VvcScanPosition { x: 3, y: 1 },
+    VvcScanPosition { x: 2, y: 3 },
+    VvcScanPosition { x: 3, y: 2 },
+    VvcScanPosition { x: 3, y: 3 },
 ];
 
-fn first_4x4_diag_scan(width: usize) -> [VvcScanPosition; 16] {
-    debug_assert!(width >= 4);
-    let mut scan = [VvcScanPosition {
-        x: 0,
-        y: 0,
-        raster_index: 0,
-    }; 16];
-    for (dst, (x, y)) in scan.iter_mut().zip(VVC_FIRST_4X4_DIAG_SCAN_XY) {
-        *dst = VvcScanPosition {
-            x,
-            y,
-            raster_index: y * width + x,
-        };
+fn first4x4_coeff_index(x: u8, y: u8) -> Option<usize> {
+    if x < 4 && y < 4 {
+        Some(usize::from(y) * 4 + usize::from(x))
+    } else {
+        None
     }
-    scan
 }
 
 fn template_abs_sum_level(abs_level: u16) -> u8 {
@@ -1553,8 +1757,7 @@ fn disabled_dep_quant_state_transition(_state: u8, _abs_level: u16) -> u8 {
 
 fn derive_rice_param(
     scan_pos: usize,
-    coeff_levels: &[i16],
-    width: usize,
+    coeffs: &impl VvcCoeffAccessor,
     scan: &[VvcScanPosition],
     base_level: i32,
 ) -> u8 {
@@ -1562,42 +1765,42 @@ fn derive_rice_param(
         0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3,
         3, 3,
     ];
-    let sum_abs = rice_template_abs_sum(scan_pos, coeff_levels, width, scan);
+    let sum_abs = rice_template_abs_sum(scan_pos, coeffs, scan);
     let clipped = (sum_abs - 5 * base_level).clamp(0, 31) as usize;
     GO_RICE_PARS_COEFF[clipped]
 }
 
 fn rice_template_abs_sum(
     scan_pos: usize,
-    coeff_levels: &[i16],
-    width: usize,
+    coeffs: &impl VvcCoeffAccessor,
     scan: &[VvcScanPosition],
 ) -> i32 {
     let pos = scan[scan_pos];
-    let height = coeff_levels.len() / width;
+    let width = coeffs.width();
+    let height = coeffs.height();
     let x = pos.x;
     let y = pos.y;
     let mut sum = 0i32;
     if x + 1 < width {
-        sum += coeff_abs_at(coeff_levels, width, x + 1, y);
+        sum += coeff_abs_at(coeffs, x + 1, y);
         if x + 2 < width {
-            sum += coeff_abs_at(coeff_levels, width, x + 2, y);
+            sum += coeff_abs_at(coeffs, x + 2, y);
         }
         if y + 1 < height {
-            sum += coeff_abs_at(coeff_levels, width, x + 1, y + 1);
+            sum += coeff_abs_at(coeffs, x + 1, y + 1);
         }
     }
     if y + 1 < height {
-        sum += coeff_abs_at(coeff_levels, width, x, y + 1);
+        sum += coeff_abs_at(coeffs, x, y + 1);
         if y + 2 < height {
-            sum += coeff_abs_at(coeff_levels, width, x, y + 2);
+            sum += coeff_abs_at(coeffs, x, y + 2);
         }
     }
     sum
 }
 
-fn coeff_abs_at(coeff_levels: &[i16], width: usize, x: usize, y: usize) -> i32 {
-    i32::from(coeff_levels[y * width + x]).abs()
+fn coeff_abs_at(coeffs: &impl VvcCoeffAccessor, x: usize, y: usize) -> i32 {
+    i32::from(coeffs.level_at(x, y)).abs()
 }
 
 fn go_rice_zero_position(state: u8, rice_param: u8) -> u32 {

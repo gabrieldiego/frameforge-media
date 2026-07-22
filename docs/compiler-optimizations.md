@@ -1365,6 +1365,224 @@ make validate-geometry-sweep
 
 All checks passed after this checkpoint.
 
+## VVC Batched AC Projection
+
+Checkpoint: `vvc-separable-chroma-ac`.
+
+Changes retained:
+
+- VVC luma lossy AC quantization now computes the 16 source cell sums once per
+  transform unit and derives the first 4x4 Hadamard AC levels from those sums,
+  instead of recomputing the same cell sums for each AC coefficient.
+- VVC chroma lossy AC quantization now computes the active first-4x4 chroma
+  coefficients with a separable projection: one vertical DCT accumulation per
+  active coefficient row, then reused horizontal projections for each AC level.
+- Luma and chroma DC searches now compute residual sum and SSE together in one
+  pass before evaluating candidate DC levels.
+
+Rejected probes:
+
+- `vvc-coeff-scratch` added a reusable dense coefficient scratch buffer to the
+  CTU CABAC generator. It was byte-identical, but the six-vector matrix
+  regressed from 1.85 to 1.77 fps in lossless and from 1.13 to 1.12 fps in
+  lossy, likely because the larger hot generator state hurt layout/cache
+  behavior more than it saved allocation work.
+- Reusing residual buffers inside the VVC quantizer improved one-frame
+  lossless `ctu_quantize` timing, but made the lossy first-frame quantizer
+  slower than the luma-AC-only checkpoint and immediately regressed the first
+  two lossless matrix rows. The run was stopped and the change was reverted.
+
+First-frame VVC stage trace on `SceneComposition_1_420` lossy:
+
+| Checkpoint | `ctu_quantize` | Timed total | Bytes | PSNR |
+|---|---:|---:|---:|---:|
+| `vvc-residual-callback-sink` | 303.800 ms | 413.955 ms | 128,845 | 24.283 |
+| `vvc-luma-ac-cell-sums` | 192.388 ms | 297.819 ms | 128,845 | 24.283 |
+
+Matrix commands:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-ac-cell-sums \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-residual-callback-sink.json
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-separable-chroma-ac \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-ac-cell-sums.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`, compared with the
+previous committed checkpoint:
+
+| Mode | Baseline FPS | New FPS | FPS Delta | Byte Delta | PSNR Delta |
+|---|---:|---:|---:|---:|---:|
+| lossless | 1.85 | 1.82 | -1.6% | 0 | 0 |
+| lossy | 1.13 | 1.35 | +19.8% | 0 | 0 |
+
+The lossless code path is not supposed to consume the batched lossy AC
+projection; its mixed row movement is treated as run-to-run/code-layout noise.
+All rows were byte-identical to the comparison baselines; lossless rows
+remained exact and lossy PSNR was unchanged. The retained generated reports
+were written to:
+
+```text
+verification/generated/encode_matrix/vvc-luma-ac-cell-sums.md
+verification/generated/encode_matrix/vvc-separable-chroma-ac.md
+```
+
+Additional validation:
+
+```sh
+cargo test -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs --features "vvc vvc-stats"
+make test
+make validate-geometry-sweep
+```
+
+All checks passed after this checkpoint.
+
+## VVC Frame-Slice Lossless Residual
+
+Checkpoint: `vvc-frame-slice-residual`.
+
+Changes retained:
+
+- VVC 4:2:0 and 4:2:2 lossless residual pictures now use one frame slice
+  instead of one slice per CTU. This removes repeated slice headers and lets
+  CABAC contexts carry across CTUs in the lossless residual path.
+- The single-slice lossless quantizer predicts against the carried full-frame
+  reconstruction and updates that reconstruction as CTUs are emitted.
+- VVC 4:2:0 and 4:2:2 lossy residual pictures deliberately remain one slice
+  per CTU for now. The CTU-slice path uses CTU-local prediction, which matches
+  the decoder's slice-boundary prediction rules and keeps the previous lossy
+  byte counts.
+- Normal residual entropy emission uses compact first-4x4 coefficient
+  accessors for the active coefficient subset, avoiding full coefficient-vector
+  materialization in the common residual syntax path.
+- `vvc-stats` frame records now include counters such as slice count,
+  single-slice use, TU counts, nonzero counts, and CBF counts.
+- VVC SPS signalling now raises the current luma MTT depth to 5, which keeps
+  thin high-depth 4:2:0 lossless shapes within the coded partition tree.
+- High-depth 4:4:4 palette BDPCM/transform-skip residual coding now emits the
+  scaled transform-skip levels expected by VTM and rejects the shortcut when a
+  coefficient is not exactly representable at that transform-skip scale.
+
+Rejected probe:
+
+- Using a single frame slice for all 4:2:0/4:2:2 residual modes was not
+  retained. It kept the lossless size win, but moved lossy totals from
+  311,683,720 bytes to 318,394,921 bytes and reduced matrix throughput to 1.27
+  fps. The retained split keeps lossy subsampled rows byte-identical to
+  `vvc-separable-chroma-ac`.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-frame-slice-residual \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-separable-chroma-ac.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`, compared with
+`vvc-separable-chroma-ac`:
+
+| Mode | Baseline bytes | New bytes | Byte delta | Baseline FPS | New FPS | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| lossless | 562,246,601 | 547,557,841 | -14,688,760 | 1.82 | 1.78 | size win comes from 4:2:0/4:2:2 frame slices |
+| lossy | 311,683,720 | 311,763,094 | +79,374 | 1.35 | 1.31 | subsampled lossy rows are byte-identical; 4:4:4 changed with the high-depth palette fix |
+
+Lossless row deltas:
+
+| Vector | Format | Bytes delta | FPS delta | PSNR |
+|---|---|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | -3,013,712 | +0.23 | inf |
+| SceneComposition_1_422 | yuv422p8 | -3,318,716 | -0.05 | inf |
+| MissionControlClip1_420 | yuv420p10le | -4,053,076 | -0.08 | inf |
+| MissionControlClip1_422 | yuv422p10le | -4,382,630 | -0.03 | inf |
+| MissionControlClip1_444 | yuv444p10le | +79,374 | -0.06 | 65.612 |
+
+The full generated report for this run was written to:
+
+```text
+verification/generated/encode_matrix/vvc-frame-slice-residual.md
+```
+
+Additional validation:
+
+```sh
+cargo test -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs --features "vvc vvc-stats"
+make validate-geometry-sweep
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=screenshot-sweep-444-10bit VALIDATION_REFERENCE_MODE=required
+```
+
+Results: both VVC test builds passed with 122 tests, the full AV2/VVC geometry
+sweep passed, VVC smoke passed 3/3 with the reference decoder required, and
+the high-depth VVC 4:4:4 sweep passed 64/64 with the reference decoder
+required.
+
+## VVC Residual Metadata And Pass-1 State
+
+Checkpoints: `vvc-tu-ac-presence-flags`, `vvc-fixed-pass1-state`.
+
+Changes retained:
+
+- VVC quantized TU metadata now carries `*_tu_has_ac` flags next to the AC
+  coefficient arrays. CABAC CBF decisions use those flags instead of rescanning
+  the 15-entry AC arrays for every luma/Cb/Cr TU.
+- Lossless AC extraction computes the AC-present flag while copying the
+  first-4x4 AC levels, so lossless does not pay an extra coefficient pass.
+- The lossy luma and chroma quantizers return AC-present metadata with the
+  selected quantized AC coefficients.
+- `VvcResidualPass1State` now uses fixed first-4x4 coefficient state and a
+  bounded subblock map instead of allocating three `Vec`s for every residual
+  TU. Out-of-first-4x4 coefficient context lookups still return zero, matching
+  the current emitted coefficient subset.
+
+Rejected probe:
+
+- Replacing `VvcChromaNeighbourState` with fixed CTU-sized arrays was not
+  retained. It preserved bytes and PSNR, but total throughput dropped to 1.80
+  fps for lossless and 1.29 fps for lossy against `vvc-borrow-ctu-params`.
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-fixed-pass1-state \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-ac-presence-flags.json
+```
+
+VVC totals on `local-aomctc-b2-scc-1080p-lossless-50f`, compared with
+`vvc-tu-ac-presence-flags`:
+
+| Mode | Baseline bytes | New bytes | Byte delta | Baseline FPS | New FPS | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| lossless | 547,557,841 | 547,557,841 | +0 | 1.91 | 2.00 | allocation-free residual pass-1 state |
+| lossy | 311,763,094 | 311,763,094 | +0 | 1.35 | 1.41 | allocation-free residual pass-1 state |
+
+The preceding AC-presence checkpoint was also byte-identical against
+`vvc-borrow-ctu-params` and improved totals to 1.91 fps lossless and 1.35 fps
+lossy.
+
+Additional validation:
+
+```sh
+cargo test -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs --features "vvc vvc-stats"
+```
+
+Results: both VVC test builds passed with 122 tests.
+
 ## References
 
 - Cargo profile settings:

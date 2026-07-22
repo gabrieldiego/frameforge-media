@@ -115,10 +115,10 @@ struct Av2StreamFormat {
 
 impl Av2StreamFormat {
     fn from_pixel_format(format: PixelFormat) -> Option<Self> {
-        if format == PixelFormat::Rgb24 {
+        if format.is_rgb() {
             return Some(Self {
                 chroma_format: Av2ChromaFormat::Yuv444,
-                bit_depth: SampleBitDepth::new(8).expect("rgb24 is 8-bit"),
+                bit_depth: SampleBitDepth::new(8).expect("RGB formats are 8-bit"),
             });
         }
         let bit_depth = format.bit_depth();
@@ -793,7 +793,8 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
     let geometry = validate_mvp_request(request)?;
     let stream_format = Av2StreamFormat::from_pixel_format(request.format)
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
-    let rgb_identity = request.format == PixelFormat::Rgb24;
+    let rgb_identity = request.format.is_rgb();
+    let packed_rgb_identity = request.format == PixelFormat::Rgb24;
 
     let source_expected_len =
         Picture::expected_len(geometry.width, geometry.height, request.format);
@@ -822,7 +823,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
             break;
         }
         let coded_frame: Vec<u8>;
-        let frame = if rgb_identity {
+        let frame = if packed_rgb_identity {
             coded_frame = rgb24_to_planar_gbr(&source_frame, geometry);
             coded_frame.as_slice()
         } else {
@@ -884,7 +885,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
             let public_reconstruction: Vec<u8>;
-            let reconstruction = if rgb_identity {
+            let reconstruction = if packed_rgb_identity {
                 public_reconstruction = planar_gbr_to_rgb24(&reconstruction, geometry);
                 public_reconstruction.as_slice()
             } else {
@@ -991,7 +992,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
                 .write_all(&bitstream)
                 .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
             let public_reconstruction: Vec<u8>;
-            let reconstruction = if rgb_identity {
+            let reconstruction = if packed_rgb_identity {
                 public_reconstruction = planar_gbr_to_rgb24(&reconstruction, geometry);
                 public_reconstruction.as_slice()
             } else {
@@ -1034,7 +1035,7 @@ pub fn av2_encode_fixed_black_444_with_options_and_frame_metrics(
             .write_all(&bitstream)
             .map_err(|err| format!("failed to write AV2 bitstream: {err}"))?;
         let public_reconstruction: Vec<u8>;
-        let reconstruction = if rgb_identity {
+        let reconstruction = if packed_rgb_identity {
             public_reconstruction = planar_gbr_to_rgb24(&reconstruction, geometry);
             public_reconstruction.as_slice()
         } else {
@@ -2215,7 +2216,7 @@ pub fn av2_mvp_444_ibc_stats_json_for_frame(
         .expect("validate_mvp_request accepts only supported AV2 stream formats");
     if stream_format.chroma_format != Av2ChromaFormat::Yuv444 {
         return Err(format!(
-            "AV2 IBC stats expect yuv444p8 or yuv444p10le input; got {}",
+            "AV2 IBC stats expect yuv444p8, yuv444p10le, gbrp8, or rgb24 input; got {}",
             request.format
         ));
     }
@@ -2592,7 +2593,9 @@ fn validate_mvp_444_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometr
             ..
         })
     ) {
-        return Err("AV2 4:4:4 MVP path only supports yuv444p8, yuv444p10le, or rgb24".to_string());
+        return Err(
+            "AV2 4:4:4 MVP path only supports yuv444p8, yuv444p10le, gbrp8, or rgb24".to_string(),
+        );
     }
     Ok(geometry)
 }
@@ -2603,14 +2606,14 @@ fn validate_mvp_request(request: Av2EncodeRequest) -> Result<Av2VideoGeometry, S
 }
 
 fn validate_av2_input_format(format: PixelFormat) -> Result<Av2StreamFormat, String> {
-    if !format.is_yuv() && format != PixelFormat::Rgb24 {
+    if !format.is_yuv() && !format.is_rgb() {
         return Err(format!(
-            "AV2 input expects planar YUV or rgb24 format; got {format}"
+            "AV2 input expects planar YUV, gbrp8, or rgb24 format; got {format}"
         ));
     }
     Av2StreamFormat::from_pixel_format(format).ok_or_else(|| {
         format!(
-            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, yuv444p8/10, and rgb24 streams; got {format}"
+            "AV2 MVP encoder only supports yuv420p8/10, yuv422p8/10, yuv444p8/10, gbrp8, and rgb24 streams; got {format}"
         )
     })
 }
@@ -4000,6 +4003,48 @@ mod tests {
             None,
         )
         .expect("AV2 rgb24 lossless encode should preserve packed RGB bytes");
+
+        assert_eq!(recon, input);
+        let ci_header = av2_obu_header(Av2ObuType::ContentInterpretation);
+        assert!(
+            output
+                .windows(ci_header.len())
+                .any(|window| window == ci_header.as_slice()),
+            "RGB identity stream should carry a content-interpretation OBU"
+        );
+    }
+
+    #[test]
+    fn av2_gbrp8_lossless_emits_identity_metadata_and_planar_recon() {
+        let geometry = Av2VideoGeometry {
+            width: 8,
+            height: 8,
+        };
+        let request = Av2EncodeRequest {
+            params: Av2EncodeParams { frames: 1 },
+            geometry,
+            format: PixelFormat::Gbrp8,
+        };
+        let frame_len = Picture::expected_len(geometry.width, geometry.height, request.format);
+        let input: Vec<u8> = (0..frame_len)
+            .map(|index| ((index * 19 + 5) & 0xff) as u8)
+            .collect();
+        let mut source = input.as_slice();
+        let mut output = Vec::new();
+        let mut recon = Vec::new();
+
+        av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut source,
+            &mut output,
+            Some(&mut recon),
+            request,
+            Av2EncodeOptions {
+                lossless: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("AV2 gbrp8 lossless encode should preserve planar RGB bytes");
 
         assert_eq!(recon, input);
         let ci_header = av2_obu_header(Av2ObuType::ContentInterpretation);

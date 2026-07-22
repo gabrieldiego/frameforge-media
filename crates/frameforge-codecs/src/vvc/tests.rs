@@ -225,12 +225,15 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         luma_tu_negative: [luma_negative; MAX_VVC_LUMA_TUS],
         luma_tu_dc_levels: [luma_dc_level; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
+        luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
         luma_tu_count: 1,
         chroma_tu_count: 0,
         cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
         cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
         cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
         cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
+        cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
+        cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         cb_rem: 16,
         cr_rem: 16,
     }
@@ -495,6 +498,10 @@ fn vvc_sps_tool_flags_follow_the_active_slice_config() {
     assert_vvc_flag(&rbsp, "sps_ref_pic_resampling_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_res_change_in_clvs_allowed_flag", false);
     assert_vvc_flag(&rbsp, "sps_entry_point_offsets_present_flag", true);
+    assert_eq!(
+        vvc_ue_value(&rbsp, "sps_max_mtt_hierarchy_depth_intra_slice_luma"),
+        u32::from(VVC_CURRENT_MAX_LUMA_MTT_DEPTH)
+    );
     assert_vvc_flag(&rbsp, "sps_transform_skip_enabled_flag", false);
     assert_vvc_field_absent(&rbsp, "sps_log2_transform_skip_max_size_minus2");
     assert_vvc_field_absent(&rbsp, "sps_bdpcm_enabled_flag");
@@ -818,7 +825,7 @@ fn vvc_ctu_partition_params_cover_all_8_sample_geometries_up_to_64() {
             );
             assert_eq!(
                 vvc_cabac_bits(geometry, black, vvc_test_slice_config()),
-                vvc_ctu_partition_cabac_bits(params, vvc_test_slice_config())
+                vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config())
             );
         }
     }
@@ -853,7 +860,7 @@ fn vvc_luma_transform_nodes_match_cabac_luma_leaves() {
                 chroma_sampling,
             )
             .expect("partition parameters");
-            let cabac_luma_nodes: Vec<_> = VvcCtuCabacOp::yuv420_ctu_partition(params)
+            let cabac_luma_nodes: Vec<_> = VvcCtuCabacOp::yuv420_ctu_partition(&params)
                 .into_iter()
                 .filter_map(|op| match op {
                     VvcCtuCabacOp::LumaLeafWithSplitCtx { node, .. } => Some(node),
@@ -1062,9 +1069,10 @@ fn vvc_ctu_body_routes_ac_coefficients_without_a_feature_gate() {
     .expect("16x16 partition parameters");
     assert_eq!(params.luma_tu_abs_levels[0], 0);
 
-    let without_ac = vvc_ctu_partition_cabac_bits(params, vvc_test_slice_config());
+    let without_ac = vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config());
     params.luma_tu_ac_levels[0][0] = 1;
-    let with_ac = vvc_ctu_partition_cabac_bits(params, vvc_test_slice_config());
+    params.luma_tu_has_ac[0] = true;
+    let with_ac = vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config());
 
     assert_ne!(with_ac, without_ac);
 }
@@ -1161,14 +1169,17 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
             luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
+            luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
             cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
             cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
+            cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
+            cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         };
-        let ops = VvcCtuCabacOp::yuv420_ctu_partition(params);
+        let ops = VvcCtuCabacOp::yuv420_ctu_partition(&params);
         let chroma_nodes: Vec<_> = ops
             .iter()
             .filter_map(|op| match op {
@@ -1202,23 +1213,13 @@ fn vvc_ctu_cabac_generator_is_embedded_in_ctu_body() {
         black,
     )
     .expect("64x64 partition parameters");
-    let via_body = vvc_ctu_partition_cabac_bits(params, vvc_test_slice_config());
+    let via_body = vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config());
 
     let mut manual = VvcCabacEncoder::new();
-    let mut ctu = VvcCtuCabacGenerator::new(
-        params.luma_tu_count,
-        params.luma_tu_dc_levels,
-        params.luma_tu_ac_levels,
-        params.chroma_tu_count,
-        params.cb_tu_dc_levels,
-        params.cr_tu_dc_levels,
-        params.cb_tu_ac_levels,
-        params.cr_tu_ac_levels,
-        params.chroma_sampling,
-        vvc_test_slice_config(),
-    );
+    let mut contexts = initial_vvc_cabac_contexts(vvc_test_slice_config());
+    let mut ctu = VvcCtuCabacGenerator::new(&mut contexts, &params, vvc_test_slice_config());
     manual.start();
-    for op in VvcCtuCabacOp::yuv420_ctu_partition(params) {
+    for op in VvcCtuCabacOp::yuv420_ctu_partition(&params) {
         ctu.emit(&mut manual, op);
     }
     manual.encode_bin_trm(true);
@@ -1251,7 +1252,7 @@ fn vvc_lossless_cabac_body_uses_active_chroma_sampling() {
     );
     assert_eq!(
         via_slice_config,
-        vvc_ctu_partition_cabac_bits(params, config)
+        vvc_ctu_partition_cabac_bits(&params, config)
     );
 
     let legacy_420_params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
@@ -1263,7 +1264,7 @@ fn vvc_lossless_cabac_body_uses_active_chroma_sampling() {
     .expect("4:2:0 partition parameters");
     assert_ne!(
         via_slice_config,
-        vvc_ctu_partition_cabac_bits(legacy_420_params, config)
+        vvc_ctu_partition_cabac_bits(&legacy_420_params, config)
     );
 }
 
@@ -1317,7 +1318,7 @@ fn vvc_boundary_partition_uses_qt_until_implicit_bt_is_allowed_for_thin_shapes()
         },
     ] {
         let params = vvc_ctu_partition_params(geometry, black).expect("thin rectangular params");
-        let ops = VvcCtuCabacOp::yuv420_ctu_partition(params);
+        let ops = VvcCtuCabacOp::yuv420_ctu_partition(&params);
         assert!(
             !ops.iter().any(|op| matches!(
                 op,
@@ -1363,12 +1364,15 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             luma_tu_negative: [false; MAX_VVC_LUMA_TUS],
             luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
+            luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
             cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
             cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
+            cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
+            cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         };
         let root = params.ctu_chroma_root();
         assert_eq!((root.width, root.height), expected_root);
@@ -1397,7 +1401,7 @@ fn vvc_ctu_cabac_generator_handles_rectangular_64_sample_bodies() {
         },
     ] {
         let params = vvc_ctu_partition_params(geometry, black).expect("rectangular params");
-        let bits = vvc_ctu_partition_cabac_bits(params, vvc_test_slice_config());
+        let bits = vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config());
         assert!(!bits.is_empty());
     }
 }
@@ -1418,7 +1422,7 @@ fn vvc_cabac_bits_uses_ctu_partition_generator_for_rectangular_bodies() {
         let params = vvc_ctu_partition_params(geometry, black).expect("rectangular params");
         assert_eq!(
             vvc_cabac_bits(geometry, black, vvc_test_slice_config()),
-            vvc_ctu_partition_cabac_bits(params, vvc_test_slice_config())
+            vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config())
         );
     }
 }
@@ -1472,7 +1476,7 @@ fn vvc_yuv420_ctu_partition_accepts_4x4_luma_leaf_limit() {
     .expect("64x64 partition params");
     params.luma_max_leaf_size = 4;
 
-    let ops = VvcCtuCabacOp::yuv420_ctu_partition(params);
+    let ops = VvcCtuCabacOp::yuv420_ctu_partition(&params);
     assert!(ops.iter().any(|op| matches!(
         op,
         VvcCtuCabacOp::BtSplit {
@@ -1635,6 +1639,36 @@ fn vvc_input_path_accepts_16x16_yuv444p8_frames() {
     )
     .unwrap();
     assert_vvc_annex_b_has_min_picture_nals(&bytes, 1);
+}
+
+#[test]
+fn vvc_lossless_input_path_accepts_16x16_gbrp8_frames() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    let input = (0..Picture::expected_len(geometry.width, geometry.height, PixelFormat::Gbrp8))
+        .map(|index| ((index * 23 + 13) & 0xff) as u8)
+        .collect::<Vec<_>>();
+    let mut source = input.as_slice();
+    let mut bitstream = Vec::new();
+    let mut reconstruction = Vec::new();
+
+    vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+        &mut source,
+        &mut bitstream,
+        Some(&mut reconstruction),
+        VvcEncodeParams { frames: 1 },
+        geometry,
+        VvcVideoLimits::unbounded(),
+        PixelFormat::Gbrp8,
+        VvcEncodeOptions { lossless: true },
+        None,
+    )
+    .expect("VVC gbrp8 should pass through the 4:4:4 lossless component path");
+
+    assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+    assert_eq!(reconstruction, input);
 }
 
 #[test]
@@ -1807,6 +1841,34 @@ fn vvc_input_path_accepts_lossless_yuv420_high_depth_exact_reconstruction() {
 }
 
 #[test]
+fn vvc_input_path_accepts_thin_lossless_yuv420_high_depth_exact_reconstruction() {
+    for (width, height) in [(8, 32), (16, 32)] {
+        let geometry = VvcVideoGeometry { width, height };
+        let format = PixelFormat::yuv420(10).unwrap();
+        let input = yuv420p10_canary(width, height);
+        let mut source = input.as_slice();
+        let mut bitstream = Vec::new();
+        let mut reconstruction = Vec::new();
+
+        vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+            &mut source,
+            &mut bitstream,
+            Some(&mut reconstruction),
+            VvcEncodeParams { frames: 1 },
+            geometry,
+            VvcVideoLimits::unbounded(),
+            format,
+            VvcEncodeOptions { lossless: true },
+            None,
+        )
+        .unwrap_or_else(|err| panic!("thin lossless {width}x{height} 4:2:0 should encode: {err}"));
+
+        assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+        assert_eq!(reconstruction, input);
+    }
+}
+
+#[test]
 fn vvc_input_path_accepts_lossless_yuv422_high_depth_exact_reconstruction() {
     let geometry = VvcVideoGeometry {
         width: 8,
@@ -1935,7 +1997,43 @@ fn vvc_yuv444_palette_path_encodes_each_frame_independently() {
 }
 
 #[test]
-fn vvc_input_path_emits_one_slice_per_ctu_for_larger_yuv420_picture() {
+fn vvc_lossless_input_path_emits_one_frame_slice_for_larger_yuv420_picture() {
+    let geometry = VvcVideoGeometry {
+        width: 160,
+        height: 120,
+    };
+    let input = solid_yuv420p8_geometry(geometry.width, geometry.height, 0, 0, 0, 1);
+    let mut source = input.as_slice();
+    let mut bitstream = Vec::new();
+    let mut reconstruction = Vec::new();
+
+    vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+        &mut source,
+        &mut bitstream,
+        Some(&mut reconstruction),
+        VvcEncodeParams { frames: 1 },
+        geometry,
+        VvcVideoLimits {
+            max_width: 1024,
+            max_height: 512,
+        },
+        PixelFormat::Yuv420p8,
+        VvcEncodeOptions { lossless: true },
+        None,
+    )
+    .unwrap();
+
+    let infos = assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+    assert_eq!(count_vvc_picture_nals(&infos), 1);
+    assert_eq!(
+        reconstruction.len(),
+        Picture::expected_len(geometry.width, geometry.height, PixelFormat::Yuv420p8)
+    );
+    assert_eq!(reconstruction, input);
+}
+
+#[test]
+fn vvc_lossy_input_path_keeps_one_slice_per_ctu_for_larger_yuv420_picture() {
     let geometry = VvcVideoGeometry {
         width: 160,
         height: 120,
@@ -1959,10 +2057,6 @@ fn vvc_input_path_emits_one_slice_per_ctu_for_larger_yuv420_picture() {
     assert_eq!(
         count_vvc_picture_nals(&infos),
         vvc_picture_ctu_count(geometry)
-    );
-    assert_eq!(
-        artifacts.reconstruction.len(),
-        Picture::expected_len(geometry.width, geometry.height, PixelFormat::Yuv420p8)
     );
 }
 
@@ -2513,6 +2607,73 @@ fn vvc_palette_444_uses_horizontal_bdpcm_for_left_predicted_rows() {
 }
 
 #[test]
+fn vvc_palette_444_high_depth_bdpcm_uses_scaled_transform_skip_levels() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 8,
+    };
+    let bit_depth = SampleBitDepth::new(10).expect("valid bit depth");
+    let mut luma = vec![40; geometry.luma_samples()];
+    let mut cb = vec![144; geometry.luma_samples()];
+    let mut cr = vec![192; geometry.luma_samples()];
+    for y in 0..8 {
+        for x in 0..8 {
+            let dst = y * geometry.width + x;
+            luma[dst] = [60, 576, 944, 964, 676, 112, 40, 40][x];
+            cb[dst] = [160, 624, 952, 972, 716, 208, 144, 144][x];
+            cr[dst] = [208, 648, 956, 976, 732, 252, 192, 192][x];
+        }
+    }
+    luma[8] = 192;
+    luma[9] = 1020;
+    cb[8] = 280;
+    cb[9] = 1020;
+    cr[8] = 320;
+    cr[9] = 1020;
+    let frame = VvcSampledFrame {
+        geometry,
+        format: VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs444,
+            bit_depth,
+        },
+        luma: luma.clone(),
+        cb: cb.clone(),
+        cr: cr.clone(),
+        chroma_len: geometry.luma_samples(),
+    };
+
+    assert_eq!(
+        vvc_palette_transform_skip_coded_coeff_for_test(152, bit_depth),
+        Some(38)
+    );
+    assert_eq!(
+        vvc_palette_transform_skip_coded_coeff_for_test(828, bit_depth),
+        Some(207)
+    );
+    assert_eq!(
+        vvc_palette_transform_skip_coded_coeff_for_test(-980, bit_depth),
+        Some(-245)
+    );
+    assert_eq!(
+        vvc_palette_transform_skip_coded_coeff_for_test(153, bit_depth),
+        None
+    );
+    assert_eq!(
+        vvc_palette_444_reconstruction_yuv(&frame),
+        [luma, cb, cr].concat()
+    );
+
+    let ctx_bins = vvc_palette_444_cabac_context_bins(&frame);
+    assert!(
+        ctx_bins.contains(&(
+            VvcCabacContext::BdpcmMode(0).rtl_context_id().unwrap(),
+            true
+        )),
+        "high-depth boundary CU should still use the BDPCM shortcut"
+    );
+}
+
+#[test]
 fn vvc_input_path_changes_bitstream_from_sampled_color() {
     let mut input = solid_yuv420p8(65, 128, 192, 2);
     input[1] = 0;
@@ -2578,14 +2739,19 @@ fn solid_yuv420p_high(y: u8, u: u8, v: u8, bit_depth: u8, frames: usize) -> Vec<
 }
 
 fn yuv420p10_canary_8x8() -> Vec<u8> {
+    yuv420p10_canary(8, 8)
+}
+
+fn yuv420p10_canary(width: usize, height: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    for i in 0..64 {
+    for i in 0..width * height {
         out.extend((((i * 17 + 3) & 0x03ff) as u16).to_le_bytes());
     }
-    for i in 0..16 {
+    let chroma_samples = (width / 2) * (height / 2);
+    for i in 0..chroma_samples {
         out.extend((((i * 29 + 5) & 0x03ff) as u16).to_le_bytes());
     }
-    for i in 0..16 {
+    for i in 0..chroma_samples {
         out.extend((((i * 37 + 7) & 0x03ff) as u16).to_le_bytes());
     }
     out

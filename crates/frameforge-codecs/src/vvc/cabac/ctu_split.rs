@@ -9,7 +9,7 @@ use crate::vvc::{
     VVC_LUMA_AC_COEFFS_PER_TU,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcCtuPartitionParams {
     pub(in crate::vvc) root_width: usize,
     pub(in crate::vvc) root_height: usize,
@@ -23,16 +23,19 @@ pub(in crate::vvc) struct VvcCtuPartitionParams {
     pub(in crate::vvc) luma_tu_negative: [bool; MAX_VVC_LUMA_TUS],
     pub(in crate::vvc) luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
     pub(in crate::vvc) luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
+    pub(in crate::vvc) luma_tu_has_ac: [bool; MAX_VVC_LUMA_TUS],
     pub(in crate::vvc) cb_dc_abs_level: u8,
     pub(in crate::vvc) cb_dc_negative: bool,
     pub(in crate::vvc) cb_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
     pub(in crate::vvc) cr_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
     pub(in crate::vvc) cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     pub(in crate::vvc) cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
+    pub(in crate::vvc) cb_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
+    pub(in crate::vvc) cr_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
 }
 
 impl VvcCtuPartitionParams {
-    pub(in crate::vvc) fn shape(self) -> VvcCtuPartitionShape {
+    pub(in crate::vvc) fn shape(&self) -> VvcCtuPartitionShape {
         VvcCtuPartitionShape {
             root_width: self.root_width as u16,
             root_height: self.root_height as u16,
@@ -43,7 +46,7 @@ impl VvcCtuPartitionParams {
     }
 
     #[cfg(test)]
-    pub(in crate::vvc) fn visible_chroma_width(self) -> u16 {
+    pub(in crate::vvc) fn visible_chroma_width(&self) -> u16 {
         // coding_tree() uses luma-coordinate cbWidth/cbHeight even for
         // DUAL_TREE_CHROMA. Chroma subsampling is applied by chroma syntax and
         // transform decisions below the tree, not by shrinking the tree root.
@@ -51,12 +54,12 @@ impl VvcCtuPartitionParams {
     }
 
     #[cfg(test)]
-    pub(in crate::vvc) fn visible_chroma_height(self) -> u16 {
+    pub(in crate::vvc) fn visible_chroma_height(&self) -> u16 {
         self.visible_height as u16
     }
 
     #[cfg(test)]
-    pub(in crate::vvc) fn ctu_chroma_root(self) -> VvcCodingTreeNode {
+    pub(in crate::vvc) fn ctu_chroma_root(&self) -> VvcCodingTreeNode {
         VvcCodingTreeNode::root(
             self.root_width as u16,
             self.root_height as u16,
@@ -87,13 +90,13 @@ pub(in crate::vvc) fn vvc_luma_transform_nodes(
     shape: VvcCtuPartitionShape,
     max_leaf_size: u16,
 ) -> Vec<VvcCodingTreeNode> {
+    let mut nodes = Vec::new();
     let tree_type = match shape.chroma_sampling {
         ChromaSampling::Cs444 => VvcTreeType::SingleTree,
         ChromaSampling::Monochrome | ChromaSampling::Cs420 | ChromaSampling::Cs422 => {
             VvcTreeType::DualTreeLuma
         }
     };
-    let mut nodes = Vec::new();
     append_visible_luma_transform_nodes(
         &mut nodes,
         VvcCodingTreeNode::root(shape.root_width, shape.root_height, tree_type),
@@ -1005,7 +1008,7 @@ pub(in crate::vvc) enum VvcCtuCabacOp {
 }
 
 impl VvcCtuCabacOp {
-    pub(in crate::vvc) fn yuv420_ctu_partition(params: VvcCtuPartitionParams) -> Vec<Self> {
+    pub(in crate::vvc) fn yuv420_ctu_partition(params: &VvcCtuPartitionParams) -> Vec<Self> {
         Self::intra_ctu_partition(params.shape(), params.luma_max_leaf_size)
     }
 
