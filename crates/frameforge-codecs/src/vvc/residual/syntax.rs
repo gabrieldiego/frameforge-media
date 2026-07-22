@@ -1,7 +1,7 @@
 use super::super::{
     VvcCabacContext, VvcCabacContexts, VvcCabacEncoder, VvcLastSigCoeffPrefixCtxInput,
 };
-use super::VvcResidualComponent;
+use super::{VvcResidualComponent, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_LUMA_AC_COEFFS_PER_TU};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcResidualCabacOptions {
@@ -683,32 +683,36 @@ impl VvcCoeffAccessor for VvcRasterCoeffAccessor<'_> {
     }
 }
 
-struct VvcFirst4x4CoeffAccessor<'a> {
+struct VvcStoredCoeffAccessor<'a, const AC_COEFFS: usize> {
     width: usize,
     height: usize,
     dc_level: i16,
-    ac_levels: &'a [i16; 15],
+    ac_levels: &'a [i16; AC_COEFFS],
+    coeff_stride: usize,
 }
 
-impl<'a> VvcFirst4x4CoeffAccessor<'a> {
+impl<'a, const AC_COEFFS: usize> VvcStoredCoeffAccessor<'a, AC_COEFFS> {
     fn new(
         width: usize,
         height: usize,
         dc_level: i16,
-        ac_levels: &'a [i16; 15],
+        ac_levels: &'a [i16; AC_COEFFS],
         has_ac: bool,
+        coeff_stride: usize,
     ) -> Self {
         debug_assert_eq!(has_ac, ac_levels.iter().any(|level| *level != 0));
+        debug_assert!(coeff_stride > 0);
         Self {
             width,
             height,
             dc_level,
             ac_levels,
+            coeff_stride,
         }
     }
 }
 
-impl VvcCoeffAccessor for VvcFirst4x4CoeffAccessor<'_> {
+impl<const AC_COEFFS: usize> VvcCoeffAccessor for VvcStoredCoeffAccessor<'_, AC_COEFFS> {
     fn width(&self) -> usize {
         self.width
     }
@@ -718,13 +722,20 @@ impl VvcCoeffAccessor for VvcFirst4x4CoeffAccessor<'_> {
     }
 
     fn level_at(&self, x: usize, y: usize) -> i16 {
-        if x >= 4 || y >= 4 || x >= self.width || y >= self.height {
+        if x >= self.width || y >= self.height {
             return 0;
         }
         if x == 0 && y == 0 {
             self.dc_level
         } else {
-            self.ac_levels[y * 4 + x - 1]
+            if x >= self.coeff_stride {
+                return 0;
+            }
+            let compact_idx = y * self.coeff_stride + x;
+            if compact_idx == 0 || compact_idx > self.ac_levels.len() {
+                return 0;
+            }
+            self.ac_levels[compact_idx - 1]
         }
     }
 }
@@ -1079,23 +1090,24 @@ impl VvcResidualCabacSymbolStream {
         );
     }
 
-    pub(in crate::vvc) fn emit_luma_first4x4_coefficients(
+    pub(in crate::vvc) fn emit_luma_coefficients(
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
-        ac_levels: &[i16; 15],
+        ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         mts_index: u8,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
-        Self::emit_first4x4_coefficients_with_tool_flags(
+        Self::emit_stored_coefficients_with_tool_flags(
             VvcResidualComponent::Luma,
             log2_tb_width,
             log2_tb_height,
             dc_level,
             ac_levels,
             has_ac,
+            luma_stored_coeff_stride(log2_tb_width, log2_tb_height),
             false,
             false,
             mts_index,
@@ -1104,22 +1116,23 @@ impl VvcResidualCabacSymbolStream {
         );
     }
 
-    pub(in crate::vvc) fn emit_luma_transform_skip_first4x4_coefficients(
+    pub(in crate::vvc) fn emit_luma_transform_skip_coefficients_from_levels(
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
-        ac_levels: &[i16; 15],
+        ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
-        Self::emit_first4x4_coefficients_with_tool_flags(
+        Self::emit_stored_coefficients_with_tool_flags(
             VvcResidualComponent::Luma,
             log2_tb_width,
             log2_tb_height,
             dc_level,
             ac_levels,
             has_ac,
+            luma_stored_coeff_stride(log2_tb_width, log2_tb_height),
             true,
             false,
             0,
@@ -1175,7 +1188,7 @@ impl VvcResidualCabacSymbolStream {
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
-        ac_levels: &[i16; 15],
+        ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
@@ -1184,13 +1197,14 @@ impl VvcResidualCabacSymbolStream {
             component,
             VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
         ));
-        Self::emit_first4x4_coefficients_with_tool_flags(
+        Self::emit_stored_coefficients_with_tool_flags(
             component,
             log2_tb_width,
             log2_tb_height,
             dc_level,
             ac_levels,
             has_ac,
+            4,
             false,
             false,
             0,
@@ -1204,7 +1218,7 @@ impl VvcResidualCabacSymbolStream {
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
-        ac_levels: &[i16; 15],
+        ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
@@ -1213,13 +1227,14 @@ impl VvcResidualCabacSymbolStream {
             component,
             VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
         ));
-        Self::emit_first4x4_coefficients_with_tool_flags(
+        Self::emit_stored_coefficients_with_tool_flags(
             component,
             log2_tb_width,
             log2_tb_height,
             dc_level,
             ac_levels,
             has_ac,
+            4,
             true,
             false,
             0,
@@ -1333,13 +1348,14 @@ impl VvcResidualCabacSymbolStream {
         );
     }
 
-    fn emit_first4x4_coefficients_with_tool_flags(
+    fn emit_stored_coefficients_with_tool_flags<const AC_COEFFS: usize>(
         component: VvcResidualComponent,
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
-        ac_levels: &[i16; 15],
+        ac_levels: &[i16; AC_COEFFS],
         has_ac: bool,
+        coeff_stride: usize,
         transform_skip: bool,
         bdpcm: bool,
         mts_index: u8,
@@ -1348,7 +1364,8 @@ impl VvcResidualCabacSymbolStream {
     ) {
         let width = 1usize << log2_tb_width;
         let height = 1usize << log2_tb_height;
-        let coeffs = VvcFirst4x4CoeffAccessor::new(width, height, dc_level, ac_levels, has_ac);
+        let coeffs =
+            VvcStoredCoeffAccessor::new(width, height, dc_level, ac_levels, has_ac, coeff_stride);
         Self::emit_coefficients_from_accessor(
             component,
             log2_tb_width,
@@ -1919,6 +1936,14 @@ fn last_sig_coeff_group_min(group_idx: u8) -> u8 {
         10 => 32,
         11 => 48,
         _ => unimplemented!("VVC last coefficient group minima above 64 samples are not wired yet"),
+    }
+}
+
+fn luma_stored_coeff_stride(log2_tb_width: u8, log2_tb_height: u8) -> usize {
+    if log2_tb_width == 3 && log2_tb_height == 3 {
+        8
+    } else {
+        (1usize << log2_tb_width).min(4)
     }
 }
 

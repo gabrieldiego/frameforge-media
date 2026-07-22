@@ -2805,6 +2805,51 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Luma Coefficient Storage
+
+Checkpoint: `vvc-luma-coeff-storage-1f`.
+
+This checkpoint widens VVC luma TU coefficient storage from the first 4x4 AC
+subset to a compact 8x8-capable payload while keeping chroma at its 4x4 AC
+shape. The CTU body now calls generalized luma residual emission helpers, and
+the inverse transform / transform-skip reconstruction derive luma coefficient
+positions from the coded coefficient extent instead of a hard-coded 4x4 shape.
+
+The default luma quantizer still selects the legacy first-subblock projection.
+A direct DCT 8x8 candidate is wired as an implementation building block, but it
+is not selected by default because the initial matrix increased bitrate
+substantially and lowered high-depth PSNR. That keeps this checkpoint as a
+non-regressive plumbing step for a future rate/distortion selector rather than
+a quality-mode fork.
+
+The first-frame six-vector matrix was byte-identical against
+`vvc-grouped-8x8-syntax-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.35 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-coeff-storage-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-grouped-8x8-syntax-1f.json
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:

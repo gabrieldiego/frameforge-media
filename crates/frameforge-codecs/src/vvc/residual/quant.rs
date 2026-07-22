@@ -1287,12 +1287,22 @@ pub(in crate::vvc) fn reconstruct_vvc_luma_transform_skip_residuals_into(
         return;
     }
     residuals[0] = dc_level;
-    for y in 0..height.min(4) {
-        for x in 0..width.min(4) {
+    let active_width = if width == 8 && height == 8 {
+        8
+    } else {
+        width.min(4)
+    };
+    let active_height = if width == 8 && height == 8 {
+        8
+    } else {
+        height.min(4)
+    };
+    for y in 0..active_height {
+        for x in 0..active_width {
             if x == 0 && y == 0 {
                 continue;
             }
-            residuals[y * width + x] = ac_levels[y * 4 + x - 1];
+            residuals[y * width + x] = ac_levels[y * active_width + x - 1];
         }
     }
 }
@@ -1323,15 +1333,26 @@ pub(in crate::vvc) fn transform_skip_luma_ac_levels_and_flag(
 ) -> ([i16; super::VVC_LUMA_AC_COEFFS_PER_TU], bool) {
     let mut levels = [0; super::VVC_LUMA_AC_COEFFS_PER_TU];
     let mut has_ac = false;
-    for y in 0..4 {
-        for x in 0..4 {
+    let height = residuals.len() / width;
+    let active_width = if width == 8 && height == 8 {
+        8
+    } else {
+        width.min(4)
+    };
+    let active_height = if width == 8 && height == 8 {
+        8
+    } else {
+        height.min(4)
+    };
+    for y in 0..active_height {
+        for x in 0..active_width {
             if x == 0 && y == 0 {
                 continue;
             }
             let raster_idx = y * width + x;
             if raster_idx < residuals.len() {
                 let level = residuals[raster_idx];
-                levels[y * 4 + x - 1] = level;
+                levels[y * active_width + x - 1] = level;
                 has_ac |= level != 0;
             }
         }

@@ -241,12 +241,17 @@ pub(super) struct VvcTuTransformBlock {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct VvcQuantizedTransformBlock {
+pub(super) struct VvcQuantizedTransformBlock<const AC_COEFFS: usize> {
     pub(super) reconstructed_dc_coeff: i16,
-    pub(super) reconstructed_ac_coeffs: [i16; 15],
+    pub(super) reconstructed_ac_coeffs: [i16; AC_COEFFS],
     pub(super) has_ac: bool,
     pub(super) abs_remainder: u8,
 }
+
+pub(super) type VvcQuantizedLumaTransformBlock =
+    VvcQuantizedTransformBlock<VVC_LUMA_AC_COEFFS_PER_TU>;
+pub(super) type VvcQuantizedChromaTransformBlock =
+    VvcQuantizedTransformBlock<VVC_CHROMA_AC_COEFFS_PER_TU>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VvcResidualComponent {
@@ -264,8 +269,8 @@ impl VvcResidualComponent {
     }
 }
 
-pub(super) const VVC_LUMA_AC_COEFFS_PER_TU: usize = 15;
-pub(super) const VVC_CHROMA_AC_COEFFS_PER_TU: usize = VVC_LUMA_AC_COEFFS_PER_TU;
+pub(super) const VVC_LUMA_AC_COEFFS_PER_TU: usize = 63;
+pub(super) const VVC_CHROMA_AC_COEFFS_PER_TU: usize = 15;
 pub(super) const VVC_CHROMA_AC_POSITIONS_4X4: [(usize, usize); VVC_CHROMA_AC_COEFFS_PER_TU] = [
     (1, 0),
     (2, 0),

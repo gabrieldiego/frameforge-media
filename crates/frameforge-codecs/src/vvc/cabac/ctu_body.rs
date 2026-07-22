@@ -700,7 +700,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             VvcResidualCabacEncoder::new(&mut *self.contexts, self.slice_config.residual_options());
         if transform_skip {
             debug_assert_eq!(mts_index, 0);
-            VvcResidualCabacSymbolStream::emit_luma_transform_skip_first4x4_coefficients(
+            VvcResidualCabacSymbolStream::emit_luma_transform_skip_coefficients_from_levels(
                 log2_width,
                 log2_height,
                 dc_level,
@@ -710,7 +710,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 cabac,
             );
         } else {
-            VvcResidualCabacSymbolStream::emit_luma_first4x4_coefficients(
+            VvcResidualCabacSymbolStream::emit_luma_coefficients(
                 log2_width,
                 log2_height,
                 dc_level,
