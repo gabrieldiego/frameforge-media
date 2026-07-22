@@ -2571,6 +2571,26 @@ First-frame six-vector matrix versus `vvc-luma-mpm-tiebreak-1f`:
 | VVC | lossless | 5,884,724 | 0.37 | -346 |
 | VVC | qp=24 | 5,714,171 | 0.41 | 0 |
 
+## VVC Score Policy Selectors
+
+Checkpoint: `vvc-score-policy-selectors-1f`.
+
+This checkpoint moves the remaining VVC residual-score metric choice into an
+explicit selector. Lossless still uses SAD, lossy still uses SSE, and the
+lossless-only chroma syntax tie-breaker is now selected through the same mode
+decision policy layer. The quantizer no longer directly matches on
+`VvcResidualCodingMode` while scoring candidates, which keeps lossy/lossless
+differences at block mode selection boundaries instead of as a hidden scoring
+branch.
+
+The first-frame matrix is byte-identical against
+`vvc-lossless-chroma-syntax-tiebreak-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.40 | 0 |
+
 ## References
 
 - Cargo profile settings:

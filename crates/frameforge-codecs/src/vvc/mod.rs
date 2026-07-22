@@ -1129,6 +1129,12 @@ pub(in crate::vvc) enum VvcTuResidualCodingMode {
     TransformSkip,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcResidualScoreMetric {
+    Sad,
+    Sse,
+}
+
 impl VvcResidualCodingMode {
     const fn for_encode_options(options: VvcEncodeOptions) -> Self {
         match options.lossless {
@@ -1505,6 +1511,23 @@ pub(in crate::vvc) fn select_vvc_luma_tu_mts_index(
     // TODO(vvc): choose nonzero MTS after the corresponding forward and
     // inverse transforms are wired into quantization and reconstruction.
     0
+}
+
+pub(in crate::vvc) fn select_vvc_residual_score_metric(
+    context: VvcResidualModeDecisionContext,
+) -> VvcResidualScoreMetric {
+    let _selector_scope = (context.chroma_sampling(), context.bit_depth());
+    match context.residual_mode() {
+        VvcResidualCodingMode::Lossless => VvcResidualScoreMetric::Sad,
+        VvcResidualCodingMode::Lossy => VvcResidualScoreMetric::Sse,
+    }
+}
+
+pub(in crate::vvc) fn select_vvc_chroma_mode_syntax_tie_breaker(
+    context: VvcResidualModeDecisionContext,
+) -> bool {
+    let _selector_scope = (context.chroma_sampling(), context.bit_depth());
+    context.is_lossless()
 }
 
 pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(

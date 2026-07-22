@@ -1595,6 +1595,41 @@ fn vvc_tu_residual_coding_selector_is_shared_across_formats() {
 }
 
 #[test]
+fn vvc_residual_score_policy_is_shared_across_formats() {
+    for chroma_sampling in [
+        ChromaSampling::Cs420,
+        ChromaSampling::Cs422,
+        ChromaSampling::Cs444,
+    ] {
+        for bit_depth in [8, 10, 12] {
+            let format = VvcPictureFormat {
+                chroma_sampling,
+                bit_depth: SampleBitDepth::new(bit_depth).expect("supported VVC bit depth"),
+            };
+            for (residual_mode, expected_metric, expected_chroma_syntax_tie) in [
+                (
+                    VvcResidualCodingMode::Lossy,
+                    VvcResidualScoreMetric::Sse,
+                    false,
+                ),
+                (
+                    VvcResidualCodingMode::Lossless,
+                    VvcResidualScoreMetric::Sad,
+                    true,
+                ),
+            ] {
+                let context = VvcResidualModeDecisionContext::new(format, residual_mode);
+                assert_eq!(select_vvc_residual_score_metric(context), expected_metric);
+                assert_eq!(
+                    select_vvc_chroma_mode_syntax_tie_breaker(context),
+                    expected_chroma_syntax_tie
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vvc_residual_luma_selector_can_choose_planar_when_candidate_is_supplied() {
     let format = VvcPictureFormat {
         chroma_sampling: ChromaSampling::Cs420,
