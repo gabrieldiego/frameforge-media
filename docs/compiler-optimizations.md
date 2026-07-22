@@ -2763,6 +2763,48 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Grouped 8x8 Residual Syntax
+
+Checkpoint: `vvc-grouped-8x8-syntax-1f`.
+
+This checkpoint wires the generic VVC luma coefficient path for grouped 8x8
+residual syntax. It adds last-significant coefficient suffix bins, 4x4 subblock
+scan grouping inside 8x8 TUs, reverse subblock traversal, and `sb_coded_flag`
+emission for intermediate coded subblocks. The production quantized TU payloads
+still feed the existing first-4x4 coefficient subset, so normal bitstreams are
+unchanged. This is a syntax prerequisite for later coding wider luma residual
+coefficients from the unified TU mode decision.
+
+The first-frame six-vector matrix was byte-identical against
+`vvc-pass1-8x8-context-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.35 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.40 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_residual_symbol_stream_supports_grouped_8x8_luma_scan --features vvc
+cargo test -p frameforge-codecs vvc_residual_ac_symbol_stream_uses_spec_context_derivations --features vvc
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-grouped-8x8-syntax-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-pass1-8x8-context-1f.json
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:

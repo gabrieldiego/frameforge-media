@@ -553,6 +553,40 @@ fn vvc_residual_symbol_stream_scales_luma_tb_size() {
 }
 
 #[test]
+fn vvc_residual_symbol_stream_supports_grouped_8x8_luma_scan() {
+    let coeffs = vvc_luma_coefficients(8, 8, &[(4, 2)]);
+    let stream = VvcResidualCabacSymbolStream::luma_coefficients(3, 3, &coeffs);
+
+    assert_eq!(stream.config.last_significant_x, 4);
+    assert_eq!(stream.config.last_significant_y, 0);
+    assert!(stream.pass1_state.sig_coeff_at(4, 0));
+    assert!(stream
+        .symbols
+        .contains(&VvcResidualCabacSymbol::LastSigCoeffXSuffix { bits: 0, count: 1 }));
+    assert!(stream
+        .symbols
+        .contains(&VvcResidualCabacSymbol::LastSigCoeffYPrefix {
+            bin_idx: 0,
+            bin: false
+        }));
+    assert!(stream
+        .symbols
+        .contains(&VvcResidualCabacSymbol::SbCodedFlag {
+            x_s: 0,
+            y_s: 1,
+            coded: false,
+        }));
+    assert!(stream
+        .symbols
+        .contains(&VvcResidualCabacSymbol::AbsLevelGtxFlag {
+            x: 4,
+            y: 0,
+            gtx_idx: 0,
+            greater_than: true,
+        }));
+}
+
+#[test]
 fn vvc_residual_symbol_stream_maps_large_abs_remainder_by_spec_order() {
     let coeffs = vvc_luma_coefficients(8, 8, &[(0, -16)]);
     let stream = VvcResidualCabacSymbolStream::luma_coefficients(3, 3, &coeffs);
