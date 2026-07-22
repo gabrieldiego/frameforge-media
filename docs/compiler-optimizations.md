@@ -2360,6 +2360,36 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-colocated-mode-map-1f.json
 ```
 
+## VVC Per-TU MRL Index
+
+Checkpoint: `vvc-tu-mrl-index-1f`.
+
+This checkpoint moves the VVC multi-reference-line decision into luma TU
+metadata. The current selector still emits only MRL index 0, so the CABAC
+bitstream remains unchanged. Keeping the index in the quantized CTU lets future
+intra prediction trials choose MRL per block without baking that assumption into
+the syntax writer.
+
+The first-frame matrix is byte-identical against `vvc-tu-transform-skip-flags-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.37 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-tu-mrl-index-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-transform-skip-flags-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

@@ -2573,6 +2573,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_ac_levels,
         luma_tu_has_ac,
         luma_tu_transform_skip,
+        luma_tu_mrl_index,
     ) = vvc_luma_residual_arrays_for_geometry(
         coded,
         chroma_sampling,
@@ -2597,6 +2598,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_ac_levels,
         luma_tu_has_ac,
         luma_tu_transform_skip,
+        luma_tu_mrl_index,
         cb_dc_abs_level: color.cb_rem,
         cb_dc_negative: color.u < 128 && color.cb_rem != 0,
         chroma_tu_intra_modes,
@@ -2626,6 +2628,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
+    [u8; MAX_VVC_LUMA_TUS],
 ) {
     let mut luma_tu_count = color.luma_tu_count;
     let mut luma_tu_intra_modes = color.luma_tu_intra_modes;
@@ -2635,6 +2638,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     let mut luma_tu_ac_levels = color.luma_tu_ac_levels;
     let mut luma_tu_has_ac = color.luma_tu_has_ac;
     let mut luma_tu_transform_skip = color.luma_tu_transform_skip;
+    let mut luma_tu_mrl_index = color.luma_tu_mrl_index;
     if color.luma_tu_count > 1 {
         return (
             luma_tu_count,
@@ -2645,6 +2649,7 @@ fn vvc_luma_residual_arrays_for_geometry(
             luma_tu_ac_levels,
             luma_tu_has_ac,
             luma_tu_transform_skip,
+            luma_tu_mrl_index,
         );
     }
 
@@ -2659,6 +2664,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         luma_tu_ac_levels[idx] = color.luma_tu_ac_levels[0];
         luma_tu_has_ac[idx] = color.luma_tu_has_ac[0];
         luma_tu_transform_skip[idx] = color.luma_tu_transform_skip[0];
+        luma_tu_mrl_index[idx] = color.luma_tu_mrl_index[0];
     }
     (
         luma_tu_count,
@@ -2669,6 +2675,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         luma_tu_ac_levels,
         luma_tu_has_ac,
         luma_tu_transform_skip,
+        luma_tu_mrl_index,
     )
 }
 

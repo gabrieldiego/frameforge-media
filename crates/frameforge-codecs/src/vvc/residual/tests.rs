@@ -154,6 +154,9 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
     assert_eq!(color.luma_tu_count, 64);
     assert!(color.luma_tu_remainders[0] > 0);
     assert_eq!(color.luma_tu_ac_levels[0], [0; VVC_LUMA_AC_COEFFS_PER_TU]);
+    assert!(color.luma_tu_mrl_index[..color.luma_tu_count]
+        .iter()
+        .all(|index| *index == 0));
     assert!(color.luma_tu_transform_skip[..color.luma_tu_count]
         .iter()
         .all(|enabled| !*enabled));
@@ -179,6 +182,9 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
     assert!(lossless.luma_tu_transform_skip[..lossless.luma_tu_count]
         .iter()
         .all(|enabled| *enabled));
+    assert!(lossless.luma_tu_mrl_index[..lossless.luma_tu_count]
+        .iter()
+        .all(|index| *index == 0));
     assert!(lossless.cb_tu_transform_skip[..lossless.chroma_tu_count]
         .iter()
         .all(|enabled| *enabled));
