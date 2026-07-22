@@ -1,5 +1,7 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
+#[cfg(test)]
+use super::super::VvcTreeType;
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_cclm_node_allowed,
     vvc_chroma_explicit_candidates, vvc_chroma_intra_mode_syntax_bin_count,
@@ -853,24 +855,24 @@ fn vvc_source_luma_directional_seed(
     }
 
     let stride = source_frame.geometry.width;
-    let mut gxx = 0f64;
-    let mut gyy = 0f64;
-    let mut gxy = 0f64;
+    let mut gxx = 0i64;
+    let mut gyy = 0i64;
+    let mut gxy = 0i64;
     for y in (y0 + 1)..y1 {
         for x in (x0 + 1)..x1 {
-            let sample = f64::from(source_frame.luma[y * stride + x]);
-            let dx = sample - f64::from(source_frame.luma[y * stride + x - 1]);
-            let dy = sample - f64::from(source_frame.luma[(y - 1) * stride + x]);
+            let sample = i64::from(source_frame.luma[y * stride + x]);
+            let dx = sample - i64::from(source_frame.luma[y * stride + x - 1]);
+            let dy = sample - i64::from(source_frame.luma[(y - 1) * stride + x]);
             gxx += dx * dx;
             gyy += dy * dy;
             gxy += dx * dy;
         }
     }
-    if gxx + gyy == 0.0 {
+    if gxx == 0 && gyy == 0 {
         return None;
     }
 
-    let gradient_angle = 0.5 * (2.0 * gxy).atan2(gxx - gyy);
+    let gradient_angle = 0.5 * (2.0 * gxy as f64).atan2((gxx - gyy) as f64);
     let mut edge_angle = gradient_angle + std::f64::consts::FRAC_PI_2;
     while edge_angle < 0.0 {
         edge_angle += std::f64::consts::PI;
@@ -1435,4 +1437,69 @@ pub(in crate::vvc) fn residual_chroma_tu_at_into(
 fn vvc_sample_delta_i16(sample: VvcSample, predicted: VvcSample) -> i16 {
     (i32::from(sample) - i32::from(predicted)).clamp(i32::from(i16::MIN), i32::from(i16::MAX))
         as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sampled_luma_frame(width: usize, height: usize, luma: Vec<VvcSample>) -> VvcSampledFrame {
+        assert_eq!(luma.len(), width * height);
+        let format = VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs420,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
+        };
+        let chroma_len = (width / 2) * (height / 2);
+        VvcSampledFrame {
+            geometry: VvcVideoGeometry { width, height },
+            format,
+            luma,
+            cb: vec![128; chroma_len],
+            cr: vec![128; chroma_len],
+            chroma_len,
+        }
+    }
+
+    #[test]
+    fn vvc_source_luma_directional_seed_maps_integer_gradients() {
+        let node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
+        let flat = sampled_luma_frame(8, 8, vec![64; 64]);
+        assert_eq!(vvc_source_luma_directional_seed(&flat, node), None);
+
+        let horizontal_ramp = sampled_luma_frame(
+            8,
+            8,
+            (0..8)
+                .flat_map(|_| (0..8).map(|x| (x * 16) as VvcSample))
+                .collect(),
+        );
+        assert_eq!(
+            vvc_source_luma_directional_seed(&horizontal_ramp, node),
+            Some(50)
+        );
+
+        let vertical_ramp = sampled_luma_frame(
+            8,
+            8,
+            (0..8)
+                .flat_map(|y| (0..8).map(move |_| (y * 16) as VvcSample))
+                .collect(),
+        );
+        assert_eq!(
+            vvc_source_luma_directional_seed(&vertical_ramp, node),
+            Some(18)
+        );
+
+        let diagonal_ramp = sampled_luma_frame(
+            8,
+            8,
+            (0..8)
+                .flat_map(|y| (0..8).map(move |x| ((x + y) * 8) as VvcSample))
+                .collect(),
+        );
+        assert_eq!(
+            vvc_source_luma_directional_seed(&diagonal_ramp, node),
+            Some(34)
+        );
+    }
 }
