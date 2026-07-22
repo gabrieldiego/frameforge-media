@@ -499,15 +499,204 @@ fn quantize_vvc_chroma_residual_dc_by_search(
     bit_depth: SampleBitDepth,
     chroma_qp: i32,
 ) -> i16 {
+    if !chroma_dc_fast_search_allowed(width, height, bit_depth, chroma_qp) {
+        return quantize_vvc_chroma_residual_dc_by_exhaustive_search(
+            residual_sum,
+            original_sse,
+            sample_count,
+            width,
+            height,
+            bit_depth,
+            chroma_qp,
+        );
+    }
+
+    let target_level = first_chroma_dc_level_at_or_above_target(
+        residual_sum,
+        sample_count,
+        width,
+        height,
+        bit_depth,
+        chroma_qp,
+    );
+    let mut candidates = [0i16; 3];
+    let mut candidate_count = 0usize;
+    push_chroma_dc_candidate(&mut candidates, &mut candidate_count, 0);
+    if target_level <= i32::from(VVC_CHROMA_DC_LEVEL_LIMIT) {
+        let level = target_level as i16;
+        push_chroma_dc_candidate(
+            &mut candidates,
+            &mut candidate_count,
+            first_chroma_dc_level_with_reconstructed_residual(
+                dc_only_residual_from_level(level, width, height, chroma_qp, bit_depth),
+                width,
+                height,
+                bit_depth,
+                chroma_qp,
+            ),
+        );
+    }
+    if target_level > i32::from(-VVC_CHROMA_DC_LEVEL_LIMIT) {
+        let level = (target_level - 1).min(i32::from(VVC_CHROMA_DC_LEVEL_LIMIT)) as i16;
+        push_chroma_dc_candidate(
+            &mut candidates,
+            &mut candidate_count,
+            first_chroma_dc_level_with_reconstructed_residual(
+                dc_only_residual_from_level(level, width, height, chroma_qp, bit_depth),
+                width,
+                height,
+                bit_depth,
+                chroma_qp,
+            ),
+        );
+    }
+    candidates[..candidate_count].sort_unstable();
+
+    let mut best_level = 0;
+    let mut best_sse = original_sse;
+
+    for level in candidates.into_iter().take(candidate_count) {
+        let sse = chroma_dc_sse_for_level(
+            level,
+            residual_sum,
+            original_sse,
+            sample_count,
+            width,
+            height,
+            bit_depth,
+            chroma_qp,
+        );
+        if sse < best_sse {
+            best_sse = sse;
+            best_level = level;
+        }
+    }
+    best_level
+}
+
+fn chroma_dc_fast_search_allowed(
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> bool {
+    let min_reconstructed = dc_only_residual_from_level_i64(
+        -VVC_CHROMA_DC_LEVEL_LIMIT,
+        width,
+        height,
+        chroma_qp,
+        bit_depth,
+    );
+    let max_reconstructed = dc_only_residual_from_level_i64(
+        VVC_CHROMA_DC_LEVEL_LIMIT,
+        width,
+        height,
+        chroma_qp,
+        bit_depth,
+    );
+    min_reconstructed >= i64::from(i16::MIN) && max_reconstructed <= i64::from(i16::MAX)
+}
+
+fn first_chroma_dc_level_at_or_above_target(
+    residual_sum: i64,
+    sample_count: i64,
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> i32 {
+    debug_assert!(sample_count > 0);
+    let mut lo = i32::from(-VVC_CHROMA_DC_LEVEL_LIMIT);
+    let mut hi = i32::from(VVC_CHROMA_DC_LEVEL_LIMIT) + 1;
+    while lo < hi {
+        let mid = lo + ((hi - lo) >> 1);
+        let reconstructed = i64::from(dc_only_residual_from_level(
+            mid as i16, width, height, chroma_qp, bit_depth,
+        ));
+        if sample_count * reconstructed >= residual_sum {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
+}
+
+fn first_chroma_dc_level_with_reconstructed_residual(
+    target_residual: i16,
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> i16 {
+    let mut lo = i32::from(-VVC_CHROMA_DC_LEVEL_LIMIT);
+    let mut hi = i32::from(VVC_CHROMA_DC_LEVEL_LIMIT);
+    while lo < hi {
+        let mid = lo + ((hi - lo) >> 1);
+        let reconstructed =
+            dc_only_residual_from_level(mid as i16, width, height, chroma_qp, bit_depth);
+        if reconstructed >= target_residual {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo as i16
+}
+
+fn push_chroma_dc_candidate(candidates: &mut [i16; 3], count: &mut usize, level: i16) {
+    if candidates
+        .iter()
+        .take(*count)
+        .any(|candidate| *candidate == level)
+    {
+        return;
+    }
+    debug_assert!(*count < candidates.len());
+    candidates[*count] = level;
+    *count += 1;
+}
+
+fn chroma_dc_sse_for_level(
+    level: i16,
+    residual_sum: i64,
+    original_sse: i64,
+    sample_count: i64,
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> i64 {
+    let reconstructed = i64::from(dc_only_residual_from_level(
+        level, width, height, chroma_qp, bit_depth,
+    ));
+    original_sse + (sample_count * reconstructed * reconstructed)
+        - (2 * reconstructed * residual_sum)
+}
+
+fn quantize_vvc_chroma_residual_dc_by_exhaustive_search(
+    residual_sum: i64,
+    original_sse: i64,
+    sample_count: i64,
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> i16 {
     let mut best_level = 0;
     let mut best_sse = original_sse;
 
     for level in -VVC_CHROMA_DC_LEVEL_LIMIT..=VVC_CHROMA_DC_LEVEL_LIMIT {
-        let reconstructed = i64::from(dc_only_residual_from_level(
-            level, width, height, chroma_qp, bit_depth,
-        ));
-        let sse = original_sse + (sample_count * reconstructed * reconstructed)
-            - (2 * reconstructed * residual_sum);
+        let sse = chroma_dc_sse_for_level(
+            level,
+            residual_sum,
+            original_sse,
+            sample_count,
+            width,
+            height,
+            bit_depth,
+            chroma_qp,
+        );
         if sse < best_sse {
             best_sse = sse;
             best_level = level;
@@ -829,6 +1018,16 @@ fn dc_only_residual_from_level(
     qp: i32,
     bit_depth: SampleBitDepth,
 ) -> i16 {
+    dc_only_residual_from_level_i64(level, width, height, qp, bit_depth) as i16
+}
+
+fn dc_only_residual_from_level_i64(
+    level: i16,
+    width: u16,
+    height: u16,
+    qp: i32,
+    bit_depth: SampleBitDepth,
+) -> i64 {
     if level == 0 {
         return 0;
     }
@@ -844,5 +1043,133 @@ fn dc_only_residual_from_level(
         6 + 15 - i32::from(bit_depth.bits())
     };
     let residual_offset = 1 << (residual_bd_shift - 1);
-    ((64 * vertical + residual_offset) >> residual_bd_shift) as i16
+    i64::from((64 * vertical + residual_offset) >> residual_bd_shift)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vvc_chroma_dc_fast_search_matches_exhaustive_search() {
+        let dimensions = [4, 8, 16, 32];
+        let qps = [0, 1, 6, 13, 24, 32, 34, 41, 51, 63];
+        let bit_depths = [
+            SampleBitDepth::new(8).expect("8-bit depth"),
+            SampleBitDepth::new(10).expect("10-bit depth"),
+            SampleBitDepth::new(12).expect("12-bit depth"),
+        ];
+
+        for bit_depth in bit_depths {
+            let max_residual = bit_depth.max_sample() as i16;
+            let probes = [
+                -max_residual,
+                -(max_residual / 2),
+                (-513i16).clamp(-max_residual, max_residual),
+                (-129i16).clamp(-max_residual, max_residual),
+                -17,
+                -1,
+                0,
+                1,
+                17,
+                129i16.clamp(-max_residual, max_residual),
+                513i16.clamp(-max_residual, max_residual),
+                max_residual / 2,
+                max_residual,
+            ];
+            for width in dimensions {
+                for height in dimensions {
+                    for qp in qps {
+                        for probe in probes {
+                            assert_chroma_dc_fast_search_matches_exhaustive(
+                                vec![probe; width * height],
+                                width as u16,
+                                height as u16,
+                                bit_depth,
+                                qp,
+                            );
+                            assert_chroma_dc_fast_search_matches_exhaustive(
+                                alternating_chroma_dc_residuals(width, height, probe),
+                                width as u16,
+                                height as u16,
+                                bit_depth,
+                                qp,
+                            );
+                            assert_chroma_dc_fast_search_matches_exhaustive(
+                                patterned_chroma_dc_residuals(width, height, probe, max_residual),
+                                width as u16,
+                                height as u16,
+                                bit_depth,
+                                qp,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_chroma_dc_fast_search_matches_exhaustive(
+        residuals: Vec<i16>,
+        width: u16,
+        height: u16,
+        bit_depth: SampleBitDepth,
+        chroma_qp: i32,
+    ) {
+        let (residual_sum, original_sse) = residual_sum_and_sse(&residuals);
+        let sample_count = residuals.len() as i64;
+        let expected = quantize_vvc_chroma_residual_dc_by_exhaustive_search(
+            residual_sum,
+            original_sse,
+            sample_count,
+            width,
+            height,
+            bit_depth,
+            chroma_qp,
+        );
+        let actual = quantize_vvc_chroma_residual_dc_by_search(
+            residual_sum,
+            original_sse,
+            sample_count,
+            width,
+            height,
+            bit_depth,
+            chroma_qp,
+        );
+        assert_eq!(
+            actual, expected,
+            "fast chroma DC search differed from exhaustive for {width}x{height} qp={chroma_qp} bit_depth={} sum={residual_sum} sse={original_sse}",
+            bit_depth.bits()
+        );
+        let public = quantize_vvc_chroma_residual_dc_with_qp(
+            &residuals, width, height, bit_depth, chroma_qp,
+        );
+        assert_eq!(
+            public, expected,
+            "public chroma DC quantizer differed from exhaustive for {width}x{height} qp={chroma_qp} bit_depth={}",
+            bit_depth.bits()
+        );
+    }
+
+    fn alternating_chroma_dc_residuals(width: usize, height: usize, probe: i16) -> Vec<i16> {
+        (0..width * height)
+            .map(|idx| if idx & 1 == 0 { probe } else { -(probe / 2) })
+            .collect()
+    }
+
+    fn patterned_chroma_dc_residuals(
+        width: usize,
+        height: usize,
+        probe: i16,
+        max_residual: i16,
+    ) -> Vec<i16> {
+        let scale = i32::from(probe).abs().max(1);
+        (0..width * height)
+            .map(|idx| {
+                let centered = ((idx * 37 + width * 11 + height * 7) % 17) as i32 - 8;
+                ((centered * scale) / 8).clamp(-i32::from(max_residual), i32::from(max_residual))
+                    as i16
+            })
+            .collect()
+    }
 }

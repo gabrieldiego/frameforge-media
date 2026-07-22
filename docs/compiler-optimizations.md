@@ -2176,6 +2176,47 @@ python3 scripts/summarize_encoder_instrumentation.py \
   --top 12
 ```
 
+## VVC Fast Chroma DC Search
+
+Checkpoint: `vvc-chroma-dc-fast-search-1f`.
+
+This checkpoint replaces the VVC chroma DC quantizer's generic exhaustive
+`-255..255` level scan with an exact monotonic search. The fast path finds the
+first level at or above the DC target, evaluates that reconstructed value and
+the previous one, and keeps the existing strict-improvement tie behavior. When
+the decoder-side residual mapping would wrap through `i16` at extreme QP and
+bit-depth combinations, the encoder falls back to the old exhaustive selector
+so bitstreams remain unchanged.
+
+The new unit test compares the fast selector and the public chroma DC quantizer
+against the old exhaustive search across 4/8/16/32-wide TUs, 8/10/12-bit input,
+and representative QP values from 0 through 63.
+
+First-frame six-vector matrix versus `vvc-intra-stats-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.34 | 0 |
+| VVC | qp=24 | 5,880,550 | 0.40 | 0 |
+
+Per-row lossy VVC FPS deltas in this run were positive by about +0.07 to
++0.17 fps, while lossless rows were unchanged apart from normal timing noise.
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc_chroma_dc_fast_search_matches_exhaustive_search --features vvc
+cargo test -p frameforge-codecs vvc --features vvc
+cargo check -p frameforge-codecs --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-chroma-dc-fast-search-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-intra-stats-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
