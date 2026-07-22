@@ -306,6 +306,8 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         cb_rem: 16,
         cr_rem: 16,
+        #[cfg(feature = "vvc-stats")]
+        intra_search_stats: Default::default(),
     }
 }
 

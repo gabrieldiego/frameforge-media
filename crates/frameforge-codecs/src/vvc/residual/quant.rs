@@ -13,6 +13,8 @@ use super::super::{
     VvcResidualModeDecisionContext, VvcSample, VvcSampledColor, VvcSampledFrame, VvcVideoGeometry,
     VVC_CTU_SIZE,
 };
+#[cfg(feature = "vvc-stats")]
+use super::VvcIntraSearchStats;
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into_with_qp,
@@ -114,9 +116,10 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     let mut candidate_cr_prediction = Vec::new();
     let mut candidate_cb_residuals = Vec::new();
     let mut candidate_cr_residuals = Vec::new();
+    #[cfg(feature = "vvc-stats")]
+    let mut intra_search_stats = VvcIntraSearchStats::default();
 
     let mode_context = VvcResidualModeDecisionContext::new(source_frame.format, residual_mode);
-    let lossless_residual = residual_mode.is_lossless();
     let luma_max_leaf_size = residual_mode.luma_max_leaf_size();
     let ctu_shape = VvcCtuPartitionShape {
         root_width: VVC_CTU_SIZE as u16,
@@ -157,6 +160,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let mut best_luma_mode = VvcIntraPredictionMode::Dc;
         let mut best_luma_sad = dc_sad;
         let mut luma_candidate_costs = VvcLumaIntraCandidateCosts::new(dc_sad);
+        #[cfg(feature = "vvc-stats")]
+        intra_search_stats.add_luma_dc();
         if vvc_residual_luma_planar_candidate_allowed(mode_context, node) {
             predict_vvc_luma_intra_block_into_with_availability(
                 &mut candidate_luma_prediction,
@@ -178,6 +183,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 &candidate_luma_prediction,
             );
             let candidate_sad = residual_sad(&candidate_luma_residuals);
+            #[cfg(feature = "vvc-stats")]
+            intra_search_stats.add_luma_planar();
             luma_candidate_costs = luma_candidate_costs
                 .with_candidate(VvcIntraPredictionMode::Planar, Some(candidate_sad));
             if candidate_sad < best_luma_sad {
@@ -217,6 +224,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                     &candidate_luma_prediction,
                 );
                 let candidate_sad = residual_sad(&candidate_luma_residuals);
+                #[cfg(feature = "vvc-stats")]
+                intra_search_stats.add_luma_directional_coarse();
                 luma_candidate_costs =
                     luma_candidate_costs.with_candidate(mode, Some(candidate_sad));
                 if candidate_sad < best_luma_sad {
@@ -250,6 +259,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                         &candidate_luma_prediction,
                     );
                     let candidate_sad = residual_sad(&candidate_luma_residuals);
+                    #[cfg(feature = "vvc-stats")]
+                    intra_search_stats.add_luma_directional_refinement();
                     luma_candidate_costs =
                         luma_candidate_costs.with_candidate(mode, Some(candidate_sad));
                     if candidate_sad < best_luma_sad {
@@ -359,6 +370,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let mut best_chroma_mode = initial_chroma_mode;
         let mut best_chroma_sad = initial_sad;
         let mut chroma_candidate_costs = VvcChromaIntraCandidateCosts::new(initial_sad);
+        #[cfg(feature = "vvc-stats")]
+        intra_search_stats.add_chroma_derived();
         for explicit_mode in vvc_chroma_explicit_candidates(co_located_luma_mode) {
             if !vvc_residual_chroma_explicit_candidate_allowed(explicit_mode) {
                 continue;
@@ -416,6 +429,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             );
             let candidate_sad =
                 residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
+            #[cfg(feature = "vvc-stats")]
+            intra_search_stats.add_chroma_explicit();
             chroma_candidate_costs =
                 chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
             if candidate_sad < best_chroma_sad {
@@ -486,6 +501,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 );
                 let candidate_sad =
                     residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
+                #[cfg(feature = "vvc-stats")]
+                intra_search_stats.add_chroma_cclm();
                 chroma_candidate_costs =
                     chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
                 if candidate_sad < best_chroma_sad {
@@ -541,16 +558,18 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     ));
     VvcQuantizedColor {
         y: vvc_downshift_sample_to_u8(color.y, source_frame.format.bit_depth),
-        u: if lossless_residual {
-            vvc_downshift_sample_to_u8(color.u, source_frame.format.bit_depth)
-        } else {
-            reconstruct_vvc_chroma(cb_rem)
-        },
-        v: if lossless_residual {
-            vvc_downshift_sample_to_u8(color.v, source_frame.format.bit_depth)
-        } else {
-            reconstruct_vvc_chroma(cr_rem)
-        },
+        u: finalized_vvc_chroma_sample(
+            residual_mode,
+            color.u,
+            cb_rem,
+            source_frame.format.bit_depth,
+        ),
+        v: finalized_vvc_chroma_sample(
+            residual_mode,
+            color.v,
+            cr_rem,
+            source_frame.format.bit_depth,
+        ),
         luma_tu_intra_modes,
         luma_tu_remainders,
         luma_tu_negative,
@@ -568,6 +587,20 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         cr_tu_has_ac,
         cb_rem,
         cr_rem,
+        #[cfg(feature = "vvc-stats")]
+        intra_search_stats,
+    }
+}
+
+fn finalized_vvc_chroma_sample(
+    residual_mode: VvcResidualCodingMode,
+    source: VvcSample,
+    quantized_remainder: u8,
+    bit_depth: SampleBitDepth,
+) -> u8 {
+    match residual_mode {
+        VvcResidualCodingMode::Lossless => vvc_downshift_sample_to_u8(source, bit_depth),
+        VvcResidualCodingMode::Lossy => reconstruct_vvc_chroma(quantized_remainder),
     }
 }
 

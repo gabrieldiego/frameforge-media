@@ -2104,6 +2104,78 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Intra Search Instrumentation
+
+Checkpoint: `vvc-intra-search-stats`.
+
+This checkpoint keeps the `vvc-residual-path-unified` bitstreams unchanged in
+normal builds while extending the compile-gated `vvc-stats` instrumentation:
+
+- `VvcQuantizedColor` carries gated intra-search counters only when
+  `frameforge-codecs/vvc-stats` is enabled.
+- Frame stats and CTU bit JSONL records now include luma candidate counts
+  split into DC, planar, directional coarse, and directional refinement.
+- Chroma counters now split candidate work into derived, explicit, and CCLM
+  candidates.
+- `scripts/summarize_encoder_instrumentation.py --vvc-stats` now prints a
+  compact counter table and caps per-angular-index counters with `--top`.
+- The remaining final sampled-color branch now goes through
+  `VvcResidualCodingMode`, removing another local lossy/lossless boolean from
+  the CTU residual path.
+
+The first-frame six-vector matrix against `vvc-staged-angular-cclm422-1f`
+was byte-identical for AV2 and VVC, lossless and QP24 lossy:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| AV2 | lossless | 6,586,445 | 0 |
+| AV2 | qp=24 | 2,400,148 | 0 |
+| VVC | lossless | 5,996,606 | 0 |
+| VVC | qp=24 | 5,880,550 | 0 |
+
+Instrumentation probe on the first SceneComposition 4:2:0 frame, VVC QP24:
+
+| Counter | Value |
+|---|---:|
+| `luma_tu_count` | 32,400 |
+| `luma_candidate_count` | 665,495 |
+| `luma_candidate_directional_coarse` | 501,085 |
+| `luma_candidate_directional_refinement` | 99,610 |
+| `chroma_tu_count` | 32,400 |
+| `chroma_candidate_count` | 259,200 |
+| `chroma_candidate_explicit` | 129,600 |
+| `chroma_candidate_cclm` | 97,200 |
+
+The probe also confirms `ctu_quantize` remains the dominant timed stage at
+about 92% of the recorded encode time. That points the next VVC work toward
+reducing candidate cost or improving residual/transform efficiency rather than
+micro-optimizing file I/O or final reconstruction packing.
+
+Commands:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-intra-stats-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-staged-angular-cclm422-1f.json
+
+make build VVC_STATS=1
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_intra_candidate_stats_probe.jsonl \
+FRAMEFORGE_VVC_CTU_BITS=verification/generated/profiling/vvc_intra_candidate_ctu_probe.jsonl \
+  ./ff encode \
+  verification/generated/test_vectors/aomctc_b2_SceneComposition_1_420_1920x1080_15_1f_yuv420p8.yuv \
+  --frames 1 \
+  --encode vvc:verification/generated/profiling/vvc_intra_candidate_probe.vvc \
+  --recon verification/generated/profiling/vvc_intra_candidate_probe_recon.yuv \
+  --qp 24
+
+python3 scripts/summarize_encoder_instrumentation.py \
+  --vvc-stats scene420/frameforge=verification/generated/profiling/vvc_intra_candidate_stats_probe.jsonl \
+  --top 12
+```
+
 ## References
 
 - Cargo profile settings:

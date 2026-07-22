@@ -367,8 +367,9 @@ impl VvcCtuBitSink {
         let dump = vvc_ctu_partition_cabac_dump(&params, slice_config);
         let luma_modes = vvc_luma_mode_counts(quantized);
         let chroma_modes = vvc_chroma_mode_counts(quantized);
+        let search = quantized.intra_search_stats;
         let line = format!(
-            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
+            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
             frame_idx,
             region.slice_address,
             region.origin_x / VVC_CTU_SIZE,
@@ -385,6 +386,16 @@ impl VvcCtuBitSink {
             chroma_qp,
             quantized.luma_tu_count,
             quantized.chroma_tu_count,
+            search.luma_candidates(),
+            search.luma_dc_candidates,
+            search.luma_planar_candidates,
+            search.luma_directional_candidates(),
+            search.luma_directional_coarse_candidates,
+            search.luma_directional_refinement_candidates,
+            search.chroma_candidates(),
+            search.chroma_derived_candidates,
+            search.chroma_explicit_candidates,
+            search.chroma_cclm_candidates,
             luma_modes.dc,
             luma_modes.planar,
             luma_modes.horizontal,
@@ -578,6 +589,38 @@ pub(in crate::vvc) struct VvcQuantizedCtu {
 fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuantizedColor) {
     stats.add_counter("luma_tu_count", quantized.luma_tu_count as u64);
     stats.add_counter("chroma_tu_count", quantized.chroma_tu_count as u64);
+    let search = quantized.intra_search_stats;
+    stats.add_counter("luma_candidate_count", search.luma_candidates() as u64);
+    stats.add_counter("luma_candidate_dc", search.luma_dc_candidates as u64);
+    stats.add_counter(
+        "luma_candidate_planar",
+        search.luma_planar_candidates as u64,
+    );
+    stats.add_counter(
+        "luma_candidate_directional",
+        search.luma_directional_candidates() as u64,
+    );
+    stats.add_counter(
+        "luma_candidate_directional_coarse",
+        search.luma_directional_coarse_candidates as u64,
+    );
+    stats.add_counter(
+        "luma_candidate_directional_refinement",
+        search.luma_directional_refinement_candidates as u64,
+    );
+    stats.add_counter("chroma_candidate_count", search.chroma_candidates() as u64);
+    stats.add_counter(
+        "chroma_candidate_derived",
+        search.chroma_derived_candidates as u64,
+    );
+    stats.add_counter(
+        "chroma_candidate_explicit",
+        search.chroma_explicit_candidates as u64,
+    );
+    stats.add_counter(
+        "chroma_candidate_cclm",
+        search.chroma_cclm_candidates as u64,
+    );
     let modes = vvc_luma_mode_counts(quantized);
     stats.add_counter("luma_mode_dc", modes.dc as u64);
     stats.add_counter("luma_mode_planar", modes.planar as u64);

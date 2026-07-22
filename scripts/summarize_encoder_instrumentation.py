@@ -63,6 +63,15 @@ class VvcStageRow:
     count: int
 
 
+@dataclass(frozen=True)
+class VvcCounterRow:
+    case: str
+    source: str
+    frame_index: int
+    counter: str
+    value: int
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -116,6 +125,7 @@ def main() -> int:
     field_rows = [row for spec in field_specs for row in read_field_rows(spec)]
     lossy_rows = [row for spec in lossy_specs for row in read_lossy_stats_rows(spec)]
     vvc_rows = [row for spec in vvc_specs for row in read_vvc_stage_rows(spec)]
+    vvc_counter_rows = [row for spec in vvc_specs for row in read_vvc_counter_rows(spec)]
 
     if sb_rows:
         print_sb_summary(sb_rows)
@@ -127,6 +137,8 @@ def main() -> int:
         print_lossy_stats_summary(lossy_rows)
     if vvc_rows:
         print_vvc_stage_summary(vvc_rows, args.top)
+    if vvc_counter_rows:
+        print_vvc_counter_summary(vvc_counter_rows, args.top)
     return 0
 
 
@@ -378,6 +390,25 @@ def read_vvc_stage_rows(spec: TraceSpec) -> list[VvcStageRow]:
     return rows
 
 
+def read_vvc_counter_rows(spec: TraceSpec) -> list[VvcCounterRow]:
+    rows = []
+    for record in read_jsonl(spec.path):
+        if record.get("kind") != "frameforge.vvc.stats.v1":
+            continue
+        source = spec.source or str(record.get("source") or spec.path.stem)
+        for counter in record.get("counters", []):
+            rows.append(
+                VvcCounterRow(
+                    case=spec.case,
+                    source=source,
+                    frame_index=int(record.get("frame_index", 0)),
+                    counter=str(counter.get("name", "")),
+                    value=int(counter.get("value", 0)),
+                )
+            )
+    return rows
+
+
 def print_vvc_stage_summary(rows: list[VvcStageRow], top: int) -> None:
     totals: dict[tuple[str, str, str], list[int]] = defaultdict(lambda: [0, 0])
     total_nanos_by_case: dict[tuple[str, str], int] = defaultdict(int)
@@ -418,6 +449,55 @@ def print_vvc_stage_summary(rows: list[VvcStageRow], top: int) -> None:
             f"{bytes_by_case[(case, source)]} | {total_nanos_by_case[(case, source)] / 1_000_000.0:.3f} |"
         )
     print()
+
+
+def print_vvc_counter_summary(rows: list[VvcCounterRow], top: int) -> None:
+    totals: dict[tuple[str, str, str], int] = defaultdict(int)
+    frame_counts: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for row in rows:
+        totals[(row.case, row.source, row.counter)] += row.value
+        frame_counts[(row.case, row.source)].add(row.frame_index)
+
+    selected_prefixes = (
+        "luma_candidate",
+        "chroma_candidate",
+        "luma_mode",
+        "chroma_mode",
+        "luma_tu_count",
+        "chroma_tu_count",
+    )
+    print("## VVC Counter Summary")
+    print("| Case | Source | Counter | Total | Per frame |")
+    print("|---|---|---|---:|---:|")
+    for (case, source, counter), value in sorted(totals.items()):
+        if not counter.startswith(selected_prefixes) or is_vvc_index_counter(counter):
+            continue
+        frames = len(frame_counts[(case, source)])
+        per_frame = value / frames if frames else 0.0
+        print(f"| {case} | {source} | `{counter}` | {value} | {per_frame:.2f} |")
+    print()
+
+    index_rows = [
+        (case, source, counter, value)
+        for (case, source, counter), value in totals.items()
+        if is_vvc_index_counter(counter)
+    ]
+    if not index_rows:
+        return
+    print("## VVC Mode Index Counters")
+    print("| Case | Source | Counter | Total | Per frame |")
+    print("|---|---|---|---:|---:|")
+    for case, source, counter, value in sorted(
+        index_rows, key=lambda row: row[3], reverse=True
+    )[:top]:
+        frames = len(frame_counts[(case, source)])
+        per_frame = value / frames if frames else 0.0
+        print(f"| {case} | {source} | `{counter}` | {value} | {per_frame:.2f} |")
+    print()
+
+
+def is_vvc_index_counter(counter: str) -> bool:
+    return counter.startswith(("luma_mode_angular_", "chroma_mode_angular_"))
 
 
 def aggregate_categories(rows: Iterable[SbRow]) -> dict[str, int]:

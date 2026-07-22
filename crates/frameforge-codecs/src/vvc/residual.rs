@@ -71,6 +71,65 @@ pub struct VvcQuantizedColor {
     pub(super) cr_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
     pub(super) cb_rem: u8,
     pub(super) cr_rem: u8,
+    #[cfg(feature = "vvc-stats")]
+    pub(super) intra_search_stats: VvcIntraSearchStats,
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VvcIntraSearchStats {
+    pub(super) luma_dc_candidates: usize,
+    pub(super) luma_planar_candidates: usize,
+    pub(super) luma_directional_coarse_candidates: usize,
+    pub(super) luma_directional_refinement_candidates: usize,
+    pub(super) chroma_derived_candidates: usize,
+    pub(super) chroma_explicit_candidates: usize,
+    pub(super) chroma_cclm_candidates: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcIntraSearchStats {
+    pub(super) const fn luma_directional_candidates(self) -> usize {
+        self.luma_directional_coarse_candidates + self.luma_directional_refinement_candidates
+    }
+
+    pub(super) const fn luma_candidates(self) -> usize {
+        self.luma_dc_candidates + self.luma_planar_candidates + self.luma_directional_candidates()
+    }
+
+    pub(super) const fn chroma_candidates(self) -> usize {
+        self.chroma_derived_candidates
+            + self.chroma_explicit_candidates
+            + self.chroma_cclm_candidates
+    }
+
+    pub(super) fn add_luma_dc(&mut self) {
+        self.luma_dc_candidates += 1;
+    }
+
+    pub(super) fn add_luma_planar(&mut self) {
+        self.luma_planar_candidates += 1;
+    }
+
+    pub(super) fn add_luma_directional_coarse(&mut self) {
+        self.luma_directional_coarse_candidates += 1;
+    }
+
+    pub(super) fn add_luma_directional_refinement(&mut self) {
+        self.luma_directional_refinement_candidates += 1;
+    }
+
+    pub(super) fn add_chroma_derived(&mut self) {
+        self.chroma_derived_candidates += 1;
+    }
+
+    pub(super) fn add_chroma_explicit(&mut self) {
+        self.chroma_explicit_candidates += 1;
+    }
+
+    pub(super) fn add_chroma_cclm(&mut self) {
+        self.chroma_cclm_candidates += 1;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
