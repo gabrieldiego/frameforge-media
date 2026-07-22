@@ -2422,6 +2422,46 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-mrl-index-1f.json
 ```
 
+## VVC TU Residual Coding Instrumentation
+
+Checkpoint: `vvc-tu-residual-coding-stats`.
+
+This checkpoint extends the compile-gated VVC stats path now that residual
+coding is a per-TU decision. Frame stats and CTU-bit JSONL records report
+transform-skip and transformed TU counts for luma, Cb, and Cr. Normal builds are
+unchanged because the counters are behind `frameforge-codecs/vvc-stats`.
+
+Probe on one 16x16 lossy VVC smoke frame:
+
+| Counter | Total |
+|---|---:|
+| `luma_tu_count` | 4 |
+| `luma_tu_transform_skip_count` | 0 |
+| `luma_tu_transformed_count` | 4 |
+| `chroma_tu_count` | 4 |
+| `chroma_tu_transform_skip_count` | 0 |
+| `chroma_tu_transformed_count` | 8 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make build VVC_STATS=1
+
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_residual_coding_stats_probe.jsonl \
+FRAMEFORGE_VVC_CTU_BITS=verification/generated/profiling/vvc_residual_coding_ctu_probe.jsonl \
+  ./ff encode \
+  verification/generated/test_vectors/black_420_16x16_30_1f_yuv420p8.yuv \
+  --frames 1 \
+  --encode vvc:verification/generated/profiling/vvc_residual_coding_stats_probe.vvc \
+  --recon verification/generated/profiling/vvc_residual_coding_stats_probe_recon.yuv \
+  --qp 24
+
+python3 scripts/summarize_encoder_instrumentation.py \
+  --vvc-stats probe=verification/generated/profiling/vvc_residual_coding_stats_probe.jsonl \
+  --top 8
+```
+
 ## References
 
 - Cargo profile settings:

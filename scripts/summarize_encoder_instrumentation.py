@@ -463,8 +463,10 @@ def print_vvc_counter_summary(rows: list[VvcCounterRow], top: int) -> None:
         "chroma_candidate",
         "luma_mode",
         "chroma_mode",
-        "luma_tu_count",
-        "chroma_tu_count",
+        "luma_tu_",
+        "chroma_tu_",
+        "cb_tu_",
+        "cr_tu_",
     )
     print("## VVC Counter Summary")
     print("| Case | Source | Counter | Total | Per frame |")
