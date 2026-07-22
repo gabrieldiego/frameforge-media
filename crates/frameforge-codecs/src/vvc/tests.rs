@@ -1529,7 +1529,7 @@ fn vvc_luma_leaf_size_selector_is_shared_across_formats() {
 }
 
 #[test]
-fn vvc_tu_residual_coding_selector_is_shared_across_formats() {
+fn vvc_tu_coding_decision_selector_is_shared_across_formats() {
     let luma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
     let chroma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeChroma);
 
@@ -1554,39 +1554,21 @@ fn vvc_tu_residual_coding_selector_is_shared_across_formats() {
                 ),
             ] {
                 let context = VvcResidualModeDecisionContext::new(format, residual_mode);
-                assert_eq!(
-                    select_vvc_luma_tu_residual_coding(
-                        context,
-                        luma_node,
-                        VvcIntraPredictionMode::Dc
-                    ),
-                    expected
+                let luma_decision = select_vvc_luma_tu_coding_decision(
+                    context,
+                    luma_node,
+                    VvcIntraPredictionMode::Dc,
                 );
+                assert_eq!(luma_decision.residual_coding, expected);
+                assert_eq!(luma_decision.mrl_index, 0);
+                assert_eq!(luma_decision.mts_index, 0);
                 assert_eq!(
-                    select_vvc_luma_tu_mrl_index(
-                        context,
-                        luma_node,
-                        VvcIntraPredictionMode::Dc,
-                        expected
-                    ),
-                    0
-                );
-                assert_eq!(
-                    select_vvc_luma_tu_mts_index(
-                        context,
-                        luma_node,
-                        VvcIntraPredictionMode::Dc,
-                        expected,
-                        0
-                    ),
-                    0
-                );
-                assert_eq!(
-                    select_vvc_chroma_tu_residual_coding(
+                    select_vvc_chroma_tu_coding_decision(
                         context,
                         chroma_node,
                         VvcChromaIntraPredictionMode::Derived
-                    ),
+                    )
+                    .residual_coding,
                     expected
                 );
             }

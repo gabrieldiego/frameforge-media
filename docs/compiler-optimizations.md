@@ -2636,6 +2636,27 @@ The first-frame six-vector matrix was byte-identical against
 | VVC | lossless | 5,884,724 | 0.39 | 0 |
 | VVC | qp=24 | 5,714,171 | 0.46 | 0 |
 
+## VVC TU Coding Decision Unification
+
+Checkpoint: `vvc-tu-decision-unified-1f`.
+
+This checkpoint groups the remaining per-TU luma and chroma tool selections
+into explicit coding-decision structs. The CTU quantizer now asks block mode
+selection for one luma decision carrying residual coding, MRL index, and MTS
+index, and one chroma decision carrying residual coding. The current policy is
+unchanged: lossless TUs still choose transform skip, lossy TUs still choose
+transformed residuals, and MRL/MTS stay at index 0 until their predictors and
+transforms are wired. The important cleanup is that future lossy-only tool
+trials can be gated at block mode selection without forking the residual path.
+
+The first-frame six-vector matrix was byte-identical against
+`vvc-ts-recon-from-coeffs-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.40 | 0 |
+
 ## References
 
 - Cargo profile settings:

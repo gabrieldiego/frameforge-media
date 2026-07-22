@@ -2,20 +2,21 @@ use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, select_vvc_chroma_mode_syntax_tie_breaker,
-    select_vvc_chroma_tu_residual_coding, select_vvc_luma_max_leaf_size,
-    select_vvc_luma_tu_mrl_index, select_vvc_luma_tu_mts_index, select_vvc_luma_tu_residual_coding,
-    select_vvc_residual_chroma_intra_mode_from_costs, select_vvc_residual_luma_intra_mode,
-    select_vvc_residual_score_metric, vvc_chroma_cclm_node_allowed, vvc_chroma_explicit_candidates,
+    select_vvc_chroma_tu_coding_decision, select_vvc_luma_max_leaf_size,
+    select_vvc_luma_tu_coding_decision, select_vvc_residual_chroma_intra_mode_from_costs,
+    select_vvc_residual_luma_intra_mode, select_vvc_residual_score_metric,
+    vvc_chroma_cclm_node_allowed, vvc_chroma_explicit_candidates,
     vvc_chroma_intra_mode_syntax_bin_count, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
     vvc_luma_intra_mode_from_index, vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes,
     vvc_neutral_sample, vvc_residual_chroma_cclm_candidate_allowed,
     vvc_residual_chroma_explicit_candidate_allowed,
     vvc_residual_luma_directional_candidate_allowed, vvc_residual_luma_planar_candidate_allowed,
     VvcChromaCclmMode, VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode,
-    VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
-    VvcLumaIntraCandidateCosts, VvcPictureFormat, VvcReconstructionFrame, VvcResidualCodingMode,
-    VvcResidualModeDecisionContext, VvcResidualScoreMetric, VvcSample, VvcSampledColor,
-    VvcSampledFrame, VvcTuResidualCodingMode, VvcVideoGeometry, VVC_CTU_SIZE,
+    VvcChromaTuCodingDecision, VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion,
+    VvcIntraPredictionMode, VvcLumaIntraCandidateCosts, VvcLumaTuCodingDecision, VvcPictureFormat,
+    VvcReconstructionFrame, VvcResidualCodingMode, VvcResidualModeDecisionContext,
+    VvcResidualScoreMetric, VvcSample, VvcSampledColor, VvcSampledFrame, VvcTuResidualCodingMode,
+    VvcVideoGeometry, VVC_CTU_SIZE,
 };
 #[cfg(feature = "vvc-stats")]
 use super::VvcIntraSearchStats;
@@ -314,21 +315,10 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let _best_luma_score = best_luma_score;
         luma_tu_intra_modes[luma_tu_count] = luma_mode;
         luma_mode_search_state.mark_node(local_node, luma_mode);
-        let luma_residual_coding =
-            select_vvc_luma_tu_residual_coding(mode_context, node, luma_mode);
-        let luma_mrl_index =
-            select_vvc_luma_tu_mrl_index(mode_context, node, luma_mode, luma_residual_coding);
-        let luma_mts_index = select_vvc_luma_tu_mts_index(
-            mode_context,
-            node,
-            luma_mode,
-            luma_residual_coding,
-            luma_mrl_index,
-        );
+        let luma_coding_decision =
+            select_vvc_luma_tu_coding_decision(mode_context, node, luma_mode);
         let luma_tu = finalize_vvc_luma_tu(
-            luma_residual_coding,
-            luma_mrl_index,
-            luma_mts_index,
+            luma_coding_decision,
             source_frame,
             frame_recon,
             node,
@@ -591,10 +581,10 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         debug_assert_eq!(chroma_mode, best_chroma_mode);
         let _best_chroma_score = best_chroma_score;
         chroma_tu_intra_modes[chroma_tu_count] = chroma_mode;
-        let chroma_residual_coding =
-            select_vvc_chroma_tu_residual_coding(mode_context, node, chroma_mode);
+        let chroma_coding_decision =
+            select_vvc_chroma_tu_coding_decision(mode_context, node, chroma_mode);
         let chroma_tu = finalize_vvc_chroma_tu(
-            chroma_residual_coding,
+            chroma_coding_decision,
             source_frame,
             frame_recon,
             node,
@@ -975,9 +965,7 @@ struct VvcFinalizedLumaTu {
 }
 
 fn finalize_vvc_luma_tu(
-    residual_coding: VvcTuResidualCodingMode,
-    mrl_index: u8,
-    mts_index: u8,
+    coding_decision: VvcLumaTuCodingDecision,
     source_frame: &VvcSampledFrame,
     frame_recon: &mut VvcReconstructionFrame,
     node: VvcCodingTreeNode,
@@ -987,7 +975,7 @@ fn finalize_vvc_luma_tu(
     transform_scratch: &mut VvcInverseTransformScratch,
     reconstructed_residual: &mut Vec<i16>,
 ) -> VvcFinalizedLumaTu {
-    let finalized = match residual_coding {
+    let finalized = match coding_decision.residual_coding {
         VvcTuResidualCodingMode::TransformSkip => {
             let dc_level = residuals.first().copied().unwrap_or(0);
             let (ac_levels, has_ac) =
@@ -1014,8 +1002,8 @@ fn finalize_vvc_luma_tu(
                 ac_levels,
                 has_ac,
                 transform_skip: true,
-                mrl_index,
-                mts_index,
+                mrl_index: coding_decision.mrl_index,
+                mts_index: coding_decision.mts_index,
             }
         }
         VvcTuResidualCodingMode::Transformed => {
@@ -1051,8 +1039,8 @@ fn finalize_vvc_luma_tu(
                 ac_levels: quantized.reconstructed_ac_coeffs,
                 has_ac: quantized.has_ac,
                 transform_skip: false,
-                mrl_index,
-                mts_index,
+                mrl_index: coding_decision.mrl_index,
+                mts_index: coding_decision.mts_index,
             }
         }
     };
@@ -1073,7 +1061,7 @@ struct VvcFinalizedChromaTu {
 }
 
 fn finalize_vvc_chroma_tu(
-    residual_coding: VvcTuResidualCodingMode,
+    coding_decision: VvcChromaTuCodingDecision,
     source_frame: &VvcSampledFrame,
     frame_recon: &mut VvcReconstructionFrame,
     node: VvcCodingTreeNode,
@@ -1087,7 +1075,7 @@ fn finalize_vvc_chroma_tu(
     transform_scratch: &mut VvcInverseTransformScratch,
     reconstructed_residual: &mut Vec<i16>,
 ) -> VvcFinalizedChromaTu {
-    let finalized = match residual_coding {
+    let finalized = match coding_decision.residual_coding {
         VvcTuResidualCodingMode::TransformSkip => {
             let cb_dc_level = cb_residuals.first().copied().unwrap_or(0);
             let cr_dc_level = cr_residuals.first().copied().unwrap_or(0);

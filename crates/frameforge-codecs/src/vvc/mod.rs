@@ -1237,6 +1237,18 @@ pub(in crate::vvc) enum VvcResidualScoreMetric {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcLumaTuCodingDecision {
+    pub(in crate::vvc) residual_coding: VvcTuResidualCodingMode,
+    pub(in crate::vvc) mrl_index: u8,
+    pub(in crate::vvc) mts_index: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcChromaTuCodingDecision {
+    pub(in crate::vvc) residual_coding: VvcTuResidualCodingMode,
+}
+
 impl VvcResidualCodingMode {
     const fn for_encode_options(options: VvcEncodeOptions) -> Self {
         match options.lossless {
@@ -1577,6 +1589,21 @@ pub(in crate::vvc) fn select_vvc_luma_tu_residual_coding(
     }
 }
 
+pub(in crate::vvc) fn select_vvc_luma_tu_coding_decision(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    mode: VvcIntraPredictionMode,
+) -> VvcLumaTuCodingDecision {
+    let residual_coding = select_vvc_luma_tu_residual_coding(context, node, mode);
+    let mrl_index = select_vvc_luma_tu_mrl_index(context, node, mode, residual_coding);
+    let mts_index = select_vvc_luma_tu_mts_index(context, node, mode, residual_coding, mrl_index);
+    VvcLumaTuCodingDecision {
+        residual_coding,
+        mrl_index,
+        mts_index,
+    }
+}
+
 pub(in crate::vvc) fn select_vvc_luma_tu_mrl_index(
     context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
@@ -1702,6 +1729,16 @@ pub(in crate::vvc) fn select_vvc_chroma_tu_residual_coding(
     match context.residual_mode() {
         VvcResidualCodingMode::Lossless => VvcTuResidualCodingMode::TransformSkip,
         VvcResidualCodingMode::Lossy => VvcTuResidualCodingMode::Transformed,
+    }
+}
+
+pub(in crate::vvc) fn select_vvc_chroma_tu_coding_decision(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    mode: VvcChromaIntraPredictionMode,
+) -> VvcChromaTuCodingDecision {
+    VvcChromaTuCodingDecision {
+        residual_coding: select_vvc_chroma_tu_residual_coding(context, node, mode),
     }
 }
 
