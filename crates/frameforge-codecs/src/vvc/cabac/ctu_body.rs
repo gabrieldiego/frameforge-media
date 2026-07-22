@@ -7,8 +7,8 @@ use super::{VvcCabacContext, VvcCabacContexts, VvcCabacEncoder};
 use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
-    chroma_subsample_x, chroma_subsample_y, VvcResidualComponent, VvcSliceSyntaxConfig,
-    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
+    chroma_subsample_x, chroma_subsample_y, VvcIntraPredictionMode, VvcResidualComponent,
+    VvcSliceSyntaxConfig, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
     VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
@@ -298,16 +298,23 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         node: VvcCodingTreeNode,
     ) {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeLuma);
-        // VVC 7.3.11.5 intra_luma_pred_modes. Select MPM index 1, which is
-        // DC_IDX for the current all-intra non-angular neighbourhoods (see
-        // VTM PU::getIntraMPMs). This keeps software reconstruction tied to a
-        // simple, explicit prediction mode instead of an arbitrary remaining
-        // mode.
+        let mode = self.params.luma_tu_intra_modes[self.luma_tu_index];
+        // VVC 7.3.11.5 intra_luma_pred_modes. For the current all-intra
+        // non-angular neighbourhoods, VTM PU::getIntraMPMs starts with
+        // PLANAR_IDX then DC_IDX. Planar is MPM index 0; DC is MPM index 1.
         self.contexts
             .encode(cabac, VvcCabacContext::IntraLumaMpmFlag, true);
-        self.contexts
-            .encode(cabac, VvcCabacContext::IntraLumaPlanarFlag(1), true);
-        cabac.encode_bin_ep(false);
+        match mode {
+            VvcIntraPredictionMode::Planar => {
+                self.contexts
+                    .encode(cabac, VvcCabacContext::IntraLumaPlanarFlag(1), false);
+            }
+            VvcIntraPredictionMode::Dc => {
+                self.contexts
+                    .encode(cabac, VvcCabacContext::IntraLumaPlanarFlag(1), true);
+                cabac.encode_bin_ep(false);
+            }
+        }
     }
 
     fn emit_luma_multi_ref_line(&mut self, cabac: &mut VvcCabacEncoder, node: VvcCodingTreeNode) {

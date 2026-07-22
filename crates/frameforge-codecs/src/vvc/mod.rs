@@ -70,7 +70,7 @@ use residual::{
     inverse_transform_vvc_chroma_quantized_block_into,
     inverse_transform_vvc_luma_quantized_block_into, lossless_chroma_ac_levels_and_flag,
     lossless_luma_ac_levels_and_flag, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_dc_block_into, quantize_vvc_chroma_residual_greedy,
+    predict_vvc_luma_intra_block_into, quantize_vvc_chroma_residual_greedy,
     quantize_vvc_chroma_sample, quantize_vvc_frame, quantize_vvc_frame_with_reconstruction,
     quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma, residual_chroma_tu_at_into,
     residual_luma_tu_at_into, VvcDcPredictionScratch, VvcInverseTransformScratch,
@@ -742,6 +742,175 @@ impl VvcSliceSyntaxConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VvcPictureCodingPath {
+    Residual(VvcResidualCodingMode),
+    Palette444(VvcPaletteCodingMode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcResidualCodingMode {
+    Lossy,
+    Lossless,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VvcPaletteCodingMode {
+    Lossy,
+    Lossless,
+}
+
+impl VvcPictureCodingPath {
+    fn for_encode_options(stream_format: VvcPictureFormat, options: VvcEncodeOptions) -> Self {
+        match (stream_format.chroma_sampling, options.lossless) {
+            (ChromaSampling::Cs444, true) => Self::Palette444(VvcPaletteCodingMode::Lossless),
+            (ChromaSampling::Cs444, false) => Self::Palette444(VvcPaletteCodingMode::Lossy),
+            (_, true) => Self::Residual(VvcResidualCodingMode::Lossless),
+            (_, false) => Self::Residual(VvcResidualCodingMode::Lossy),
+        }
+    }
+
+    fn slice_config(self, stream_format: VvcPictureFormat) -> VvcSliceSyntaxConfig {
+        match self {
+            Self::Residual(mode) => mode.slice_config(stream_format),
+            Self::Palette444(mode) => mode.slice_config(stream_format.bit_depth),
+        }
+    }
+
+    const fn picture_partitioning(self) -> VvcPicturePartitioning {
+        match self {
+            Self::Residual(mode) => mode.picture_partitioning(),
+            Self::Palette444(_) => VvcPicturePartitioning::OneSlicePerCtu,
+        }
+    }
+}
+
+impl VvcResidualCodingMode {
+    const fn is_lossless(self) -> bool {
+        matches!(self, Self::Lossless)
+    }
+
+    const fn luma_max_leaf_size(self) -> u16 {
+        match self {
+            Self::Lossy => VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+            Self::Lossless => VVC_LOSSLESS_LUMA_LEAF_SIZE,
+        }
+    }
+
+    const fn picture_partitioning(self) -> VvcPicturePartitioning {
+        match self {
+            Self::Lossy => VvcPicturePartitioning::OneSlicePerCtu,
+            Self::Lossless => VvcPicturePartitioning::SingleSlice,
+        }
+    }
+
+    fn slice_config(self, stream_format: VvcPictureFormat) -> VvcSliceSyntaxConfig {
+        match self {
+            Self::Lossy => VvcSliceSyntaxConfig::residual_lossy(stream_format.chroma_sampling),
+            Self::Lossless => VvcSliceSyntaxConfig::residual_lossless(
+                stream_format.chroma_sampling,
+                stream_format.bit_depth,
+            ),
+        }
+    }
+}
+
+impl VvcPaletteCodingMode {
+    const fn slice_config(self, bit_depth: SampleBitDepth) -> VvcSliceSyntaxConfig {
+        match self {
+            Self::Lossy => VvcSliceSyntaxConfig::palette_444(),
+            Self::Lossless => VvcSliceSyntaxConfig::palette_444_lossless(bit_depth),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcIntraPredictionMode {
+    Planar,
+    Dc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcResidualModeDecisionContext {
+    format: VvcPictureFormat,
+    residual_mode: VvcResidualCodingMode,
+}
+
+impl VvcResidualModeDecisionContext {
+    pub(in crate::vvc) const fn new(
+        format: VvcPictureFormat,
+        residual_mode: VvcResidualCodingMode,
+    ) -> Self {
+        Self {
+            format,
+            residual_mode,
+        }
+    }
+
+    const fn chroma_sampling(self) -> ChromaSampling {
+        self.format.chroma_sampling
+    }
+
+    const fn bit_depth(self) -> SampleBitDepth {
+        self.format.bit_depth
+    }
+
+    const fn is_lossless(self) -> bool {
+        self.residual_mode.is_lossless()
+    }
+}
+
+pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    dc_sad: u64,
+    planar_sad: Option<u64>,
+) -> VvcIntraPredictionMode {
+    if let Some(planar_sad) = planar_sad {
+        let samples = u64::from(node.width) * u64::from(node.height);
+        let bit_depth_margin = u64::from(context.bit_depth().bits().saturating_sub(7));
+        let absolute_margin = samples.saturating_mul(bit_depth_margin.max(1));
+        if planar_sad
+            .saturating_mul(100)
+            .saturating_add(absolute_margin)
+            < dc_sad.saturating_mul(96)
+        {
+            return VvcIntraPredictionMode::Planar;
+        }
+    }
+    VvcIntraPredictionMode::Dc
+}
+
+pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+) -> bool {
+    let _candidate_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        context.is_lossless(),
+        node.width,
+        node.height,
+    );
+    // TODO: Re-enable Planar candidate generation once FrameForge's luma
+    // reference filtering and PDPC path is reference-decoder bit-exact.
+    false
+}
+
+pub(in crate::vvc) fn select_vvc_residual_chroma_intra_mode(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+) -> VvcIntraPredictionMode {
+    let _candidate_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        context.is_lossless(),
+        node.width,
+        node.height,
+    );
+    VvcIntraPredictionMode::Dc
+}
+
 fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
     -((i32::from(bit_depth.bits()) - 8) * 6)
 }
@@ -1121,39 +1290,10 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
         stream_format.bit_depth,
     )?;
     let frame_len = stream_layout.frame_len();
-    if options.lossless
-        && !matches!(
-            stream_format.chroma_sampling,
-            ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444
-        )
-    {
-        return Err(format!(
-            "VVC lossless encode is not implemented for {format}"
-        ));
-    }
-    let lossless_residual = options.lossless
-        && matches!(
-            stream_format.chroma_sampling,
-            ChromaSampling::Cs420 | ChromaSampling::Cs422
-        );
-    let lossless_palette =
-        options.lossless && stream_format.chroma_sampling == ChromaSampling::Cs444;
-    let slice_config = if lossless_residual {
-        VvcSliceSyntaxConfig::residual_lossless(
-            stream_format.chroma_sampling,
-            stream_format.bit_depth,
-        )
-    } else if lossless_palette {
-        VvcSliceSyntaxConfig::palette_444_lossless(stream_format.bit_depth)
-    } else {
-        VvcSliceSyntaxConfig::for_picture_format(stream_format)
-    };
-    let slice_config = vvc_slice_config_for_input_format(slice_config, format);
-    let picture_partitioning = if lossless_residual {
-        VvcPicturePartitioning::SingleSlice
-    } else {
-        VvcPicturePartitioning::OneSlicePerCtu
-    };
+    let coding_path = VvcPictureCodingPath::for_encode_options(stream_format, options);
+    let slice_config =
+        vvc_slice_config_for_input_format(coding_path.slice_config(stream_format), format);
+    let picture_partitioning = coding_path.picture_partitioning();
     write_annex_b_to(
         bitstream,
         &[
@@ -1221,7 +1361,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 frame_stats.add_elapsed("picture_header_write", stage_start);
             }
 
-            let frame_recon_yuv = if stream_format.chroma_sampling == ChromaSampling::Cs444 {
+            let frame_recon_yuv = if let VvcPictureCodingPath::Palette444(_) = coding_path {
                 let mut frame_recon = VvcReconstructionFrame::new_neutral(geometry, stream_format);
                 let mut ctu_frame = VvcSampledFrame::scratch(stream_format);
                 for region in vvc_ctu_regions(geometry) {
@@ -1265,6 +1405,9 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 frame_stats.add_elapsed("frame_recon_finalize", stage_start);
                 yuv
             } else {
+                let VvcPictureCodingPath::Residual(residual_mode) = coding_path else {
+                    unreachable!("palette coding path handled above");
+                };
                 let mut frame_recon =
                     VvcReconstructionFrame::new_neutral(geometry, source_frame.format);
                 if picture_partitioning == VvcPicturePartitioning::SingleSlice {
@@ -1276,7 +1419,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             &source_frame,
                             &mut frame_recon,
                             region,
-                            lossless_residual,
+                            residual_mode,
                         );
                         #[cfg(feature = "vvc-stats")]
                         add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
@@ -1286,7 +1429,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             slice_address: region.slice_address,
                             geometry: region.geometry,
                             color: quantized,
-                            luma_max_leaf_size: VVC_LOSSLESS_LUMA_LEAF_SIZE,
+                            luma_max_leaf_size: residual_mode.luma_max_leaf_size(),
                         });
                     }
                     #[cfg(feature = "vvc-stats")]
@@ -1337,7 +1480,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                                 region.geometry,
                                 quantized.quantized,
                                 slice_config,
-                                VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+                                residual_mode.luma_max_leaf_size(),
                             )?],
                         )?;
                         #[cfg(feature = "vvc-stats")]
@@ -1473,11 +1616,12 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     source_frame: &VvcSampledFrame,
     frame_recon: &mut VvcReconstructionFrame,
     region: VvcCtuRegion,
-    lossless_residual: bool,
+    residual_mode: VvcResidualCodingMode,
 ) -> VvcQuantizedColor {
     let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
+    let mut luma_tu_intra_modes = [VvcIntraPredictionMode::Dc; MAX_VVC_LUMA_TUS];
     let mut luma_tu_ac_levels = [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS];
     let mut luma_tu_has_ac = [false; MAX_VVC_LUMA_TUS];
     let mut cb_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
@@ -1493,14 +1637,14 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     let mut transform_scratch = VvcInverseTransformScratch::default();
     let mut reconstructed_residual = Vec::new();
     let mut luma_residuals = Vec::new();
+    let mut candidate_luma_prediction = Vec::new();
+    let mut candidate_luma_residuals = Vec::new();
     let mut cb_residuals = Vec::new();
     let mut cr_residuals = Vec::new();
 
-    let luma_max_leaf_size = if lossless_residual {
-        VVC_LOSSLESS_LUMA_LEAF_SIZE
-    } else {
-        VVC_CURRENT_MAX_LUMA_LEAF_SIZE
-    };
+    let mode_context = VvcResidualModeDecisionContext::new(source_frame.format, residual_mode);
+    let lossless_residual = residual_mode.is_lossless();
+    let luma_max_leaf_size = residual_mode.luma_max_leaf_size();
     let ctu_shape = VvcCtuPartitionShape {
         root_width: VVC_CTU_SIZE as u16,
         root_height: VVC_CTU_SIZE as u16,
@@ -1515,9 +1659,10 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             break;
         }
         let node = vvc_global_ctu_node(local_node, region);
-        predict_vvc_luma_dc_block_into(
+        predict_vvc_luma_intra_block_into(
             &mut predicted_luma,
             &mut prediction_scratch,
+            VvcIntraPredictionMode::Dc,
             &frame_recon.luma,
             source_frame.geometry,
             node,
@@ -1532,6 +1677,36 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             usize::from(node.height),
             &predicted_luma,
         );
+        let dc_sad = residual_sad(&luma_residuals);
+        let planar_sad = if vvc_residual_luma_planar_candidate_allowed(mode_context, node) {
+            predict_vvc_luma_intra_block_into(
+                &mut candidate_luma_prediction,
+                &mut prediction_scratch,
+                VvcIntraPredictionMode::Planar,
+                &frame_recon.luma,
+                source_frame.geometry,
+                node,
+                source_frame.format.bit_depth,
+            );
+            residual_luma_tu_at_into(
+                &mut candidate_luma_residuals,
+                source_frame,
+                usize::from(node.x),
+                usize::from(node.y),
+                usize::from(node.width),
+                usize::from(node.height),
+                &candidate_luma_prediction,
+            );
+            Some(residual_sad(&candidate_luma_residuals))
+        } else {
+            None
+        };
+        let luma_mode = select_vvc_residual_luma_intra_mode(mode_context, node, dc_sad, planar_sad);
+        if luma_mode == VvcIntraPredictionMode::Planar {
+            std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
+            std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
+        }
+        luma_tu_intra_modes[luma_tu_count] = luma_mode;
         if lossless_residual {
             let dc_level = luma_residuals.first().copied().unwrap_or(0);
             luma_tu_remainders[luma_tu_count] = dc_level.unsigned_abs().min(u8::MAX as u16) as u8;
@@ -1595,24 +1770,31 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        predict_vvc_chroma_dc_block_into(
-            &mut predicted_cb,
-            &mut prediction_scratch,
-            &frame_recon.cb,
-            source_frame.geometry,
-            node,
-            source_frame.format.chroma_sampling,
-            source_frame.format.bit_depth,
-        );
-        predict_vvc_chroma_dc_block_into(
-            &mut predicted_cr,
-            &mut prediction_scratch,
-            &frame_recon.cr,
-            source_frame.geometry,
-            node,
-            source_frame.format.chroma_sampling,
-            source_frame.format.bit_depth,
-        );
+        match select_vvc_residual_chroma_intra_mode(mode_context, node) {
+            VvcIntraPredictionMode::Dc => {
+                predict_vvc_chroma_dc_block_into(
+                    &mut predicted_cb,
+                    &mut prediction_scratch,
+                    &frame_recon.cb,
+                    source_frame.geometry,
+                    node,
+                    source_frame.format.chroma_sampling,
+                    source_frame.format.bit_depth,
+                );
+                predict_vvc_chroma_dc_block_into(
+                    &mut predicted_cr,
+                    &mut prediction_scratch,
+                    &frame_recon.cr,
+                    source_frame.geometry,
+                    node,
+                    source_frame.format.chroma_sampling,
+                    source_frame.format.bit_depth,
+                );
+            }
+            VvcIntraPredictionMode::Planar => {
+                unreachable!("VVC residual chroma Planar mode is not enabled by the selector yet")
+            }
+        }
         residual_chroma_tu_at_into(
             &mut cb_residuals,
             &source_frame.cb,
@@ -1744,6 +1926,7 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
         } else {
             reconstruct_vvc_chroma(cr_rem)
         },
+        luma_tu_intra_modes,
         luma_tu_remainders,
         luma_tu_negative,
         luma_tu_dc_levels,
@@ -1760,6 +1943,13 @@ fn quantize_vvc_residual_ctu_into_frame_reconstruction(
         cb_rem,
         cr_rem,
     }
+}
+
+fn residual_sad(residuals: &[i16]) -> u64 {
+    residuals
+        .iter()
+        .map(|residual| u64::from(residual.unsigned_abs()))
+        .sum()
 }
 
 fn vvc_global_ctu_node(mut node: VvcCodingTreeNode, region: VvcCtuRegion) -> VvcCodingTreeNode {
@@ -2358,6 +2548,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
     };
     let (
         luma_tu_count,
+        luma_tu_intra_modes,
         luma_tu_abs_levels,
         luma_tu_negative,
         luma_tu_dc_levels,
@@ -2373,6 +2564,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_max_leaf_size,
         chroma_tu_count,
         luma_tu_count,
+        luma_tu_intra_modes,
         luma_tu_abs_levels,
         luma_tu_negative,
         luma_tu_dc_levels,
@@ -2396,6 +2588,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     color: VvcQuantizedColor,
 ) -> (
     usize,
+    [VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
     [u8; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
     [i16; MAX_VVC_LUMA_TUS],
@@ -2403,6 +2596,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     [bool; MAX_VVC_LUMA_TUS],
 ) {
     let mut luma_tu_count = color.luma_tu_count;
+    let mut luma_tu_intra_modes = color.luma_tu_intra_modes;
     let mut luma_tu_abs_levels = color.luma_tu_remainders;
     let mut luma_tu_negative = color.luma_tu_negative;
     let mut luma_tu_dc_levels = color.luma_tu_dc_levels;
@@ -2411,6 +2605,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     if color.luma_tu_count > 1 {
         return (
             luma_tu_count,
+            luma_tu_intra_modes,
             luma_tu_abs_levels,
             luma_tu_negative,
             luma_tu_dc_levels,
@@ -2422,6 +2617,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     let leaf_count = vvc_luma_leaf_count(coded, chroma_sampling, luma_max_leaf_size);
     luma_tu_count = leaf_count;
     for idx in 0..leaf_count.min(MAX_VVC_LUMA_TUS) {
+        luma_tu_intra_modes[idx] = color.luma_tu_intra_modes[0];
         luma_tu_abs_levels[idx] = color.luma_tu_remainders[0];
         luma_tu_negative[idx] = color.luma_tu_negative[0];
         luma_tu_dc_levels[idx] = color.luma_tu_dc_levels[0];
@@ -2430,6 +2626,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     }
     (
         luma_tu_count,
+        luma_tu_intra_modes,
         luma_tu_abs_levels,
         luma_tu_negative,
         luma_tu_dc_levels,

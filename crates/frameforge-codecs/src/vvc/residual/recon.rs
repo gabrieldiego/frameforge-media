@@ -8,7 +8,7 @@ use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into,
     inverse_transform_vvc_luma_quantized_block_into, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_dc_block_into, VvcDcPredictionScratch, VvcInverseTransformScratch,
+    predict_vvc_luma_intra_block_into, VvcDcPredictionScratch, VvcInverseTransformScratch,
     VvcQuantizedColor,
 };
 
@@ -52,9 +52,10 @@ fn reconstruct_vvc_residual_frame_subsampled(
         partition_params.shape(),
         partition_params.luma_max_leaf_size,
     ) {
-        predict_vvc_luma_dc_block_into(
+        predict_vvc_luma_intra_block_into(
             &mut predicted_luma,
             &mut prediction_scratch,
+            quantized.luma_tu_intra_modes[tu_idx],
             &luma,
             frame.geometry,
             node,

@@ -1,9 +1,28 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
-    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcCodingTreeNode, VvcSample,
-    VvcVideoGeometry, VVC_CTU_SIZE,
+    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcCodingTreeNode,
+    VvcIntraPredictionMode, VvcSample, VvcVideoGeometry, VVC_CTU_SIZE,
 };
+
+pub(in crate::vvc) fn predict_vvc_luma_intra_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    mode: VvcIntraPredictionMode,
+    luma: &[VvcSample],
+    geometry: VvcVideoGeometry,
+    node: VvcCodingTreeNode,
+    bit_depth: SampleBitDepth,
+) {
+    match mode {
+        VvcIntraPredictionMode::Planar => {
+            predict_vvc_luma_planar_block_into(prediction, scratch, luma, geometry, node, bit_depth)
+        }
+        VvcIntraPredictionMode::Dc => {
+            predict_vvc_luma_dc_block_into(prediction, scratch, luma, geometry, node, bit_depth)
+        }
+    }
+}
 
 pub(in crate::vvc) fn predict_vvc_luma_dc_block_into(
     prediction: &mut Vec<VvcSample>,
@@ -14,6 +33,28 @@ pub(in crate::vvc) fn predict_vvc_luma_dc_block_into(
     bit_depth: SampleBitDepth,
 ) {
     predict_vvc_dc_block_into(
+        prediction,
+        scratch,
+        luma,
+        geometry.width,
+        geometry.height,
+        usize::from(node.x),
+        usize::from(node.y),
+        usize::from(node.width),
+        usize::from(node.height),
+        bit_depth,
+    );
+}
+
+pub(in crate::vvc) fn predict_vvc_luma_planar_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    luma: &[VvcSample],
+    geometry: VvcVideoGeometry,
+    node: VvcCodingTreeNode,
+    bit_depth: SampleBitDepth,
+) {
+    predict_vvc_planar_block_into(
         prediction,
         scratch,
         luma,
@@ -53,15 +94,19 @@ pub(in crate::vvc) fn predict_vvc_chroma_dc_block_into(
 }
 
 pub(in crate::vvc) struct VvcDcPredictionScratch {
-    top: [VvcSample; VVC_CTU_SIZE],
-    left: [VvcSample; VVC_CTU_SIZE],
+    top: [VvcSample; VVC_CTU_SIZE + 2],
+    left: [VvcSample; VVC_CTU_SIZE + 2],
+    top_work: [i32; VVC_CTU_SIZE],
+    bottom_delta: [i32; VVC_CTU_SIZE],
 }
 
 impl Default for VvcDcPredictionScratch {
     fn default() -> Self {
         Self {
-            top: [0; VVC_CTU_SIZE],
-            left: [0; VVC_CTU_SIZE],
+            top: [0; VVC_CTU_SIZE + 2],
+            left: [0; VVC_CTU_SIZE + 2],
+            top_work: [0; VVC_CTU_SIZE],
+            bottom_delta: [0; VVC_CTU_SIZE],
         }
     }
 }
@@ -123,6 +168,122 @@ fn predict_vvc_dc_block_into(
                     + ((wl * (left_sample - val) + wt * (top_sample - val) + 32) >> 6))
                     .clamp(0, max_sample) as VvcSample;
             }
+        }
+    }
+}
+
+fn predict_vvc_planar_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    plane: &[VvcSample],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    width: usize,
+    height: usize,
+    bit_depth: SampleBitDepth,
+) {
+    debug_assert!(width <= VVC_CTU_SIZE);
+    debug_assert!(height <= VVC_CTU_SIZE);
+    top_references_into(
+        &mut scratch.top,
+        plane,
+        plane_width,
+        plane_height,
+        start_x,
+        start_y,
+        width + 2,
+        bit_depth,
+    );
+    left_references_into(
+        &mut scratch.left,
+        plane,
+        plane_width,
+        plane_height,
+        start_x,
+        start_y,
+        height + 2,
+        bit_depth,
+    );
+    if width * height > 32 {
+        let top_left = top_left_reference(
+            plane,
+            plane_width,
+            plane_height,
+            start_x,
+            start_y,
+            bit_depth,
+        );
+        filter_vvc_planar_references_in_place(
+            &mut scratch.top,
+            &mut scratch.left,
+            top_left,
+            width,
+            height,
+        );
+    }
+    let log2_w = width.ilog2();
+    let log2_h = height.ilog2();
+    let offset = 1i32 << (log2_w + log2_h);
+    let final_shift = 1 + log2_w + log2_h;
+    let bottom_left = i32::from(scratch.left[height]);
+    let top_right = i32::from(scratch.top[width]);
+
+    for x in 0..width {
+        let top = i32::from(scratch.top[x]);
+        scratch.bottom_delta[x] = bottom_left - top;
+        scratch.top_work[x] = top << log2_h;
+    }
+
+    prediction.clear();
+    prediction.resize(width * height, 0);
+    for y in 0..height {
+        let left = i32::from(scratch.left[y]);
+        let right_delta = top_right - left;
+        let mut hor_pred = left << log2_w;
+        for x in 0..width {
+            hor_pred += right_delta;
+            scratch.top_work[x] += scratch.bottom_delta[x];
+            let vert_pred = scratch.top_work[x];
+            prediction[y * width + x] =
+                (((hor_pred << log2_h) + (vert_pred << log2_w) + offset) >> final_shift)
+                    .clamp(0, i32::from(bit_depth.max_sample())) as VvcSample;
+        }
+    }
+
+    if width >= 4 && height >= 4 {
+        apply_vvc_planar_dc_pdpc(
+            prediction,
+            &scratch.top[..width],
+            &scratch.left[..height],
+            width,
+            height,
+            bit_depth,
+        );
+    }
+}
+
+fn apply_vvc_planar_dc_pdpc(
+    prediction: &mut [VvcSample],
+    top: &[VvcSample],
+    left: &[VvcSample],
+    width: usize,
+    height: usize,
+    bit_depth: SampleBitDepth,
+) {
+    let scale = ((width.ilog2() as i32 - 2 + height.ilog2() as i32 - 2 + 2) >> 2) as u32;
+    let max_sample = i32::from(bit_depth.max_sample());
+    for y in 0..height {
+        let wt = 32i32 >> ((y << 1) >> scale).min(31);
+        let left_sample = i32::from(left[y]);
+        for x in 0..width {
+            let wl = 32i32 >> ((x << 1) >> scale).min(31);
+            let top_sample = i32::from(top[x]);
+            let val = i32::from(prediction[y * width + x]);
+            prediction[y * width + x] = (val
+                + ((wl * (left_sample - val) + wt * (top_sample - val) + 32) >> 6))
+                .clamp(0, max_sample) as VvcSample;
         }
     }
 }
@@ -238,6 +399,52 @@ fn left_references_into(
         vvc_neutral_sample(bit_depth)
     };
     out[..height].fill(fallback);
+}
+
+fn top_left_reference(
+    plane: &[VvcSample],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    bit_depth: SampleBitDepth,
+) -> VvcSample {
+    if start_x > 0 && start_y > 0 {
+        return plane[(start_y - 1) * plane_width + start_x - 1];
+    }
+    if start_y > 0 && start_x < plane_width {
+        return plane[(start_y - 1) * plane_width + start_x];
+    }
+    if start_x > 0 && start_y < plane_height {
+        return plane[start_y * plane_width + start_x - 1];
+    }
+    vvc_neutral_sample(bit_depth)
+}
+
+fn filter_vvc_planar_references_in_place(
+    top: &mut [VvcSample],
+    left: &mut [VvcSample],
+    top_left: VvcSample,
+    width: usize,
+    height: usize,
+) {
+    let mut previous = top_left;
+    for index in 0..=width {
+        let current = top[index];
+        top[index] =
+            ((u32::from(previous) + u32::from(current) * 2 + u32::from(top[index + 1]) + 2) >> 2)
+                as VvcSample;
+        previous = current;
+    }
+
+    previous = top_left;
+    for index in 0..=height {
+        let current = left[index];
+        left[index] =
+            ((u32::from(previous) + u32::from(current) * 2 + u32::from(left[index + 1]) + 2) >> 2)
+                as VvcSample;
+        previous = current;
+    }
 }
 
 fn dc_prediction_value(

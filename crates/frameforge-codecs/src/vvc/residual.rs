@@ -5,6 +5,7 @@ mod recon;
 mod syntax;
 pub(super) mod transform;
 
+use super::VvcIntraPredictionMode;
 use super::VvcSample;
 
 #[cfg(test)]
@@ -24,7 +25,7 @@ pub(super) use transform::{
 
 pub(super) use prediction::{
     fill_visible_chroma_node, fill_visible_luma_node, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_dc_block_into, VvcDcPredictionScratch,
+    predict_vvc_luma_intra_block_into, VvcDcPredictionScratch,
 };
 pub use quant::quantize_vvc_color;
 pub(super) use quant::quantize_vvc_frame;
@@ -48,6 +49,7 @@ pub struct VvcQuantizedColor {
     pub y: u8,
     pub u: u8,
     pub v: u8,
+    pub(super) luma_tu_intra_modes: [VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_remainders: [u8; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_negative: [bool; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
