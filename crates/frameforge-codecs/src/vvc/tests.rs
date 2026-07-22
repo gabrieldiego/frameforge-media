@@ -1000,6 +1000,34 @@ fn vvc_contexts_include_residual_init_tables() {
 }
 
 #[test]
+fn vvc_luma_mode_syntax_bin_count_matches_mpm_coding_shape() {
+    assert_eq!(
+        vvc_luma_intra_mode_syntax_bin_count(VvcIntraPredictionMode::Planar, None, None),
+        2
+    );
+    assert_eq!(
+        vvc_luma_intra_mode_syntax_bin_count(VvcIntraPredictionMode::Dc, None, None),
+        3
+    );
+    assert_eq!(
+        vvc_luma_intra_mode_syntax_bin_count(VvcIntraPredictionMode::Vertical, None, None),
+        4
+    );
+    assert_eq!(
+        vvc_luma_intra_mode_syntax_bin_count(VvcIntraPredictionMode::Angular(2), None, None),
+        6
+    );
+    assert_eq!(
+        vvc_luma_intra_mode_syntax_bin_count(
+            VvcIntraPredictionMode::Angular(34),
+            Some(VvcIntraPredictionMode::Angular(34)),
+            Some(VvcIntraPredictionMode::Angular(34)),
+        ),
+        3
+    );
+}
+
+#[test]
 fn vvc_residual_contexts_have_rtl_ids_for_full_table_132_ranges() {
     let mut ids = std::collections::BTreeSet::new();
 

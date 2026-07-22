@@ -6,8 +6,8 @@ use super::super::{
     select_vvc_luma_tu_residual_coding, select_vvc_residual_chroma_intra_mode_from_costs,
     select_vvc_residual_luma_intra_mode, vvc_chroma_explicit_candidates,
     vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_intra_mode_from_index,
-    vvc_luma_transform_nodes, vvc_neutral_sample, vvc_residual_chroma_cclm_candidate_allowed,
-    vvc_residual_chroma_explicit_candidate_allowed,
+    vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes, vvc_neutral_sample,
+    vvc_residual_chroma_cclm_candidate_allowed, vvc_residual_chroma_explicit_candidate_allowed,
     vvc_residual_luma_directional_candidate_allowed, vvc_residual_luma_planar_candidate_allowed,
     VvcChromaCclmMode, VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode,
     VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
@@ -145,6 +145,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             break;
         }
         let node = vvc_global_ctu_node(local_node, region);
+        let left_luma_mode = luma_mode_search_state.left_of(local_node);
+        let above_luma_mode = luma_mode_search_state.above_of(local_node);
         predict_vvc_luma_intra_block_into_with_availability(
             &mut predicted_luma,
             &mut prediction_scratch,
@@ -164,7 +166,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             usize::from(node.height),
             &predicted_luma,
         );
-        let dc_score = residual_mode_selection_score(mode_context, &luma_residuals);
+        let dc_score = luma_mode_selection_score(
+            mode_context,
+            &luma_residuals,
+            left_luma_mode,
+            above_luma_mode,
+            VvcIntraPredictionMode::Dc,
+        );
         let mut best_luma_mode = VvcIntraPredictionMode::Dc;
         let mut best_luma_score = dc_score;
         let mut luma_candidate_costs = VvcLumaIntraCandidateCosts::new(dc_score);
@@ -190,8 +198,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 usize::from(node.height),
                 &candidate_luma_prediction,
             );
-            let candidate_score =
-                residual_mode_selection_score(mode_context, &candidate_luma_residuals);
+            let candidate_score = luma_mode_selection_score(
+                mode_context,
+                &candidate_luma_residuals,
+                left_luma_mode,
+                above_luma_mode,
+                VvcIntraPredictionMode::Planar,
+            );
             #[cfg(feature = "vvc-stats")]
             intra_search_stats.add_luma_planar();
             luma_candidate_costs = luma_candidate_costs
@@ -230,8 +243,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                     usize::from(node.height),
                     &candidate_luma_prediction,
                 );
-                let candidate_score =
-                    residual_mode_selection_score(mode_context, &candidate_luma_residuals);
+                let candidate_score = luma_mode_selection_score(
+                    mode_context,
+                    &candidate_luma_residuals,
+                    left_luma_mode,
+                    above_luma_mode,
+                    mode,
+                );
                 #[cfg(feature = "vvc-stats")]
                 intra_search_stats.add_luma_directional_coarse();
                 luma_candidate_costs =
@@ -266,8 +284,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                         usize::from(node.height),
                         &candidate_luma_prediction,
                     );
-                    let candidate_score =
-                        residual_mode_selection_score(mode_context, &candidate_luma_residuals);
+                    let candidate_score = luma_mode_selection_score(
+                        mode_context,
+                        &candidate_luma_residuals,
+                        left_luma_mode,
+                        above_luma_mode,
+                        mode,
+                    );
                     #[cfg(feature = "vvc-stats")]
                     intra_search_stats.add_luma_directional_refinement();
                     luma_candidate_costs =
@@ -859,6 +882,21 @@ fn residual_sad(residuals: &[i16]) -> u64 {
         .iter()
         .map(|residual| u64::from(residual.unsigned_abs()))
         .sum()
+}
+
+fn luma_mode_selection_score(
+    context: VvcResidualModeDecisionContext,
+    residuals: &[i16],
+    left: Option<VvcIntraPredictionMode>,
+    above: Option<VvcIntraPredictionMode>,
+    mode: VvcIntraPredictionMode,
+) -> u64 {
+    const SYNTAX_TIE_BREAKER_SCALE: u64 = 64;
+    residual_mode_selection_score(context, residuals)
+        .saturating_mul(SYNTAX_TIE_BREAKER_SCALE)
+        .saturating_add(u64::from(vvc_luma_intra_mode_syntax_bin_count(
+            mode, left, above,
+        )))
 }
 
 fn residual_mode_selection_score(

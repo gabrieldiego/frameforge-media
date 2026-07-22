@@ -29,10 +29,10 @@ mod residual;
 mod syntax;
 use cabac::{
     encode_ctu_partition_body, encode_frame_partition_body_with_contexts,
-    initial_vvc_cabac_contexts, vvc_chroma_transform_nodes, vvc_luma_transform_nodes,
-    VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
-    VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
-    VvcLastSigCoeffPrefixCtxInput, VvcPartSplit,
+    initial_vvc_cabac_contexts, vvc_chroma_transform_nodes, vvc_luma_intra_mode_syntax_bin_count,
+    vvc_luma_transform_nodes, VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent,
+    VvcCabacDumpSymbol, VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams,
+    VvcCtuPartitionShape, VvcLastSigCoeffPrefixCtxInput, VvcPartSplit,
 };
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};

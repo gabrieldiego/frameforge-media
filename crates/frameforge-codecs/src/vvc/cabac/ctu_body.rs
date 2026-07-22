@@ -88,6 +88,24 @@ fn vvc_luma_mpm_list(
     mpm
 }
 
+pub(in crate::vvc) fn vvc_luma_intra_mode_syntax_bin_count(
+    mode: VvcIntraPredictionMode,
+    left: Option<VvcIntraPredictionMode>,
+    above: Option<VvcIntraPredictionMode>,
+) -> u8 {
+    let mode_index = mode.luma_mode_index();
+    let mpm = vvc_luma_mpm_list(left, above);
+    if let Some(mpm_idx) = mpm.iter().position(|candidate| *candidate == mode_index) {
+        let bypass_bins = if mpm_idx == 0 { 0 } else { mpm_idx.min(4) };
+        return 2 + bypass_bins as u8;
+    }
+
+    1 + vvc_trunc_bin_code_ep_bin_count(
+        vvc_luma_remaining_mode_index(mode_index, mpm),
+        VVC_REMAINING_LUMA_MODE_COUNT,
+    )
+}
+
 fn vvc_wrap_luma_angular_mode(mode: i16) -> u8 {
     ((mode - VVC_LUMA_ANGULAR_BASE).rem_euclid(VVC_NUM_INTRA_ANGULAR_MODES_MINUS_ONE)
         + VVC_LUMA_ANGULAR_BASE) as u8
@@ -106,6 +124,18 @@ fn vvc_luma_remaining_mode_index(
     }
     debug_assert!(remaining < VVC_REMAINING_LUMA_MODE_COUNT);
     remaining
+}
+
+fn vvc_trunc_bin_code_ep_bin_count(symbol: u32, num_symbols: u32) -> u8 {
+    debug_assert!(symbol < num_symbols);
+    let thresh = 31 - num_symbols.leading_zeros();
+    let val = 1 << thresh;
+    let b = num_symbols - val;
+    if symbol < val - b {
+        thresh as u8
+    } else {
+        (thresh + 1) as u8
+    }
 }
 
 fn encode_vvc_trunc_bin_code_ep(cabac: &mut VvcCabacEncoder, symbol: u32, num_symbols: u32) {

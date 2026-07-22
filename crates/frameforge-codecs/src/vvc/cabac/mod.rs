@@ -8,7 +8,7 @@ pub(super) use context::{VvcCabacContext, VvcCabacContexts, VvcLastSigCoeffPrefi
 pub(super) use ctu_body::VvcCtuCabacGenerator;
 pub(super) use ctu_body::{
     encode_ctu_partition_body, encode_frame_partition_body_with_contexts,
-    initial_vvc_cabac_contexts,
+    initial_vvc_cabac_contexts, vvc_luma_intra_mode_syntax_bin_count,
 };
 pub(super) use ctu_split::{
     vvc_chroma_transform_nodes, vvc_luma_transform_nodes, VvcCodingTreeNode, VvcCtuCabacOp,

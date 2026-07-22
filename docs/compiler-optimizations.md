@@ -2530,6 +2530,28 @@ The first-frame matrix is byte-identical against `vvc-tu-mts-index-1f`:
 | VVC | lossless | 5,996,606 | 0.37 | 0 |
 | VVC | qp=24 | 5,727,069 | 0.40 | 0 |
 
+## VVC Luma MPM Tie-Breaking
+
+Checkpoint: `vvc-luma-mpm-tiebreak-1f`.
+
+This checkpoint makes VVC luma intra mode selection aware of the existing CABAC
+MPM coding shape without tuning a rate-distortion constant. Candidate residual
+energy remains the primary key; the exact luma mode syntax-bin count is packed
+only into the low six bits, so it breaks residual ties in favor of cheaper MPM
+signaling. The syntax-bin helper is shared with the CABAC MPM-list logic so the
+mode selector and writer stay aligned.
+
+First-frame six-vector matrix versus `vvc-luma-tool-selectors-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,885,070 | 0.36 | -111,536 |
+| VVC | qp=24 | 5,714,171 | 0.41 | -12,898 |
+
+Lossy PSNR moved only within small tie-breaker differences: three rows lost
+0.014 to 0.038 dB, two rows gained 0.004 to 0.024 dB, and no reconstruction or
+reference-validity rule changed.
+
 ## References
 
 - Cargo profile settings:
