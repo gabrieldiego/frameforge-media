@@ -14,9 +14,8 @@ pub(in crate::vvc) enum VvcPictureKind {
 }
 
 const VVC_SPS_LOG2_MAX_POC_LSB_MINUS4: u8 = 12;
-const VVC_PPS_INIT_QP: i32 = 32;
+pub(in crate::vvc) const VVC_PPS_INIT_QP: i32 = 32;
 pub(in crate::vvc) const VVC_POC_LSB_BITS: u8 = VVC_SPS_LOG2_MAX_POC_LSB_MINUS4 + 4;
-pub(in crate::vvc) const VVC_LOSSLESS_SH_QP_DELTA: i32 = -28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::vvc) enum VvcPicturePartitioning {

@@ -1985,6 +1985,35 @@ fn vvc_input_path_accepts_lossless_yuv422_high_depth_exact_reconstruction() {
 }
 
 #[test]
+fn vvc_input_path_accepts_lossless_yuv444_high_depth_exact_reconstruction() {
+    let geometry = VvcVideoGeometry {
+        width: 8,
+        height: 8,
+    };
+    let format = PixelFormat::yuv444(10).unwrap();
+    let input = yuv444p10_canary_8x8();
+    let mut source = input.as_slice();
+    let mut bitstream = Vec::new();
+    let mut reconstruction = Vec::new();
+
+    vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+        &mut source,
+        &mut bitstream,
+        Some(&mut reconstruction),
+        VvcEncodeParams { frames: 1 },
+        geometry,
+        VvcVideoLimits::unbounded(),
+        format,
+        VvcEncodeOptions { lossless: true },
+        None,
+    )
+    .expect("lossless 4:4:4 should encode");
+
+    assert_vvc_annex_b_has_min_picture_nals(&bitstream, 1);
+    assert_eq!(reconstruction, input);
+}
+
+#[test]
 fn vvc_input_path_accepts_supported_yuv_subsampling() {
     for (format, chroma_samples) in [(PixelFormat::yuv422(8).unwrap(), 32)] {
         let input =
@@ -2454,6 +2483,23 @@ fn vvc_palette_444_high_depth_escape_values_use_coded_levels() {
     assert_eq!(decoded.luma[31], 1023);
     assert_eq!(decoded.cb[31], 512);
     assert_eq!(decoded.cr[31], 260);
+
+    let lossless_config = VvcSliceSyntaxConfig::palette_444_lossless(bit_depth);
+    let lossless_syntax = vvc_palette_444_cu_syntax_with_config(&frame, 0, 0, lossless_config);
+    assert!(lossless_syntax.palette_escape_val_present_flag);
+    assert_eq!(
+        lossless_syntax.palette_escape_values[31],
+        Some(VvcSampledColor {
+            y: 1023,
+            u: 510,
+            v: 258,
+        })
+    );
+
+    let lossless_decoded = vvc_palette_444_decode_reconstruction(geometry, lossless_syntax);
+    assert_eq!(lossless_decoded.luma[31], 1023);
+    assert_eq!(lossless_decoded.cb[31], 510);
+    assert_eq!(lossless_decoded.cr[31], 258);
 }
 
 #[test]
@@ -2745,9 +2791,22 @@ fn vvc_palette_444_high_depth_bdpcm_uses_scaled_transform_skip_levels() {
         vvc_palette_transform_skip_coded_coeff_for_test(153, bit_depth),
         None
     );
+    let lossless_config = VvcSliceSyntaxConfig::palette_444_lossless(bit_depth);
+    assert_eq!(
+        vvc_palette_transform_skip_coded_coeff_with_config_for_test(
+            153,
+            bit_depth,
+            lossless_config
+        ),
+        Some(153)
+    );
     assert_eq!(
         vvc_palette_444_reconstruction_yuv(&frame),
-        [luma, cb, cr].concat()
+        [luma.clone(), cb.clone(), cr.clone()].concat()
+    );
+    assert_eq!(
+        vvc_palette_444_reconstruction_yuv_with_config(&frame, lossless_config),
+        [luma.clone(), cb.clone(), cr.clone()].concat()
     );
 
     let ctx_bins = vvc_palette_444_cabac_context_bins(&frame);
@@ -2853,6 +2912,20 @@ fn yuv422p10_canary_8x8() -> Vec<u8> {
         out.extend((((i * 29 + 5) & 0x03ff) as u16).to_le_bytes());
     }
     for i in 0..32 {
+        out.extend((((i * 37 + 7) & 0x03ff) as u16).to_le_bytes());
+    }
+    out
+}
+
+fn yuv444p10_canary_8x8() -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..64 {
+        out.extend((((i * 17 + 3) & 0x03ff) as u16).to_le_bytes());
+    }
+    for i in 0..64 {
+        out.extend((((i * 29 + 5) & 0x03ff) as u16).to_le_bytes());
+    }
+    for i in 0..64 {
         out.extend((((i * 37 + 7) & 0x03ff) as u16).to_le_bytes());
     }
     out

@@ -54,10 +54,13 @@ pub use palette::vvc_palette_444_cabac_dump_json;
 use palette::{
     vvc_palette_444_binarized_syntax_bits, vvc_palette_444_cabac_context_bins,
     vvc_palette_444_context_audit_rows, vvc_palette_444_cu_syntax,
-    vvc_palette_444_decode_reconstruction, vvc_palette_444_new_entry_token_bit_counts,
-    vvc_palette_444_reconstruction_yuv, vvc_palette_444_single_entry_syntax,
+    vvc_palette_444_cu_syntax_with_config, vvc_palette_444_decode_reconstruction,
+    vvc_palette_444_new_entry_token_bit_counts, vvc_palette_444_reconstruction_yuv,
+    vvc_palette_444_reconstruction_yuv_with_config, vvc_palette_444_single_entry_syntax,
     vvc_palette_444_syntax_tokens, vvc_palette_run_copy_context_id_for_audit,
-    vvc_palette_transform_skip_coded_coeff_for_test, VvcPalettePredictorMode, VvcPaletteTreeType,
+    vvc_palette_transform_skip_coded_coeff_for_test,
+    vvc_palette_transform_skip_coded_coeff_with_config_for_test, VvcPalettePredictorMode,
+    VvcPaletteTreeType,
 };
 pub use residual::quantize_vvc_color;
 #[cfg(test)]
@@ -439,6 +442,7 @@ pub struct VvcSampledColor {
 pub(in crate::vvc) type VvcSample = u16;
 pub(in crate::vvc) const VVC_MIN_BIT_DEPTH: u8 = 8;
 pub(in crate::vvc) const VVC_MAX_BIT_DEPTH: u8 = 12;
+const VVC_PALETTE_DEFAULT_SLICE_QP: i32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VvcSampledFrame {
@@ -694,12 +698,20 @@ impl VvcSliceSyntaxConfig {
     }
 
     const fn palette_444() -> Self {
-        Self::new(
+        let mut config = Self::new(
             VvcCodingTreeConfig {
                 chroma_sampling: ChromaSampling::Cs444,
             },
             VvcSyntaxToolFlags::palette_444(),
-        )
+        );
+        config.slice_qp = VVC_PALETTE_DEFAULT_SLICE_QP;
+        config
+    }
+
+    const fn palette_444_lossless(bit_depth: SampleBitDepth) -> Self {
+        let mut config = Self::palette_444();
+        config.slice_qp = vvc_palette_lossless_slice_qp(bit_depth);
+        config
     }
 
     const fn for_picture_format(format: VvcPictureFormat) -> Self {
@@ -732,6 +744,10 @@ impl VvcSliceSyntaxConfig {
 
 fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
     -((i32::from(bit_depth.bits()) - 8) * 6)
+}
+
+const fn vvc_palette_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
+    4 - ((bit_depth.bits() as i32 - 8) * 6)
 }
 
 impl VvcSampledFrame {
@@ -1120,11 +1136,15 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
             stream_format.chroma_sampling,
             ChromaSampling::Cs420 | ChromaSampling::Cs422
         );
+    let lossless_palette =
+        options.lossless && stream_format.chroma_sampling == ChromaSampling::Cs444;
     let slice_config = if lossless_residual {
         VvcSliceSyntaxConfig::residual_lossless(
             stream_format.chroma_sampling,
             stream_format.bit_depth,
         )
+    } else if lossless_palette {
+        VvcSliceSyntaxConfig::palette_444_lossless(stream_format.bit_depth)
     } else {
         VvcSliceSyntaxConfig::for_picture_format(stream_format)
     };
@@ -1212,7 +1232,10 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                     frame_stats.add_elapsed("ctu_copy_source", stage_start);
                     #[cfg(feature = "vvc-stats")]
                     let stage_start = Instant::now();
-                    let ctu_recon = palette::vvc_palette_444_reconstruction_yuv(&ctu_frame);
+                    let ctu_recon = palette::vvc_palette_444_reconstruction_yuv_with_config(
+                        &ctu_frame,
+                        slice_config,
+                    );
                     #[cfg(feature = "vvc-stats")]
                     frame_stats.add_elapsed("ctu_palette_reconstruct", stage_start);
                     #[cfg(feature = "vvc-stats")]
