@@ -294,12 +294,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             node,
             region,
         );
-        let initial_chroma_mode =
-            if lossless_residual && co_located_luma_mode != VvcIntraPredictionMode::Dc {
-                VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Dc)
-            } else {
-                VvcChromaIntraPredictionMode::Derived
-            };
+        let initial_chroma_mode = VvcChromaIntraPredictionMode::Derived;
         let initial_prediction_mode = initial_chroma_mode.prediction_mode(co_located_luma_mode);
         predict_vvc_chroma_intra_block_into_with_availability(
             &mut predicted_cb,
@@ -349,79 +344,73 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let mut best_chroma_mode = initial_chroma_mode;
         let mut best_chroma_sad = initial_sad;
         let mut chroma_candidate_costs = VvcChromaIntraCandidateCosts::new(initial_sad);
-        if !lossless_residual {
-            for explicit_mode in vvc_chroma_explicit_candidates(co_located_luma_mode) {
-                if !vvc_residual_chroma_explicit_candidate_allowed(explicit_mode) {
-                    continue;
-                }
-                let chroma_mode = VvcChromaIntraPredictionMode::Explicit(explicit_mode);
-                predict_vvc_chroma_intra_block_into_with_availability(
-                    &mut candidate_cb_prediction,
-                    &mut prediction_scratch,
-                    explicit_mode,
-                    &frame_recon.cb,
-                    source_frame.geometry,
-                    node,
-                    source_frame.format.chroma_sampling,
-                    source_frame.format.bit_depth,
-                    Some(frame_recon.cb_availability()),
-                );
-                predict_vvc_chroma_intra_block_into_with_availability(
-                    &mut candidate_cr_prediction,
-                    &mut prediction_scratch,
-                    explicit_mode,
-                    &frame_recon.cr,
-                    source_frame.geometry,
-                    node,
-                    source_frame.format.chroma_sampling,
-                    source_frame.format.bit_depth,
-                    Some(frame_recon.cr_availability()),
-                );
-                residual_chroma_tu_at_into(
-                    &mut candidate_cb_residuals,
-                    &source_frame.cb,
-                    source_frame.geometry,
-                    source_frame.format,
-                    chroma_x,
-                    chroma_y,
-                    chroma_width,
-                    chroma_height,
-                    &candidate_cb_prediction,
-                );
-                residual_chroma_tu_at_into(
-                    &mut candidate_cr_residuals,
-                    &source_frame.cr,
-                    source_frame.geometry,
-                    source_frame.format,
-                    chroma_x,
-                    chroma_y,
-                    chroma_width,
-                    chroma_height,
-                    &candidate_cr_prediction,
-                );
-                let candidate_sad =
-                    residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
-                chroma_candidate_costs =
-                    chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
-                if candidate_sad < best_chroma_sad {
-                    best_chroma_sad = candidate_sad;
-                    best_chroma_mode = chroma_mode;
-                    std::mem::swap(&mut predicted_cb, &mut candidate_cb_prediction);
-                    std::mem::swap(&mut predicted_cr, &mut candidate_cr_prediction);
-                    std::mem::swap(&mut cb_residuals, &mut candidate_cb_residuals);
-                    std::mem::swap(&mut cr_residuals, &mut candidate_cr_residuals);
-                }
+        for explicit_mode in vvc_chroma_explicit_candidates(co_located_luma_mode) {
+            if !vvc_residual_chroma_explicit_candidate_allowed(explicit_mode) {
+                continue;
+            }
+            let chroma_mode = VvcChromaIntraPredictionMode::Explicit(explicit_mode);
+            predict_vvc_chroma_intra_block_into_with_availability(
+                &mut candidate_cb_prediction,
+                &mut prediction_scratch,
+                explicit_mode,
+                &frame_recon.cb,
+                source_frame.geometry,
+                node,
+                source_frame.format.chroma_sampling,
+                source_frame.format.bit_depth,
+                Some(frame_recon.cb_availability()),
+            );
+            predict_vvc_chroma_intra_block_into_with_availability(
+                &mut candidate_cr_prediction,
+                &mut prediction_scratch,
+                explicit_mode,
+                &frame_recon.cr,
+                source_frame.geometry,
+                node,
+                source_frame.format.chroma_sampling,
+                source_frame.format.bit_depth,
+                Some(frame_recon.cr_availability()),
+            );
+            residual_chroma_tu_at_into(
+                &mut candidate_cb_residuals,
+                &source_frame.cb,
+                source_frame.geometry,
+                source_frame.format,
+                chroma_x,
+                chroma_y,
+                chroma_width,
+                chroma_height,
+                &candidate_cb_prediction,
+            );
+            residual_chroma_tu_at_into(
+                &mut candidate_cr_residuals,
+                &source_frame.cr,
+                source_frame.geometry,
+                source_frame.format,
+                chroma_x,
+                chroma_y,
+                chroma_width,
+                chroma_height,
+                &candidate_cr_prediction,
+            );
+            let candidate_sad =
+                residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
+            chroma_candidate_costs =
+                chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
+            if candidate_sad < best_chroma_sad {
+                best_chroma_sad = candidate_sad;
+                best_chroma_mode = chroma_mode;
+                std::mem::swap(&mut predicted_cb, &mut candidate_cb_prediction);
+                std::mem::swap(&mut predicted_cr, &mut candidate_cr_prediction);
+                std::mem::swap(&mut cb_residuals, &mut candidate_cb_residuals);
+                std::mem::swap(&mut cr_residuals, &mut candidate_cr_residuals);
             }
         }
-        let chroma_mode = if lossless_residual {
-            best_chroma_mode
-        } else {
-            select_vvc_residual_chroma_intra_mode_from_costs(
-                mode_context,
-                node,
-                chroma_candidate_costs,
-            )
-        };
+        let chroma_mode = select_vvc_residual_chroma_intra_mode_from_costs(
+            mode_context,
+            node,
+            chroma_candidate_costs,
+        );
         debug_assert_eq!(chroma_mode, best_chroma_mode);
         let _best_chroma_sad = best_chroma_sad;
         chroma_tu_intra_modes[chroma_tu_count] = chroma_mode;

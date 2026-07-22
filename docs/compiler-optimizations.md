@@ -1692,6 +1692,75 @@ make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
 Results: all commands completed successfully. The geometry sweep covered AV2
 and VVC, lossless and lossy, across the current screenshot sweep manifests.
 
+## VVC Unified Lossless Intra Search
+
+Checkpoint: `vvc-unified-lossless-intra-1f`.
+
+Changes retained:
+
+- VVC lossless luma now uses the same Planar/DC/H/V intra candidate machinery
+  as lossy instead of forcing the reduced lossless-only path.
+- VVC lossless chroma now evaluates Derived plus the existing explicit
+  Planar/DC/H/V candidate list, using the same selector path as lossy.
+- No mode-selection constants were tuned in this checkpoint. Non-cardinal
+  angular modes and CCLM remain feature work rather than enabled defaults.
+
+First-frame six-vector matrix versus `vvc-intra-feature-default-1f`:
+
+| Codec | Mode | Total bytes | FPS | Notes |
+|---|---|---:|---:|---|
+| AV2 | lossless | 6,586,445 | 2.65 | unchanged reference context |
+| AV2 | qp=24 | 2,400,148 | 1.16 | unchanged reference context |
+| VVC | lossless | 6,780,255 | 1.03 | -3,878,792 bytes versus prior VVC checkpoint |
+| VVC | qp=24 | 10,385,397 | 0.39 | current context only; this patch removes no lossy candidates |
+
+The feature tradeoff is clear: allowing lossless to use the richer intra
+candidate set cuts first-frame VVC lossless size by about 36% on the six-vector
+screen-content matrix, at the cost of extra intra-search work. This is an
+accepted feature checkpoint, not the final tuned path.
+
+High-depth smoke lossless size spot-check after the change:
+
+| Vector | Before | After | Delta |
+|---|---:|---:|---:|
+| canary_420_10 | 487 | 321 | -166 |
+| canary_422_10 | 646 | 408 | -238 |
+| canary_444_10 | 1,034 | 580 | -454 |
+| canary_420_12 | 656 | 465 | -191 |
+| canary_422_12 | 874 | 594 | -280 |
+| canary_444_12 | 1,382 | 843 | -539 |
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-unified-lossless-intra-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-intra-feature-default-1f.json
+```
+
+Generated report:
+
+```text
+verification/generated/encode_matrix/vvc-unified-lossless-intra-1f.md
+```
+
+Validation:
+
+```sh
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+cargo test -p frameforge-codecs vvc --features "vvc"
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
+```
+
 ## References
 
 - Cargo profile settings:

@@ -1502,7 +1502,7 @@ fn vvc_chroma_explicit_default_search_uses_reference_proven_modes() {
 }
 
 #[test]
-fn vvc_residual_luma_extra_candidates_are_lossy_only_for_now() {
+fn vvc_residual_luma_extra_candidates_are_available_for_all_coding_modes() {
     let format = VvcPictureFormat {
         chroma_sampling: ChromaSampling::Cs444,
         bit_depth: SampleBitDepth::new(10).expect("supported VVC bit depth"),
@@ -1517,11 +1517,11 @@ fn vvc_residual_luma_extra_candidates_are_lossy_only_for_now() {
         VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossy),
         node
     ));
-    assert!(!vvc_residual_luma_planar_candidate_allowed(
+    assert!(vvc_residual_luma_planar_candidate_allowed(
         VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossless),
         node
     ));
-    assert!(!vvc_residual_luma_directional_candidate_allowed(
+    assert!(vvc_residual_luma_directional_candidate_allowed(
         VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossless),
         node
     ));

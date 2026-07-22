@@ -1222,13 +1222,9 @@ pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
 }
 
 pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(
-    context: VvcResidualModeDecisionContext,
+    _context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
 ) -> bool {
-    let _candidate_scope = (context.chroma_sampling(), context.bit_depth());
-    if context.is_lossless() {
-        return false;
-    }
     node.width >= 4
         && node.height >= 4
         && node.width.is_power_of_two()
@@ -1236,13 +1232,9 @@ pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(
 }
 
 pub(in crate::vvc) fn vvc_residual_luma_directional_candidate_allowed(
-    context: VvcResidualModeDecisionContext,
+    _context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
 ) -> bool {
-    let _candidate_scope = (context.chroma_sampling(), context.bit_depth());
-    if context.is_lossless() {
-        return false;
-    }
     node.width >= 4
         && node.height >= 4
         && node.width.is_power_of_two()
