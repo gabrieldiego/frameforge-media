@@ -200,6 +200,80 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
 }
 
 #[test]
+fn vvc_transform_skip_reconstruction_uses_encoded_luma_coefficients() {
+    let residuals = [7, -1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15];
+    let (ac_levels, has_ac) = quant::transform_skip_luma_ac_levels_and_flag(&residuals, 4);
+    assert!(has_ac);
+
+    let mut reconstructed = Vec::new();
+    quant::reconstruct_vvc_luma_transform_skip_residuals_into(
+        &mut reconstructed,
+        residuals[0],
+        &ac_levels,
+        4,
+        4,
+    );
+    assert_eq!(reconstructed, residuals);
+
+    quant::reconstruct_vvc_luma_transform_skip_residuals_into(
+        &mut reconstructed,
+        residuals[0],
+        &ac_levels,
+        8,
+        8,
+    );
+    assert_eq!(reconstructed[0], residuals[0]);
+    assert_eq!(reconstructed[3 * 8 + 3], residuals[15]);
+    assert!(reconstructed
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| {
+            let x = idx % 8;
+            let y = idx / 8;
+            x >= 4 || y >= 4
+        })
+        .all(|(_, sample)| *sample == 0));
+}
+
+#[test]
+fn vvc_transform_skip_reconstruction_uses_encoded_chroma_coefficients() {
+    let residuals = [
+        -12, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, -16, 17,
+    ];
+    let (ac_levels, has_ac) = quant::transform_skip_chroma_ac_levels_and_flag(&residuals, 4);
+    assert!(has_ac);
+
+    let mut reconstructed = Vec::new();
+    quant::reconstruct_vvc_chroma_transform_skip_residuals_into(
+        &mut reconstructed,
+        residuals[0],
+        &ac_levels,
+        4,
+        4,
+    );
+    assert_eq!(reconstructed, residuals);
+
+    quant::reconstruct_vvc_chroma_transform_skip_residuals_into(
+        &mut reconstructed,
+        residuals[0],
+        &ac_levels,
+        8,
+        8,
+    );
+    assert_eq!(reconstructed[0], residuals[0]);
+    assert_eq!(reconstructed[3 * 8 + 3], residuals[15]);
+    assert!(reconstructed
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| {
+            let x = idx % 8;
+            let y = idx / 8;
+            x >= 4 || y >= 4
+        })
+        .all(|(_, sample)| *sample == 0));
+}
+
+#[test]
 fn vvc_420_chroma_dc_residual_preserves_decoder_visible_color() {
     let frame = VvcSampledFrame {
         geometry: VvcVideoGeometry {

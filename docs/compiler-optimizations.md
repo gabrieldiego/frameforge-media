@@ -2615,6 +2615,27 @@ VVC residual path remains CTU-quantization bound and residual-syntax dominated:
 | Luma-mode syntax-bin share | 2.5% |
 | Partition syntax-bin share | 2.1% |
 
+## VVC Transform-Skip Reconstruction Source
+
+Checkpoint: `vvc-ts-recon-from-coeffs-1f`.
+
+This checkpoint removes a hidden assumption from the unified VVC residual TU
+finalizer. Transform-skipped luma and chroma TUs now rebuild their residual
+samples from the encoded DC plus first-4x4 AC coefficient payload before
+updating the encoder reconstruction, rather than copying the full original
+residual buffer. Current lossless residual leaves are still 4x4, so the
+reconstructed samples and bitstreams are unchanged. For future lossy
+transform-skip trials on larger leaves, the finalizer now models the same
+coefficient subset the entropy path can actually signal.
+
+The first-frame six-vector matrix was byte-identical against
+`vvc-ctu-category-stats-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.39 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.46 | 0 |
+
 ## References
 
 - Cargo profile settings:

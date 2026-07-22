@@ -992,12 +992,19 @@ fn finalize_vvc_luma_tu(
             let dc_level = residuals.first().copied().unwrap_or(0);
             let (ac_levels, has_ac) =
                 transform_skip_luma_ac_levels_and_flag(residuals, usize::from(node.width));
+            reconstruct_vvc_luma_transform_skip_residuals_into(
+                reconstructed_residual,
+                dc_level,
+                &ac_levels,
+                usize::from(node.width),
+                usize::from(node.height),
+            );
             fill_visible_luma_node(
                 &mut frame_recon.luma,
                 source_frame.geometry,
                 node,
                 predicted_luma,
-                residuals,
+                reconstructed_residual,
                 source_frame.format.bit_depth,
             );
             VvcFinalizedLumaTu {
@@ -1088,14 +1095,28 @@ fn finalize_vvc_chroma_tu(
                 transform_skip_chroma_ac_levels_and_flag(cb_residuals, chroma_width);
             let (cr_ac_levels, cr_has_ac) =
                 transform_skip_chroma_ac_levels_and_flag(cr_residuals, chroma_width);
+            reconstruct_vvc_chroma_transform_skip_residuals_into(
+                reconstructed_residual,
+                cb_dc_level,
+                &cb_ac_levels,
+                chroma_width,
+                chroma_height,
+            );
             fill_visible_chroma_node(
                 &mut frame_recon.cb,
                 source_frame.geometry,
                 node,
                 source_frame.format.chroma_sampling,
                 predicted_cb,
-                cb_residuals,
+                reconstructed_residual,
                 source_frame.format.bit_depth,
+            );
+            reconstruct_vvc_chroma_transform_skip_residuals_into(
+                reconstructed_residual,
+                cr_dc_level,
+                &cr_ac_levels,
+                chroma_width,
+                chroma_height,
             );
             fill_visible_chroma_node(
                 &mut frame_recon.cr,
@@ -1103,7 +1124,7 @@ fn finalize_vvc_chroma_tu(
                 node,
                 source_frame.format.chroma_sampling,
                 predicted_cr,
-                cr_residuals,
+                reconstructed_residual,
                 source_frame.format.bit_depth,
             );
             VvcFinalizedChromaTu {
@@ -1246,6 +1267,49 @@ fn predict_vvc_chroma_mode_block_into_with_availability(
                 chroma_availability,
                 luma_availability,
             );
+        }
+    }
+}
+
+pub(in crate::vvc) fn reconstruct_vvc_luma_transform_skip_residuals_into(
+    residuals: &mut Vec<i16>,
+    dc_level: i16,
+    ac_levels: &[i16; super::VVC_LUMA_AC_COEFFS_PER_TU],
+    width: usize,
+    height: usize,
+) {
+    residuals.clear();
+    residuals.resize(width * height, 0);
+    if residuals.is_empty() {
+        return;
+    }
+    residuals[0] = dc_level;
+    for y in 0..height.min(4) {
+        for x in 0..width.min(4) {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            residuals[y * width + x] = ac_levels[y * 4 + x - 1];
+        }
+    }
+}
+
+pub(in crate::vvc) fn reconstruct_vvc_chroma_transform_skip_residuals_into(
+    residuals: &mut Vec<i16>,
+    dc_level: i16,
+    ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
+    width: usize,
+    height: usize,
+) {
+    residuals.clear();
+    residuals.resize(width * height, 0);
+    if residuals.is_empty() {
+        return;
+    }
+    residuals[0] = dc_level;
+    for (slot, (x, y)) in VVC_CHROMA_AC_POSITIONS_4X4.iter().copied().enumerate() {
+        if x < width && y < height {
+            residuals[y * width + x] = ac_levels[slot];
         }
     }
 }
