@@ -132,6 +132,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
 
     let mut luma_tu_count = 0usize;
     let luma_nodes = vvc_luma_transform_nodes(ctu_shape, luma_max_leaf_size);
+    let mut luma_mode_search_state = VvcLumaModeSearchState::new();
     for local_node in luma_nodes.iter().copied() {
         if luma_tu_count >= MAX_VVC_LUMA_TUS {
             break;
@@ -198,9 +199,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         if vvc_residual_luma_directional_candidate_allowed(mode_context, node) {
             let mut luma_directional_candidates = vvc_luma_directional_search_candidates(
                 source_frame,
-                &luma_nodes,
-                &luma_tu_intra_modes,
-                luma_tu_count,
+                &luma_mode_search_state,
                 local_node,
                 node,
             );
@@ -280,6 +279,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         debug_assert_eq!(luma_mode, best_luma_mode);
         let _best_luma_score = best_luma_score;
         luma_tu_intra_modes[luma_tu_count] = luma_mode;
+        luma_mode_search_state.mark_node(local_node, luma_mode);
         let luma_tu = finalize_vvc_luma_tu(
             residual_mode,
             source_frame,
@@ -685,11 +685,56 @@ impl VvcLumaDirectionalSearchCandidates {
     }
 }
 
+#[derive(Debug, Clone)]
+struct VvcLumaModeSearchState {
+    valid: [bool; VVC_CTU_SIZE * VVC_CTU_SIZE],
+    modes: [VvcIntraPredictionMode; VVC_CTU_SIZE * VVC_CTU_SIZE],
+}
+
+impl VvcLumaModeSearchState {
+    fn new() -> Self {
+        Self {
+            valid: [false; VVC_CTU_SIZE * VVC_CTU_SIZE],
+            modes: [VvcIntraPredictionMode::Planar; VVC_CTU_SIZE * VVC_CTU_SIZE],
+        }
+    }
+
+    fn left_of(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
+        let x = node.x.checked_sub(1)?;
+        let y = node.y.saturating_add(node.height >> 1);
+        self.mode_at(x, y)
+    }
+
+    fn above_of(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
+        let y = node.y.checked_sub(1)?;
+        let x = node.x.saturating_add(node.width >> 1);
+        self.mode_at(x, y)
+    }
+
+    fn mode_at(&self, x: u16, y: u16) -> Option<VvcIntraPredictionMode> {
+        if usize::from(x) >= VVC_CTU_SIZE || usize::from(y) >= VVC_CTU_SIZE {
+            return None;
+        }
+        let idx = usize::from(y) * VVC_CTU_SIZE + usize::from(x);
+        self.valid[idx].then_some(self.modes[idx])
+    }
+
+    fn mark_node(&mut self, node: VvcCodingTreeNode, mode: VvcIntraPredictionMode) {
+        let end_x = node.x.saturating_add(node.width).min(VVC_CTU_SIZE as u16);
+        let end_y = node.y.saturating_add(node.height).min(VVC_CTU_SIZE as u16);
+        for y in node.y..end_y {
+            for x in node.x..end_x {
+                let idx = usize::from(y) * VVC_CTU_SIZE + usize::from(x);
+                self.valid[idx] = true;
+                self.modes[idx] = mode;
+            }
+        }
+    }
+}
+
 fn vvc_luma_directional_search_candidates(
     source_frame: &VvcSampledFrame,
-    local_luma_nodes: &[VvcCodingTreeNode],
-    luma_modes: &[VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
-    luma_tu_count: usize,
+    mode_state: &VvcLumaModeSearchState,
     local_node: VvcCodingTreeNode,
     global_node: VvcCodingTreeNode,
 ) -> VvcLumaDirectionalSearchCandidates {
@@ -697,75 +742,19 @@ fn vvc_luma_directional_search_candidates(
     for index in VVC_LUMA_DEFAULT_DIRECTIONAL_SEEDS {
         candidates.add_index(index);
     }
-    let (left_mode, above_mode) =
-        vvc_luma_neighbor_modes(local_luma_nodes, luma_modes, luma_tu_count, local_node);
-    for mode in [left_mode, above_mode].into_iter().flatten() {
+    for mode in [
+        mode_state.left_of(local_node),
+        mode_state.above_of(local_node),
+    ]
+    .into_iter()
+    .flatten()
+    {
         candidates.add_family(mode.luma_mode_index());
     }
     if let Some(index) = vvc_source_luma_directional_seed(source_frame, global_node) {
         candidates.add_family(index);
     }
     candidates
-}
-
-fn vvc_luma_neighbor_modes(
-    local_luma_nodes: &[VvcCodingTreeNode],
-    luma_modes: &[VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
-    luma_tu_count: usize,
-    node: VvcCodingTreeNode,
-) -> (
-    Option<VvcIntraPredictionMode>,
-    Option<VvcIntraPredictionMode>,
-) {
-    let center_x = node.x.saturating_add(node.width >> 1);
-    let center_y = node.y.saturating_add(node.height >> 1);
-    let left = (node.x > 0)
-        .then(|| {
-            vvc_luma_mode_covering_point(
-                local_luma_nodes,
-                luma_modes,
-                luma_tu_count,
-                node.x - 1,
-                center_y,
-            )
-        })
-        .flatten();
-    let above = (node.y > 0)
-        .then(|| {
-            vvc_luma_mode_covering_point(
-                local_luma_nodes,
-                luma_modes,
-                luma_tu_count,
-                center_x,
-                node.y - 1,
-            )
-        })
-        .flatten();
-    (left, above)
-}
-
-fn vvc_luma_mode_covering_point(
-    local_luma_nodes: &[VvcCodingTreeNode],
-    luma_modes: &[VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
-    luma_tu_count: usize,
-    x: u16,
-    y: u16,
-) -> Option<VvcIntraPredictionMode> {
-    for (idx, node) in local_luma_nodes
-        .iter()
-        .copied()
-        .take(luma_tu_count)
-        .enumerate()
-    {
-        if x >= node.x
-            && x < node.x.saturating_add(node.width)
-            && y >= node.y
-            && y < node.y.saturating_add(node.height)
-        {
-            return Some(luma_modes[idx]);
-        }
-    }
-    None
 }
 
 fn vvc_source_luma_directional_seed(

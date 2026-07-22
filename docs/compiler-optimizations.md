@@ -2265,6 +2265,40 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-chroma-dc-fast-search-1f.json
 ```
 
+## VVC Luma Mode Map
+
+Checkpoint: `vvc-luma-mode-map-1f`.
+
+This checkpoint removes an O(prior-TU) scan from VVC luma directional candidate
+generation. The quantizer now maintains a CTU-local luma mode map as leaves are
+finalized, so left and above candidate seeds are direct lookups instead of
+searches through previously visited transform nodes.
+
+The candidate set is unchanged, so the first-frame matrix is byte-identical
+against `vvc-lossy-sse-mode-score-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.36 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
+Lossless rows improved by up to about +0.03 fps in this run. Lossy rows were
+mixed within timing noise, but the cleanup keeps neighbour lookup cost bounded
+as we add more VVC intra partition and search features.
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-mode-map-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-lossy-sse-mode-score-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
