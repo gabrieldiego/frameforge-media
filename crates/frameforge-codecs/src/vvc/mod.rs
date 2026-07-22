@@ -15,8 +15,9 @@ use crate::instrumentation::CountingWriter;
 use crate::instrumentation::JsonlInstrumentationSink;
 use crate::picture::{
     chroma_subsample_x as planar_chroma_subsample_x,
-    chroma_subsample_y as planar_chroma_subsample_y, read_input_frame, ChromaSampling, FrameLimit,
-    Picture, PixelFormat, PlanarYuvGeometry, SampleBitDepth,
+    chroma_subsample_y as planar_chroma_subsample_y, pack_planar_samples, read_input_frame,
+    unpack_planar_samples, ChromaSampling, FrameLimit, Picture, PixelFormat, PlanarYuvFrameLayout,
+    PlanarYuvGeometry, SampleBitDepth,
 };
 
 mod cabac;
@@ -681,6 +682,7 @@ impl VvcSliceSyntaxConfig {
         }
     }
 
+    #[cfg(test)]
     const fn yuv420_residual() -> Self {
         Self::residual_lossy(ChromaSampling::Cs420)
     }
@@ -907,40 +909,6 @@ impl VvcSampledFrame {
             y: self.luma[0],
             u: self.cb[0],
             v: self.cr[0],
-        }
-    }
-
-    fn decoder_compat_frame(self) -> Self {
-        let format = VvcPictureFormat {
-            chroma_sampling: ChromaSampling::Cs420,
-            bit_depth: self.format.bit_depth,
-        };
-        let layout = PlanarYuvGeometry::for_validated_shape(
-            self.geometry.width,
-            self.geometry.height,
-            format.chroma_sampling,
-            format.bit_depth,
-        );
-        let chroma_len = layout.chroma_samples();
-        if self.format.chroma_sampling == ChromaSampling::Cs420 {
-            return Self {
-                geometry: self.geometry,
-                format,
-                luma: self.luma,
-                cb: self.cb,
-                cr: self.cr,
-                chroma_len,
-            };
-        }
-
-        let color = self.sampled_color();
-        Self {
-            geometry: self.geometry,
-            format,
-            luma: self.luma,
-            cb: vec![VvcSample::from(color.u); chroma_len],
-            cr: vec![VvcSample::from(color.v); chroma_len],
-            chroma_len,
         }
     }
 }
@@ -1426,62 +1394,45 @@ impl VvcReconstructionFrame {
     }
 
     fn into_yuv(self) -> Vec<u8> {
-        let layout = PlanarYuvGeometry::for_validated_shape(
+        let layout = PlanarYuvFrameLayout::for_validated_shape(
             self.geometry.width,
             self.geometry.height,
             self.format.chroma_sampling,
             self.format.bit_depth,
         );
         let mut output = vec![0; layout.frame_len()];
-        let bytes_per_sample = layout.bytes_per_sample();
-        let y_bytes = layout.luma_samples() * bytes_per_sample;
-        let c_bytes = layout.chroma_samples() * bytes_per_sample;
-        let (y_plane, chroma) = output.split_at_mut(y_bytes);
-        let (cb_plane, cr_plane) = chroma.split_at_mut(c_bytes);
-        pack_vvc_plane(&self.luma, y_plane, self.format.bit_depth);
-        pack_vvc_plane(&self.cb, cb_plane, self.format.bit_depth);
-        pack_vvc_plane(&self.cr, cr_plane, self.format.bit_depth);
+        let (y_plane, cb_plane, cr_plane) = layout.plane_slices_mut(&mut output);
+        pack_planar_samples(&self.luma, y_plane, self.format.bit_depth);
+        pack_planar_samples(&self.cb, cb_plane, self.format.bit_depth);
+        pack_planar_samples(&self.cr, cr_plane, self.format.bit_depth);
         output
     }
 }
 
-fn pack_vvc_plane(samples: &[VvcSample], output: &mut [u8], bit_depth: SampleBitDepth) {
-    debug_assert_eq!(output.len(), samples.len() * bit_depth.bytes_per_sample());
-    if bit_depth.bits() <= 8 {
-        for (dst, &sample) in output.iter_mut().zip(samples) {
-            *dst = sample as u8;
-        }
-    } else {
-        for (dst, &sample) in output.chunks_exact_mut(2).zip(samples) {
-            let bytes = sample.to_le_bytes();
-            dst[0] = bytes[0];
-            dst[1] = bytes[1];
-        }
-    }
-}
-
-pub fn vvc_yuv420_cabac_vector_dump_json(
+pub fn vvc_cabac_vector_dump_json(
     input: &[u8],
     params: VvcEncodeParams,
     geometry: VvcVideoGeometry,
     format: PixelFormat,
 ) -> Result<String, String> {
-    if format.chroma_sampling() != Some(ChromaSampling::Cs420) {
-        return Err(format!(
-            "VVC CABAC vector dump currently expects 4:2:0 input; got {format}"
-        ));
-    }
     let source_frame = sample_vvc_yuv_frame(input, params, geometry, format)?;
-    let compat_frame = source_frame.decoder_compat_frame();
-    let color = quantize_vvc_frame(&compat_frame);
-    let params = vvc_ctu_partition_params(compat_frame.geometry, color).ok_or_else(|| {
+    let slice_config = VvcSliceSyntaxConfig::for_picture_format(source_frame.format);
+    let color = quantize_vvc_frame(&source_frame);
+    let params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+        source_frame.geometry,
+        color,
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE,
+        slice_config.coding_tree.chroma_sampling,
+        slice_config.coding_tree.dual_tree_intra,
+    )
+    .ok_or_else(|| {
         format!(
             "VVC CABAC vector dump has no generated CTU path for coded geometry {}x{}",
-            compat_frame.geometry.coded_width(),
-            compat_frame.geometry.coded_height()
+            source_frame.geometry.coded_width(),
+            source_frame.geometry.coded_height()
         )
     })?;
-    let dump = vvc_ctu_partition_cabac_dump(&params, VvcSliceSyntaxConfig::yuv420_residual());
+    let dump = vvc_ctu_partition_cabac_dump(&params, slice_config);
     let mapped_context_symbols = dump
         .semantic_symbols
         .iter()
@@ -1493,8 +1444,9 @@ pub fn vvc_yuv420_cabac_vector_dump_json(
             dump.context_bin_count, mapped_context_symbols
         ));
     }
-    Ok(vvc_cabac_vector_dump_json(
-        compat_frame.geometry,
+    Ok(format_vvc_cabac_vector_dump_json(
+        source_frame.geometry,
+        format,
         &params,
         &dump.symbols,
         &dump.semantic_symbols,
@@ -1550,7 +1502,7 @@ fn sample_vvc_yuv_frame_at(
         format,
         validate_vvc_input_format,
     )?;
-    let layout = PlanarYuvGeometry::new(
+    let layout = PlanarYuvFrameLayout::new(
         geometry.width,
         geometry.height,
         stream_format.chroma_sampling,
@@ -1577,20 +1529,10 @@ fn sample_vvc_yuv_frame_at(
     let chroma_plane_samples = layout.chroma_samples();
     let mut cb = vec![0; chroma_plane_samples];
     let mut cr = vec![0; chroma_plane_samples];
-    let bytes_per_sample = layout.bytes_per_sample();
-    let y_bytes = luma_samples * bytes_per_sample;
-    let c_bytes = chroma_plane_samples * bytes_per_sample;
-    unpack_vvc_plane(&frame[..y_bytes], &mut luma, stream_format.bit_depth);
-    unpack_vvc_plane(
-        &frame[y_bytes..y_bytes + c_bytes],
-        &mut cb,
-        stream_format.bit_depth,
-    );
-    unpack_vvc_plane(
-        &frame[y_bytes + c_bytes..y_bytes + c_bytes * 2],
-        &mut cr,
-        stream_format.bit_depth,
-    );
+    let (y_plane, cb_plane, cr_plane) = layout.plane_slices(frame);
+    unpack_planar_samples(y_plane, &mut luma, stream_format.bit_depth);
+    unpack_planar_samples(cb_plane, &mut cb, stream_format.bit_depth);
+    unpack_planar_samples(cr_plane, &mut cr, stream_format.bit_depth);
 
     Ok(VvcSampledFrame {
         geometry,
@@ -1600,20 +1542,6 @@ fn sample_vvc_yuv_frame_at(
         cr,
         chroma_len: chroma_plane_samples,
     })
-}
-
-fn unpack_vvc_plane(input: &[u8], output: &mut [VvcSample], bit_depth: SampleBitDepth) {
-    debug_assert_eq!(input.len(), output.len() * bit_depth.bytes_per_sample());
-    if bit_depth.bits() <= 8 {
-        for (dst, &sample) in output.iter_mut().zip(input) {
-            *dst = VvcSample::from(sample);
-        }
-    } else {
-        let max_sample = bit_depth.max_sample();
-        for (dst, sample) in output.iter_mut().zip(input.chunks_exact(2)) {
-            *dst = u16::from_le_bytes([sample[0], sample[1]]).min(max_sample);
-        }
-    }
 }
 
 fn validate_vvc_exact_frame_count(params: VvcEncodeParams) -> Result<FrameLimit, String> {
@@ -1897,6 +1825,7 @@ fn vvc_frame_cabac_bits(
     cabac.finish()
 }
 
+#[cfg(test)]
 fn vvc_ctu_partition_params(
     geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
@@ -1908,6 +1837,7 @@ fn vvc_ctu_partition_params(
     )
 }
 
+#[cfg(test)]
 fn vvc_ctu_partition_params_with_luma_max_leaf_size(
     geometry: VvcVideoGeometry,
     color: VvcQuantizedColor,
@@ -2125,8 +2055,9 @@ fn vvc_ctu_partition_cabac_dump(
     }
 }
 
-fn vvc_cabac_vector_dump_json(
+fn format_vvc_cabac_vector_dump_json(
     geometry: VvcVideoGeometry,
+    format: PixelFormat,
     params: &VvcCtuPartitionParams,
     symbols: &[VvcCabacDumpSymbol],
     semantic_symbols: &[VvcCabacDumpSymbol],
@@ -2138,7 +2069,7 @@ fn vvc_cabac_vector_dump_json(
     json.push_str("{\"kind\":\"frameforge.vvc.cabac_vector.v1\"");
     json.push_str(&format!(",\"width\":{}", geometry.width));
     json.push_str(&format!(",\"height\":{}", geometry.height));
-    json.push_str(",\"format\":\"yuv420p8\"");
+    json.push_str(&format!(",\"format\":\"{format}\""));
     json.push_str(&format!(
         ",\"luma_dc_abs_level\":{}",
         params.luma_tu_abs_levels[0]

@@ -42,17 +42,12 @@ fn add_residual_sample_proxy_score(score: &mut usize, delta: i32, magnitude_scal
 }
 
 struct Av2LosslessSubsampledTileState<'a> {
-    geometry: Av2VideoGeometry,
-    region: Av2TileRegion,
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     mode_search: Av2LosslessSubsampledModeSearch,
     source: &'a [u8],
     recon: &'a mut [u8],
-    y_len: usize,
-    c_width: usize,
-    c_height: usize,
-    c_len: usize,
+    layout: Av2PlanarTileLayout,
     source_backed_recon: bool,
 }
 
@@ -73,16 +68,8 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             ),
             "AV2 planar lossless state expects 4:2:0, 4:2:2, or 4:4:4 input"
         );
-        let layout = PlanarYuvGeometry::for_validated_shape(
-            geometry.width,
-            geometry.height,
-            chroma_format.chroma_sampling(),
-            bit_depth,
-        );
-        let y_len = layout.luma_samples();
-        let c_width = layout.chroma_width();
-        let c_height = layout.chroma_height();
-        let c_len = layout.chroma_samples();
+        let layout =
+            Av2PlanarTileLayout::for_validated_shape(geometry, region, chroma_format, bit_depth);
         let expected_len = layout.frame_len();
         assert_eq!(
             source.len(),
@@ -103,55 +90,30 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             );
         }
         Self {
-            geometry,
-            region,
             chroma_format,
             bit_depth,
             mode_search,
             source,
             recon,
-            y_len,
-            c_width,
-            c_height,
-            c_len,
+            layout,
             source_backed_recon,
         }
     }
 
     fn plane_geometry(&self, plane: Av2LosslessPlane) -> (usize, usize) {
-        match plane {
-            Av2LosslessPlane::Y => (self.geometry.width, self.geometry.height),
-            Av2LosslessPlane::U | Av2LosslessPlane::V => (self.c_width, self.c_height),
-        }
+        self.layout.plane_geometry(plane.planar())
     }
 
     fn plane_origin(&self, plane: Av2LosslessPlane) -> (usize, usize) {
-        match plane {
-            Av2LosslessPlane::Y => (self.region.origin_x, self.region.origin_y),
-            Av2LosslessPlane::U | Av2LosslessPlane::V => (
-                self.region.origin_x / chroma_subsample_x(self.chroma_format),
-                self.region.origin_y / chroma_subsample_y(self.chroma_format),
-            ),
-        }
+        self.layout.plane_origin(plane.planar())
     }
 
     fn plane_region_limit(&self, plane: Av2LosslessPlane) -> (usize, usize) {
-        let (origin_x, origin_y) = self.plane_origin(plane);
-        let (sub_x, sub_y) = self.plane_subsampling(plane);
-        (
-            origin_x + self.region.width / sub_x,
-            origin_y + self.region.height / sub_y,
-        )
+        self.layout.plane_region_limit(plane.planar())
     }
 
     fn plane_subsampling(&self, plane: Av2LosslessPlane) -> (usize, usize) {
-        match plane {
-            Av2LosslessPlane::Y => (1, 1),
-            Av2LosslessPlane::U | Av2LosslessPlane::V => (
-                chroma_subsample_x(self.chroma_format),
-                chroma_subsample_y(self.chroma_format),
-            ),
-        }
+        self.layout.plane_subsampling(plane.planar())
     }
 
     fn coded_mi_for_plane_sample(
@@ -160,26 +122,17 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         x: usize,
         y: usize,
     ) -> (usize, usize) {
-        let (sub_x, sub_y) = self.plane_subsampling(plane);
-        let luma_x = x * sub_x;
-        let luma_y = y * sub_y;
-        (
-            luma_y.saturating_sub(self.region.origin_y) / MI_SIZE,
-            luma_x.saturating_sub(self.region.origin_x) / MI_SIZE,
-        )
+        self.layout
+            .coded_mi_for_plane_sample(plane.planar(), x, y)
     }
 
     fn txb_origin(&self, plane: Av2LosslessPlane, col: usize, row: usize) -> (usize, usize) {
-        let (origin_x, origin_y) = self.plane_origin(plane);
-        (origin_x + col * TX4X4_SIZE, origin_y + row * TX4X4_SIZE)
+        self.layout.txb_origin(plane.planar(), col, row)
     }
 
     fn source_block4x4(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> [i32; 16] {
         let mut block = [0i32; TX4X4_SAMPLES];
-        let stride = match plane {
-            Av2LosslessPlane::Y => self.geometry.width,
-            Av2LosslessPlane::U | Av2LosslessPlane::V => self.c_width,
-        };
+        let stride = self.layout.plane_stride(plane.planar());
         if self.bit_depth.bits() <= 8 {
             let start = self.offset(plane, x0, y0);
             for local_y in 0..TX4X4_SIZE {
@@ -208,15 +161,11 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
     }
 
     fn offset(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> usize {
-        match plane {
-            Av2LosslessPlane::Y => y * self.geometry.width + x,
-            Av2LosslessPlane::U => self.y_len + y * self.c_width + x,
-            Av2LosslessPlane::V => self.y_len + self.c_len + y * self.c_width + x,
-        }
+        self.layout.offset(plane.planar(), x, y)
     }
 
     fn source_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
-        read_validated_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
+        read_planar_sample(self.source, self.offset(plane, x, y), self.bit_depth)
     }
 
     fn reference_sample(
@@ -226,14 +175,14 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         x: usize,
         y: usize,
     ) -> Av2Sample {
-        read_validated_planar_sample(reference, self.offset(plane, x, y), self.bit_depth)
+        read_planar_sample(reference, self.offset(plane, x, y), self.bit_depth)
     }
 
     fn recon_sample(&self, plane: Av2LosslessPlane, x: usize, y: usize) -> Av2Sample {
         if self.source_backed_recon {
             return self.source_sample(plane, x, y);
         }
-        read_validated_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
+        read_planar_sample(self.recon, self.offset(plane, x, y), self.bit_depth)
     }
 
     fn dc_predictor(&self, plane: Av2LosslessPlane, x0: usize, y0: usize) -> Av2Sample {
@@ -346,6 +295,7 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         x0: usize,
         y0: usize,
     ) -> [i32; TX4X4_SAMPLES] {
+        let (luma_width, luma_height) = self.plane_geometry(Av2LosslessPlane::Y);
         self.tx4x4_coefficients_for_mode(
             plane,
             x0,
@@ -356,8 +306,8 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
             TX4X4_SIZE,
             TX4X4_SIZE,
             &Av2CodedMiContext::new(
-                self.geometry.height.div_ceil(MI_SIZE),
-                self.geometry.width.div_ceil(MI_SIZE),
+                luma_height.div_ceil(MI_SIZE),
+                luma_width.div_ceil(MI_SIZE),
             ),
         )
     }
@@ -2353,12 +2303,8 @@ impl<'a> Av2LosslessSubsampledTileState<'a> {
         if self.source_backed_recon && self.recon.is_empty() {
             return;
         }
-        let (plane_width, plane_height) = self.plane_geometry(plane);
         let (origin_x, origin_y) = self.plane_origin(plane);
-        let (sub_x, sub_y) = self.plane_subsampling(plane);
-        let end_x = ((self.region.origin_x + self.region.width).div_ceil(sub_x)).min(plane_width);
-        let end_y =
-            ((self.region.origin_y + self.region.height).div_ceil(sub_y)).min(plane_height);
+        let (end_x, end_y) = self.layout.clipped_plane_region_limit(plane.planar());
         if origin_x >= end_x || origin_y >= end_y {
             return;
         }
@@ -2436,17 +2382,12 @@ enum Av2LosslessPlane {
     V,
 }
 
-fn read_validated_planar_sample(
-    buffer: &[u8],
-    sample_index: usize,
-    bit_depth: SampleBitDepth,
-) -> Av2Sample {
-    if bit_depth.bits() <= 8 {
-        debug_assert!(sample_index < buffer.len());
-        return Av2Sample::from(buffer[sample_index]);
+impl Av2LosslessPlane {
+    fn planar(self) -> Av2PlanarPlane {
+        match self {
+            Self::Y => Av2PlanarPlane::Y,
+            Self::U => Av2PlanarPlane::U,
+            Self::V => Av2PlanarPlane::V,
+        }
     }
-
-    let offset = sample_index * 2;
-    debug_assert!(offset + 1 < buffer.len());
-    Av2Sample::from_le_bytes([buffer[offset], buffer[offset + 1]])
 }

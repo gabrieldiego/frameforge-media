@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,12 @@ def main() -> int:
     parser.add_argument("--codec", action="append", choices=("av2", "vvc"), default=[])
     parser.add_argument("--mode", action="append", choices=("lossless", "lossy"), default=[])
     parser.add_argument("--limit", type=int, default=0, help="run only the first N enabled rows")
+    parser.add_argument(
+        "--frames",
+        type=parse_positive_int,
+        default=0,
+        help="override each vector's frame count, e.g. --frames 1 for I-frame checks",
+    )
     parser.add_argument("--av2-lossy-qp", type=parse_qp, default=24)
     parser.add_argument("--av2-predictive", dest="av2_predictive", action="store_true", default=True)
     parser.add_argument("--no-av2-predictive", dest="av2_predictive", action="store_false")
@@ -56,6 +63,7 @@ def main() -> int:
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)
         return 2
     args.ff = args.ff.resolve()
+    args.frames = args.frames or None
     codecs = args.codec or ["av2", "vvc"]
     modes = args.mode or ["lossless", "lossy"]
     run_name = args.run_name or time.strftime("%Y%m%d-%H%M%S")
@@ -168,6 +176,8 @@ def run_case(
     log_dir: Path,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    if args.frames is not None and args.frames != vector.frames:
+        vector = replace(vector, frames=args.frames)
     source_path = source_path_for_vector(vector_set, vector, args)
     case_dir = run_dir / codec / mode
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -392,6 +402,16 @@ def parse_qp(value: str) -> int:
             f"QP expects an integer from 1 through 255, got '{value}'"
         )
     return qp
+
+
+def parse_positive_int(value: str) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got '{value}'") from err
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got '{value}'")
+    return parsed
 
 
 def delta_label(result: dict[str, Any]) -> str:

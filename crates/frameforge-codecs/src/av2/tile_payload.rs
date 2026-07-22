@@ -725,7 +725,7 @@ fn lossless_luma_8x8_is_palette_worthy(
     let mut unique = 0usize;
     for y in y0..(y0 + MVP_LEAF_BLOCK_SIZE) {
         for x in x0..(x0 + MVP_LEAF_BLOCK_SIZE) {
-            let sample = read_validated_planar_sample(source, y * geometry.width + x, bit_depth);
+            let sample = read_planar_sample(source, y * geometry.width + x, bit_depth);
             if values[..unique].contains(&sample) {
                 continue;
             }
@@ -767,11 +767,8 @@ fn luma_region_is_simple_for_adaptive_leaf(
             .step_by(AV2_SCREEN_ADAPTIVE_SAMPLE_STEP)
             .enumerate()
         {
-            let sample = read_validated_planar_sample(
-                source,
-                y * geometry.width + x,
-                bit_depth,
-            ) >> normalize_shift;
+            let sample =
+                read_planar_sample(source, y * geometry.width + x, bit_depth) >> normalize_shift;
             let sample_index = usize::from(sample);
             if !seen[sample_index] {
                 seen[sample_index] = true;

@@ -1,20 +1,19 @@
+use super::tile::Av2TileRegion;
 use super::{Av2ChromaFormat, Av2VideoGeometry};
 use crate::picture::{
     chroma_subsample_x as planar_chroma_subsample_x,
-    chroma_subsample_y as planar_chroma_subsample_y, PlanarYuvGeometry, SampleBitDepth,
+    chroma_subsample_y as planar_chroma_subsample_y, PlanarYuvFrameLayout, PlanarYuvPlane,
+    SampleBitDepth,
 };
 
 const AV2_PLANAR_HASH_PRIME: u64 = 0x1000_0000_01b3;
+const AV2_PLANAR_MI_SIZE: usize = 4;
+const AV2_PLANAR_TX4X4_SIZE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Av2PlanarYuvLayout {
     geometry: Av2VideoGeometry,
-    chroma_format: Av2ChromaFormat,
-    chroma_width: usize,
-    bytes_per_sample: usize,
-    y_bytes: usize,
-    c_bytes: usize,
-    expected_len: usize,
+    layout: PlanarYuvFrameLayout,
 }
 
 impl Av2PlanarYuvLayout {
@@ -29,37 +28,31 @@ impl Av2PlanarYuvLayout {
         ) {
             return Err(format!("AV2 planar YUV does not support {chroma_format:?}"));
         }
-        let layout = PlanarYuvGeometry::new(
+        let layout = PlanarYuvFrameLayout::new(
             geometry.width,
             geometry.height,
             chroma_format.chroma_sampling(),
             bit_depth,
         )?;
-        let bytes_per_sample = layout.bytes_per_sample();
-        let y_bytes = layout.luma_samples() * bytes_per_sample;
-        let c_bytes = layout.chroma_samples() * bytes_per_sample;
-        Ok(Self {
-            geometry,
-            chroma_format,
-            chroma_width: layout.chroma_width(),
-            bytes_per_sample,
-            y_bytes,
-            c_bytes,
-            expected_len: layout.frame_len(),
-        })
+        Ok(Self { geometry, layout })
     }
 
     #[cfg(test)]
     pub(crate) fn expected_len(self) -> usize {
-        self.expected_len
+        self.layout.frame_len()
+    }
+
+    #[cfg(test)]
+    fn luma_byte_len(self) -> usize {
+        self.layout.luma_byte_len()
     }
 
     #[allow(dead_code)]
     pub(crate) fn validate_frame_len(self, frame: &[u8], label: &str) -> Result<(), String> {
-        if frame.len() != self.expected_len {
+        if frame.len() != self.layout.frame_len() {
             return Err(format!(
                 "AV2 planar YUV {label} length mismatch: expected {} byte(s), got {}",
-                self.expected_len,
+                self.layout.frame_len(),
                 frame.len()
             ));
         }
@@ -76,7 +69,8 @@ impl Av2PlanarYuvLayout {
         width: usize,
         height: usize,
     ) -> bool {
-        self.regions_equal_between(frame, x0, y0, frame, ref_x0, ref_y0, width, height)
+        self.layout
+            .region_equal_in_frame(frame, x0, y0, ref_x0, ref_y0, width, height)
     }
 
     pub(crate) fn regions_equal_between(
@@ -90,65 +84,8 @@ impl Av2PlanarYuvLayout {
         width: usize,
         height: usize,
     ) -> bool {
-        if current.len() != self.expected_len || reference.len() != self.expected_len {
-            return false;
-        }
-        if !self.luma_region_in_bounds(x0, y0, width, height)
-            || !self.luma_region_in_bounds(ref_x0, ref_y0, width, height)
-        {
-            return false;
-        }
-
-        let (current_y, current_u, current_v) = self.plane_slices(current);
-        let (reference_y, reference_u, reference_v) = self.plane_slices(reference);
-        if !plane_regions_equal_between(
-            current_y,
-            self.geometry.width,
-            x0,
-            y0,
-            reference_y,
-            self.geometry.width,
-            ref_x0,
-            ref_y0,
-            width,
-            height,
-            self.bytes_per_sample,
-        ) {
-            return false;
-        }
-
-        let sub_x = chroma_subsample_x(self.chroma_format);
-        let sub_y = chroma_subsample_y(self.chroma_format);
-        if width % sub_x != 0
-            || height % sub_y != 0
-            || x0 % sub_x != 0
-            || y0 % sub_y != 0
-            || ref_x0 % sub_x != 0
-            || ref_y0 % sub_y != 0
-        {
-            return false;
-        }
-        let chroma_width = width / sub_x;
-        let chroma_height = height / sub_y;
-        for (current_plane, reference_plane) in [(current_u, reference_u), (current_v, reference_v)]
-        {
-            if !plane_regions_equal_between(
-                current_plane,
-                self.chroma_width,
-                x0 / sub_x,
-                y0 / sub_y,
-                reference_plane,
-                self.chroma_width,
-                ref_x0 / sub_x,
-                ref_y0 / sub_y,
-                chroma_width,
-                chroma_height,
-                self.bytes_per_sample,
-            ) {
-                return false;
-            }
-        }
-        true
+        self.layout
+            .regions_equal_between(current, x0, y0, reference, ref_x0, ref_y0, width, height)
     }
 
     pub(crate) fn copy_region_between(
@@ -162,61 +99,8 @@ impl Av2PlanarYuvLayout {
         width: usize,
         height: usize,
     ) -> bool {
-        if dst.len() != self.expected_len || src.len() != self.expected_len {
-            return false;
-        }
-        if !self.luma_region_in_bounds(x0, y0, width, height)
-            || !self.luma_region_in_bounds(ref_x0, ref_y0, width, height)
-        {
-            return false;
-        }
-
-        let sub_x = chroma_subsample_x(self.chroma_format);
-        let sub_y = chroma_subsample_y(self.chroma_format);
-        if width % sub_x != 0
-            || height % sub_y != 0
-            || x0 % sub_x != 0
-            || y0 % sub_y != 0
-            || ref_x0 % sub_x != 0
-            || ref_y0 % sub_y != 0
-        {
-            return false;
-        }
-
-        let (dst_y, dst_u, dst_v) = self.plane_slices_mut(dst);
-        let (src_y, src_u, src_v) = self.plane_slices(src);
-        copy_plane_region_between(
-            dst_y,
-            self.geometry.width,
-            x0,
-            y0,
-            src_y,
-            self.geometry.width,
-            ref_x0,
-            ref_y0,
-            width,
-            height,
-            self.bytes_per_sample,
-        );
-
-        let chroma_width = width / sub_x;
-        let chroma_height = height / sub_y;
-        for (dst_plane, src_plane) in [(dst_u, src_u), (dst_v, src_v)] {
-            copy_plane_region_between(
-                dst_plane,
-                self.chroma_width,
-                x0 / sub_x,
-                y0 / sub_y,
-                src_plane,
-                self.chroma_width,
-                ref_x0 / sub_x,
-                ref_y0 / sub_y,
-                chroma_width,
-                chroma_height,
-                self.bytes_per_sample,
-            );
-        }
-        true
+        self.layout
+            .copy_region_between(dst, x0, y0, src, ref_x0, ref_y0, width, height)
     }
 
     #[allow(dead_code)]
@@ -228,23 +112,27 @@ impl Av2PlanarYuvLayout {
         width: usize,
         height: usize,
     ) -> u64 {
-        debug_assert_eq!(frame.len(), self.expected_len);
-        debug_assert!(self.luma_region_in_bounds(x0, y0, width, height));
-        let (y_plane, u_plane, v_plane) = self.plane_slices(frame);
+        debug_assert_eq!(frame.len(), self.layout.frame_len());
+        debug_assert!(x0
+            .checked_add(width)
+            .is_some_and(|x1| x1 <= self.geometry.width));
+        debug_assert!(y0
+            .checked_add(height)
+            .is_some_and(|y1| y1 <= self.geometry.height));
+        let (y_plane, u_plane, v_plane) = self.layout.plane_slices(frame);
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         hash = hash_plane_region(
             y_plane,
             hash,
             0,
-            self.geometry.width,
+            self.layout.plane_stride(PlanarYuvPlane::Y),
             x0,
             y0,
             width,
             height,
-            self.bytes_per_sample,
+            self.layout.bytes_per_sample(),
         );
-        let sub_x = chroma_subsample_x(self.chroma_format);
-        let sub_y = chroma_subsample_y(self.chroma_format);
+        let (sub_x, sub_y) = self.layout.plane_subsampling(PlanarYuvPlane::U);
         debug_assert_eq!(width % sub_x, 0);
         debug_assert_eq!(height % sub_y, 0);
         let chroma_width = width / sub_x;
@@ -254,41 +142,133 @@ impl Av2PlanarYuvLayout {
                 plane_data,
                 hash,
                 plane,
-                self.chroma_width,
+                self.layout.plane_stride(PlanarYuvPlane::U),
                 x0 / sub_x,
                 y0 / sub_y,
                 chroma_width,
                 chroma_height,
-                self.bytes_per_sample,
+                self.layout.bytes_per_sample(),
             );
         }
         hash
     }
+}
 
-    fn plane_slices<'a>(self, frame: &'a [u8]) -> (&'a [u8], &'a [u8], &'a [u8]) {
-        let y = &frame[..self.y_bytes];
-        let u_start = self.y_bytes;
-        let v_start = self.y_bytes + self.c_bytes;
-        let u = &frame[u_start..v_start];
-        let v = &frame[v_start..v_start + self.c_bytes];
-        (y, u, v)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Av2PlanarPlane {
+    Y,
+    U,
+    V,
+}
+
+impl Av2PlanarPlane {
+    fn yuv(self) -> PlanarYuvPlane {
+        match self {
+            Self::Y => PlanarYuvPlane::Y,
+            Self::U => PlanarYuvPlane::U,
+            Self::V => PlanarYuvPlane::V,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Av2PlanarTileLayout {
+    region: Av2TileRegion,
+    frame: PlanarYuvFrameLayout,
+}
+
+impl Av2PlanarTileLayout {
+    pub(crate) fn for_validated_shape(
+        geometry: Av2VideoGeometry,
+        region: Av2TileRegion,
+        chroma_format: Av2ChromaFormat,
+        bit_depth: SampleBitDepth,
+    ) -> Self {
+        debug_assert!(
+            matches!(
+                chroma_format,
+                Av2ChromaFormat::Yuv420 | Av2ChromaFormat::Yuv422 | Av2ChromaFormat::Yuv444
+            ),
+            "AV2 planar tile layout expects 4:2:0, 4:2:2, or 4:4:4 input"
+        );
+        let frame = PlanarYuvFrameLayout::for_validated_shape(
+            geometry.width,
+            geometry.height,
+            chroma_format.chroma_sampling(),
+            bit_depth,
+        );
+        Self { region, frame }
     }
 
-    fn plane_slices_mut<'a>(
+    pub(crate) fn frame_len(self) -> usize {
+        self.frame.frame_len()
+    }
+
+    pub(crate) fn plane_geometry(self, plane: Av2PlanarPlane) -> (usize, usize) {
+        self.frame.plane_dimensions(plane.yuv())
+    }
+
+    pub(crate) fn plane_stride(self, plane: Av2PlanarPlane) -> usize {
+        self.frame.plane_stride(plane.yuv())
+    }
+
+    pub(crate) fn plane_origin(self, plane: Av2PlanarPlane) -> (usize, usize) {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        (self.region.origin_x / sub_x, self.region.origin_y / sub_y)
+    }
+
+    pub(crate) fn plane_region_limit(self, plane: Av2PlanarPlane) -> (usize, usize) {
+        let (origin_x, origin_y) = self.plane_origin(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        (
+            origin_x + self.region.width / sub_x,
+            origin_y + self.region.height / sub_y,
+        )
+    }
+
+    pub(crate) fn clipped_plane_region_limit(self, plane: Av2PlanarPlane) -> (usize, usize) {
+        let (plane_width, plane_height) = self.plane_geometry(plane);
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        (
+            ((self.region.origin_x + self.region.width).div_ceil(sub_x)).min(plane_width),
+            ((self.region.origin_y + self.region.height).div_ceil(sub_y)).min(plane_height),
+        )
+    }
+
+    pub(crate) fn plane_subsampling(self, plane: Av2PlanarPlane) -> (usize, usize) {
+        self.frame.plane_subsampling(plane.yuv())
+    }
+
+    pub(crate) fn coded_mi_for_plane_sample(
         self,
-        frame: &'a mut [u8],
-    ) -> (&'a mut [u8], &'a mut [u8], &'a mut [u8]) {
-        let (y, chroma) = frame.split_at_mut(self.y_bytes);
-        let (u, v) = chroma.split_at_mut(self.c_bytes);
-        (y, u, &mut v[..self.c_bytes])
+        plane: Av2PlanarPlane,
+        x: usize,
+        y: usize,
+    ) -> (usize, usize) {
+        let (sub_x, sub_y) = self.plane_subsampling(plane);
+        let luma_x = x * sub_x;
+        let luma_y = y * sub_y;
+        (
+            luma_y.saturating_sub(self.region.origin_y) / AV2_PLANAR_MI_SIZE,
+            luma_x.saturating_sub(self.region.origin_x) / AV2_PLANAR_MI_SIZE,
+        )
     }
 
-    fn luma_region_in_bounds(self, x0: usize, y0: usize, width: usize, height: usize) -> bool {
-        x0.checked_add(width)
-            .is_some_and(|x1| x1 <= self.geometry.width)
-            && y0
-                .checked_add(height)
-                .is_some_and(|y1| y1 <= self.geometry.height)
+    pub(crate) fn txb_origin(
+        self,
+        plane: Av2PlanarPlane,
+        col: usize,
+        row: usize,
+    ) -> (usize, usize) {
+        let (origin_x, origin_y) = self.plane_origin(plane);
+        (
+            origin_x + col * AV2_PLANAR_TX4X4_SIZE,
+            origin_y + row * AV2_PLANAR_TX4X4_SIZE,
+        )
+    }
+
+    pub(crate) fn offset(self, plane: Av2PlanarPlane, x: usize, y: usize) -> usize {
+        self.frame.sample_offset(plane.yuv(), x, y)
     }
 }
 
@@ -298,54 +278,6 @@ pub(crate) fn chroma_subsample_x(chroma_format: Av2ChromaFormat) -> usize {
 
 pub(crate) fn chroma_subsample_y(chroma_format: Av2ChromaFormat) -> usize {
     planar_chroma_subsample_y(chroma_format.chroma_sampling())
-}
-
-fn plane_regions_equal_between(
-    current_plane: &[u8],
-    current_stride: usize,
-    x0: usize,
-    y0: usize,
-    reference_plane: &[u8],
-    reference_stride: usize,
-    ref_x0: usize,
-    ref_y0: usize,
-    width: usize,
-    height: usize,
-    bytes_per_sample: usize,
-) -> bool {
-    let row_bytes = width * bytes_per_sample;
-    for local_y in 0..height {
-        let row_start = ((y0 + local_y) * current_stride + x0) * bytes_per_sample;
-        let ref_row_start = ((ref_y0 + local_y) * reference_stride + ref_x0) * bytes_per_sample;
-        if current_plane[row_start..row_start + row_bytes]
-            != reference_plane[ref_row_start..ref_row_start + row_bytes]
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn copy_plane_region_between(
-    dst_plane: &mut [u8],
-    dst_stride: usize,
-    x0: usize,
-    y0: usize,
-    src_plane: &[u8],
-    src_stride: usize,
-    ref_x0: usize,
-    ref_y0: usize,
-    width: usize,
-    height: usize,
-    bytes_per_sample: usize,
-) {
-    let row_bytes = width * bytes_per_sample;
-    for local_y in 0..height {
-        let dst_row_start = ((y0 + local_y) * dst_stride + x0) * bytes_per_sample;
-        let src_row_start = ((ref_y0 + local_y) * src_stride + ref_x0) * bytes_per_sample;
-        dst_plane[dst_row_start..dst_row_start + row_bytes]
-            .copy_from_slice(&src_plane[src_row_start..src_row_start + row_bytes]);
-    }
 }
 
 #[allow(dead_code)]
@@ -418,13 +350,13 @@ mod tests {
         let layout = Av2PlanarYuvLayout::new(geometry, Av2ChromaFormat::Yuv444, bit_depth).unwrap();
         let mut a = vec![0u8; layout.expected_len()];
         let mut b = vec![0u8; layout.expected_len()];
-        b[layout.y_bytes] = 1;
+        b[layout.luma_byte_len()] = 1;
 
         assert_ne!(
             layout.hash_region(&a, 0, 0, 8, 8),
             layout.hash_region(&b, 0, 0, 8, 8)
         );
-        a[layout.y_bytes] = 1;
+        a[layout.luma_byte_len()] = 1;
         assert_eq!(
             layout.hash_region(&a, 0, 0, 8, 8),
             layout.hash_region(&b, 0, 0, 8, 8)

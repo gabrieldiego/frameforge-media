@@ -65,16 +65,13 @@ fn chroma_tx4x4_span(
 }
 
 struct Av2LossySubsampledTileState<'a> {
-    geometry: Av2VideoGeometry,
+    #[cfg(feature = "av2-lossy-stats")]
     region: Av2TileRegion,
     chroma_format: Av2ChromaFormat,
     bit_depth: SampleBitDepth,
     source: &'a [u8],
     recon: &'a mut [u8],
-    y_len: usize,
-    c_width: usize,
-    c_height: usize,
-    c_len: usize,
+    layout: Av2PlanarTileLayout,
     #[cfg(feature = "av2-lossy-stats")]
     qp: u8,
     base_qindex: u16,
@@ -104,16 +101,8 @@ impl<'a> Av2LossySubsampledTileState<'a> {
     ) -> Self {
         assert!(qp > 0, "AV2 lossy QP must be non-zero");
         assert!(base_qindex > 0, "AV2 regular lossy qindex must be non-zero");
-        let layout = PlanarYuvGeometry::for_validated_shape(
-            geometry.width,
-            geometry.height,
-            chroma_format.chroma_sampling(),
-            bit_depth,
-        );
-        let y_len = layout.luma_samples();
-        let c_width = layout.chroma_width();
-        let c_height = layout.chroma_height();
-        let c_len = layout.chroma_samples();
+        let layout =
+            Av2PlanarTileLayout::for_validated_shape(geometry, region, chroma_format, bit_depth);
         let expected_len = layout.frame_len();
         assert_eq!(
             source.len(),
@@ -126,16 +115,13 @@ impl<'a> Av2LossySubsampledTileState<'a> {
             "AV2 planar lossy residual reconstruction length must match source"
         );
         Self {
-            geometry,
+            #[cfg(feature = "av2-lossy-stats")]
             region,
             chroma_format,
             bit_depth,
             source,
             recon,
-            y_len,
-            c_width,
-            c_height,
-            c_len,
+            layout,
             #[cfg(feature = "av2-lossy-stats")]
             qp,
             base_qindex,
@@ -146,62 +132,32 @@ impl<'a> Av2LossySubsampledTileState<'a> {
     }
 
     fn plane_geometry(&self, plane: Av2LossyPlane) -> (usize, usize) {
-        match plane {
-            Av2LossyPlane::Y => (self.geometry.width, self.geometry.height),
-            Av2LossyPlane::U | Av2LossyPlane::V => (self.c_width, self.c_height),
-        }
+        self.layout.plane_geometry(plane.planar())
     }
 
     fn plane_origin(&self, plane: Av2LossyPlane) -> (usize, usize) {
-        match plane {
-            Av2LossyPlane::Y => (self.region.origin_x, self.region.origin_y),
-            Av2LossyPlane::U | Av2LossyPlane::V => (
-                self.region.origin_x / chroma_subsample_x(self.chroma_format),
-                self.region.origin_y / chroma_subsample_y(self.chroma_format),
-            ),
-        }
+        self.layout.plane_origin(plane.planar())
     }
 
     fn plane_region_limit(&self, plane: Av2LossyPlane) -> (usize, usize) {
-        let (origin_x, origin_y) = self.plane_origin(plane);
-        let (sub_x, sub_y) = self.plane_subsampling(plane);
-        (
-            origin_x + self.region.width / sub_x,
-            origin_y + self.region.height / sub_y,
-        )
+        self.layout.plane_region_limit(plane.planar())
     }
 
     fn plane_subsampling(&self, plane: Av2LossyPlane) -> (usize, usize) {
-        match plane {
-            Av2LossyPlane::Y => (1, 1),
-            Av2LossyPlane::U | Av2LossyPlane::V => (
-                chroma_subsample_x(self.chroma_format),
-                chroma_subsample_y(self.chroma_format),
-            ),
-        }
+        self.layout.plane_subsampling(plane.planar())
     }
 
     fn coded_mi_for_plane_sample(&self, plane: Av2LossyPlane, x: usize, y: usize) -> (usize, usize) {
-        let (sub_x, sub_y) = self.plane_subsampling(plane);
-        let luma_x = x * sub_x;
-        let luma_y = y * sub_y;
-        (
-            luma_y.saturating_sub(self.region.origin_y) / MI_SIZE,
-            luma_x.saturating_sub(self.region.origin_x) / MI_SIZE,
-        )
+        self.layout
+            .coded_mi_for_plane_sample(plane.planar(), x, y)
     }
 
     fn txb_origin(&self, plane: Av2LossyPlane, col: usize, row: usize) -> (usize, usize) {
-        let (origin_x, origin_y) = self.plane_origin(plane);
-        (origin_x + col * TX4X4_SIZE, origin_y + row * TX4X4_SIZE)
+        self.layout.txb_origin(plane.planar(), col, row)
     }
 
     fn offset(&self, plane: Av2LossyPlane, x: usize, y: usize) -> usize {
-        match plane {
-            Av2LossyPlane::Y => y * self.geometry.width + x,
-            Av2LossyPlane::U => self.y_len + y * self.c_width + x,
-            Av2LossyPlane::V => self.y_len + self.c_len + y * self.c_width + x,
-        }
+        self.layout.offset(plane.planar(), x, y)
     }
 
     fn source_sample(&self, plane: Av2LossyPlane, x: usize, y: usize) -> Av2Sample {
@@ -224,12 +180,12 @@ impl<'a> Av2LossySubsampledTileState<'a> {
 
     fn set_recon_sample(&mut self, plane: Av2LossyPlane, x: usize, y: usize, sample: Av2Sample) {
         let offset = self.offset(plane, x, y);
-        write_lossy_planar_sample(self.recon, offset, sample, self.bit_depth);
+        write_planar_sample(self.recon, offset, sample, self.bit_depth);
     }
 
     #[inline(always)]
     fn read_sample(&self, input: &[u8], sample_index: usize) -> Av2Sample {
-        read_lossy_planar_sample(input, sample_index, self.bit_depth)
+        read_planar_sample(input, sample_index, self.bit_depth)
     }
 
     fn dc_predictor(&self, plane: Av2LossyPlane, x0: usize, y0: usize) -> Av2Sample {
@@ -2616,42 +2572,21 @@ fn lossy_transform_coeff_step(quant_step: i32) -> i32 {
     (quant_step.max(1) * 2).max(8)
 }
 
-#[inline(always)]
-fn read_lossy_planar_sample(
-    input: &[u8],
-    sample_index: usize,
-    bit_depth: SampleBitDepth,
-) -> Av2Sample {
-    let offset = sample_index * bit_depth.bytes_per_sample();
-    if bit_depth.bits() <= 8 {
-        u16::from(input[offset])
-    } else {
-        u16::from_le_bytes([input[offset], input[offset + 1]])
-    }
-}
-
-#[inline(always)]
-fn write_lossy_planar_sample(
-    output: &mut [u8],
-    sample_index: usize,
-    sample: Av2Sample,
-    bit_depth: SampleBitDepth,
-) {
-    let offset = sample_index * bit_depth.bytes_per_sample();
-    if bit_depth.bits() <= 8 {
-        output[offset] = sample as u8;
-    } else {
-        let bytes = sample.to_le_bytes();
-        output[offset] = bytes[0];
-        output[offset + 1] = bytes[1];
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Av2LossyPlane {
     Y,
     U,
     V,
+}
+
+impl Av2LossyPlane {
+    fn planar(self) -> Av2PlanarPlane {
+        match self {
+            Self::Y => Av2PlanarPlane::Y,
+            Self::U => Av2PlanarPlane::U,
+            Self::V => Av2PlanarPlane::V,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
