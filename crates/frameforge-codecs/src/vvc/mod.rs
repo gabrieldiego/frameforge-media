@@ -1468,6 +1468,44 @@ pub(in crate::vvc) fn select_vvc_luma_tu_residual_coding(
     }
 }
 
+pub(in crate::vvc) fn select_vvc_luma_tu_mrl_index(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    mode: VvcIntraPredictionMode,
+    residual_coding: VvcTuResidualCodingMode,
+) -> u8 {
+    let _selector_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        node.width,
+        node.height,
+        mode.luma_mode_index(),
+        residual_coding,
+    );
+    0
+}
+
+pub(in crate::vvc) fn select_vvc_luma_tu_mts_index(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    mode: VvcIntraPredictionMode,
+    residual_coding: VvcTuResidualCodingMode,
+    mrl_index: u8,
+) -> u8 {
+    let _selector_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        node.width,
+        node.height,
+        mode.luma_mode_index(),
+        residual_coding,
+        mrl_index,
+    );
+    // TODO(vvc): choose nonzero MTS after the corresponding forward and
+    // inverse transforms are wired into quantization and reconstruction.
+    0
+}
+
 pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(
     _context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,

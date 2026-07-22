@@ -2,11 +2,12 @@ use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, select_vvc_chroma_tu_residual_coding,
-    select_vvc_luma_max_leaf_size, select_vvc_luma_tu_residual_coding,
-    select_vvc_residual_chroma_intra_mode_from_costs, select_vvc_residual_luma_intra_mode,
-    vvc_chroma_explicit_candidates, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
-    vvc_luma_intra_mode_from_index, vvc_luma_transform_nodes, vvc_neutral_sample,
-    vvc_residual_chroma_cclm_candidate_allowed, vvc_residual_chroma_explicit_candidate_allowed,
+    select_vvc_luma_max_leaf_size, select_vvc_luma_tu_mrl_index, select_vvc_luma_tu_mts_index,
+    select_vvc_luma_tu_residual_coding, select_vvc_residual_chroma_intra_mode_from_costs,
+    select_vvc_residual_luma_intra_mode, vvc_chroma_explicit_candidates,
+    vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_intra_mode_from_index,
+    vvc_luma_transform_nodes, vvc_neutral_sample, vvc_residual_chroma_cclm_candidate_allowed,
+    vvc_residual_chroma_explicit_candidate_allowed,
     vvc_residual_luma_directional_candidate_allowed, vvc_residual_luma_planar_candidate_allowed,
     VvcChromaCclmMode, VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode,
     VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
@@ -288,8 +289,19 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_mode_search_state.mark_node(local_node, luma_mode);
         let luma_residual_coding =
             select_vvc_luma_tu_residual_coding(mode_context, node, luma_mode);
+        let luma_mrl_index =
+            select_vvc_luma_tu_mrl_index(mode_context, node, luma_mode, luma_residual_coding);
+        let luma_mts_index = select_vvc_luma_tu_mts_index(
+            mode_context,
+            node,
+            luma_mode,
+            luma_residual_coding,
+            luma_mrl_index,
+        );
         let luma_tu = finalize_vvc_luma_tu(
             luma_residual_coding,
+            luma_mrl_index,
+            luma_mts_index,
             source_frame,
             frame_recon,
             node,
@@ -892,6 +904,8 @@ struct VvcFinalizedLumaTu {
 
 fn finalize_vvc_luma_tu(
     residual_coding: VvcTuResidualCodingMode,
+    mrl_index: u8,
+    mts_index: u8,
     source_frame: &VvcSampledFrame,
     frame_recon: &mut VvcReconstructionFrame,
     node: VvcCodingTreeNode,
@@ -921,8 +935,8 @@ fn finalize_vvc_luma_tu(
                 ac_levels,
                 has_ac,
                 transform_skip: true,
-                mrl_index: 0,
-                mts_index: 0,
+                mrl_index,
+                mts_index,
             }
         }
         VvcTuResidualCodingMode::Transformed => {
@@ -958,8 +972,8 @@ fn finalize_vvc_luma_tu(
                 ac_levels: quantized.reconstructed_ac_coeffs,
                 has_ac: quantized.has_ac,
                 transform_skip: false,
-                mrl_index: 0,
-                mts_index: 0,
+                mrl_index,
+                mts_index,
             }
         }
     };

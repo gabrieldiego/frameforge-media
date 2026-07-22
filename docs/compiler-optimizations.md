@@ -2513,6 +2513,23 @@ The first-frame matrix is byte-identical against
 | VVC | lossless | 5,996,606 | 0.36 | 0 |
 | VVC | qp=24 | 5,727,069 | 0.40 | 0 |
 
+## VVC Luma Syntax Tool Selectors
+
+Checkpoint: `vvc-luma-tool-selectors-1f`.
+
+This checkpoint moves the current zero-valued MRL and MTS choices into explicit
+luma TU selector functions. The selected values are still zero for every block,
+but TU finalization no longer owns those syntax-tool defaults. Future MRL or
+MTS experiments can therefore be gated alongside intra mode and residual coding
+selection without creating a separate lossy or lossless encode path.
+
+The first-frame matrix is byte-identical against `vvc-tu-mts-index-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.37 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
 ## References
 
 - Cargo profile settings:

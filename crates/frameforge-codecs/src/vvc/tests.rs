@@ -1502,6 +1502,25 @@ fn vvc_tu_residual_coding_selector_is_shared_across_formats() {
                     expected
                 );
                 assert_eq!(
+                    select_vvc_luma_tu_mrl_index(
+                        context,
+                        luma_node,
+                        VvcIntraPredictionMode::Dc,
+                        expected
+                    ),
+                    0
+                );
+                assert_eq!(
+                    select_vvc_luma_tu_mts_index(
+                        context,
+                        luma_node,
+                        VvcIntraPredictionMode::Dc,
+                        expected,
+                        0
+                    ),
+                    0
+                );
+                assert_eq!(
                     select_vvc_chroma_tu_residual_coding(
                         context,
                         chroma_node,
