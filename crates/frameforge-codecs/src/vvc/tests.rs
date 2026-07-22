@@ -295,6 +295,7 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         luma_tu_dc_levels: [luma_dc_level; MAX_VVC_LUMA_TUS],
         luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
+        luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
         luma_tu_count: 1,
         chroma_tu_count: 0,
         chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
@@ -304,6 +305,8 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
         cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
+        cb_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
+        cr_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
         cb_rem: 16,
         cr_rem: 16,
         #[cfg(feature = "vvc-stats")]
@@ -1273,6 +1276,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
+            luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
             chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
@@ -1282,6 +1286,8 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
             cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
             cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
+            cb_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
+            cr_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
         };
         let ops = VvcCtuCabacOp::ctu_partition(&params);
         let chroma_nodes: Vec<_> = ops
@@ -1676,6 +1682,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             luma_tu_dc_levels: [0; MAX_VVC_LUMA_TUS],
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
+            luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
             chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
@@ -1685,6 +1692,8 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             cr_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
             cb_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
             cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
+            cb_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
+            cr_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
         };
         let root = params.ctu_chroma_root();
         assert_eq!((root.width, root.height), expected_root);

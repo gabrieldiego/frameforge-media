@@ -26,6 +26,7 @@ pub(in crate::vvc) struct VvcCtuPartitionParams {
     pub(in crate::vvc) luma_tu_dc_levels: [i16; MAX_VVC_LUMA_TUS],
     pub(in crate::vvc) luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     pub(in crate::vvc) luma_tu_has_ac: [bool; MAX_VVC_LUMA_TUS],
+    pub(in crate::vvc) luma_tu_transform_skip: [bool; MAX_VVC_LUMA_TUS],
     pub(in crate::vvc) cb_dc_abs_level: u8,
     pub(in crate::vvc) cb_dc_negative: bool,
     pub(in crate::vvc) chroma_tu_intra_modes: [VvcChromaIntraPredictionMode; MAX_VVC_CHROMA_TUS],
@@ -35,6 +36,8 @@ pub(in crate::vvc) struct VvcCtuPartitionParams {
     pub(in crate::vvc) cr_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
     pub(in crate::vvc) cb_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
     pub(in crate::vvc) cr_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
+    pub(in crate::vvc) cb_tu_transform_skip: [bool; MAX_VVC_CHROMA_TUS],
+    pub(in crate::vvc) cr_tu_transform_skip: [bool; MAX_VVC_CHROMA_TUS],
 }
 
 impl VvcCtuPartitionParams {

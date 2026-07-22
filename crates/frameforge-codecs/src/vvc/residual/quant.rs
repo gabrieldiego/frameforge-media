@@ -94,12 +94,15 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     let mut luma_tu_intra_modes = [VvcIntraPredictionMode::Dc; MAX_VVC_LUMA_TUS];
     let mut luma_tu_ac_levels = [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS];
     let mut luma_tu_has_ac = [false; MAX_VVC_LUMA_TUS];
+    let mut luma_tu_transform_skip = [false; MAX_VVC_LUMA_TUS];
     let mut cb_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
     let mut cr_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
     let mut cb_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
     let mut cr_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
     let mut cb_tu_has_ac = [false; MAX_VVC_CHROMA_TUS];
     let mut cr_tu_has_ac = [false; MAX_VVC_CHROMA_TUS];
+    let mut cb_tu_transform_skip = [false; MAX_VVC_CHROMA_TUS];
+    let mut cr_tu_transform_skip = [false; MAX_VVC_CHROMA_TUS];
     let mut chroma_tu_intra_modes = [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS];
     let mut prediction_scratch = VvcDcPredictionScratch::default();
     let mut predicted_luma = Vec::new();
@@ -296,6 +299,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_tu_dc_levels[luma_tu_count] = luma_tu.dc_level;
         luma_tu_ac_levels[luma_tu_count] = luma_tu.ac_levels;
         luma_tu_has_ac[luma_tu_count] = luma_tu.has_ac;
+        luma_tu_transform_skip[luma_tu_count] = luma_tu.transform_skip;
         luma_tu_count += 1;
     }
 
@@ -549,6 +553,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         cr_tu_ac_levels[chroma_tu_count] = chroma_tu.cr_ac_levels;
         cb_tu_has_ac[chroma_tu_count] = chroma_tu.cb_has_ac;
         cr_tu_has_ac[chroma_tu_count] = chroma_tu.cr_has_ac;
+        cb_tu_transform_skip[chroma_tu_count] = chroma_tu.cb_transform_skip;
+        cr_tu_transform_skip[chroma_tu_count] = chroma_tu.cr_transform_skip;
         chroma_tu_count += 1;
     }
 
@@ -581,6 +587,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_tu_dc_levels,
         luma_tu_ac_levels,
         luma_tu_has_ac,
+        luma_tu_transform_skip,
         luma_tu_count,
         chroma_tu_count,
         chroma_tu_intra_modes,
@@ -590,6 +597,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         cr_tu_ac_levels,
         cb_tu_has_ac,
         cr_tu_has_ac,
+        cb_tu_transform_skip,
+        cr_tu_transform_skip,
         cb_rem,
         cr_rem,
         #[cfg(feature = "vvc-stats")]
@@ -865,6 +874,7 @@ struct VvcFinalizedLumaTu {
     dc_level: i16,
     ac_levels: [i16; VVC_LUMA_AC_COEFFS_PER_TU],
     has_ac: bool,
+    transform_skip: bool,
 }
 
 fn finalize_vvc_luma_tu(
@@ -896,6 +906,7 @@ fn finalize_vvc_luma_tu(
             dc_level,
             ac_levels,
             has_ac,
+            transform_skip: true,
         }
     } else {
         let quantized = quantize_vvc_luma_residual_greedy_with_qp(
@@ -929,6 +940,7 @@ fn finalize_vvc_luma_tu(
             dc_level: quantized.reconstructed_dc_coeff,
             ac_levels: quantized.reconstructed_ac_coeffs,
             has_ac: quantized.has_ac,
+            transform_skip: false,
         }
     };
     frame_recon.mark_luma_node_available(node);
@@ -943,6 +955,8 @@ struct VvcFinalizedChromaTu {
     cr_ac_levels: [i16; VVC_CHROMA_AC_COEFFS_PER_TU],
     cb_has_ac: bool,
     cr_has_ac: bool,
+    cb_transform_skip: bool,
+    cr_transform_skip: bool,
 }
 
 fn finalize_vvc_chroma_tu(
@@ -992,6 +1006,8 @@ fn finalize_vvc_chroma_tu(
             cr_ac_levels,
             cb_has_ac,
             cr_has_ac,
+            cb_transform_skip: true,
+            cr_transform_skip: true,
         }
     } else {
         let cb_quantized = quantize_vvc_chroma_residual_greedy_with_qp(
@@ -1053,6 +1069,8 @@ fn finalize_vvc_chroma_tu(
             cr_ac_levels: cr_quantized.reconstructed_ac_coeffs,
             cb_has_ac: cb_quantized.has_ac,
             cr_has_ac: cr_quantized.has_ac,
+            cb_transform_skip: false,
+            cr_transform_skip: false,
         }
     };
     frame_recon.mark_chroma_node_available(node);

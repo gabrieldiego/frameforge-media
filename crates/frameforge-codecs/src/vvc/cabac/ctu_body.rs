@@ -639,9 +639,10 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         let log2_height = node.height.ilog2() as u8;
         let ac_levels = &self.params.luma_tu_ac_levels[tu_idx];
         let has_ac = self.params.luma_tu_has_ac[tu_idx];
+        let transform_skip = self.params.luma_tu_transform_skip[tu_idx];
         let mut residual =
             VvcResidualCabacEncoder::new(&mut *self.contexts, self.slice_config.residual_options());
-        if self.slice_config.tools.transform_skip_enabled {
+        if transform_skip {
             VvcResidualCabacSymbolStream::emit_luma_transform_skip_first4x4_coefficients(
                 log2_width,
                 log2_height,
@@ -981,13 +982,14 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         dc_level: i16,
         ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
         has_ac: bool,
+        transform_skip: bool,
     ) {
         let width = usize::from(vvc_chroma_width(node, chroma_sampling));
         let height = usize::from(vvc_chroma_height(node, chroma_sampling));
         let log2_width = (width as u16).ilog2() as u8;
         let log2_height = (height as u16).ilog2() as u8;
         let mut residual = VvcResidualCabacEncoder::new(contexts, slice_config.residual_options());
-        if slice_config.tools.transform_skip_enabled {
+        if transform_skip {
             VvcResidualCabacSymbolStream::emit_chroma_transform_skip_first4x4_coefficients(
                 component,
                 log2_width,
@@ -1055,6 +1057,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 cb_dc_level,
                 &self.params.cb_tu_ac_levels[tu_idx],
                 self.params.cb_tu_has_ac[tu_idx],
+                self.params.cb_tu_transform_skip[tu_idx],
             );
         }
         if cbf_cr {
@@ -1068,6 +1071,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 cr_dc_level,
                 &self.params.cr_tu_ac_levels[tu_idx],
                 self.params.cr_tu_has_ac[tu_idx],
+                self.params.cr_tu_transform_skip[tu_idx],
             );
         }
         neighbours.mark_leaf(node);

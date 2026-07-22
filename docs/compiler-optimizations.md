@@ -2329,6 +2329,37 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-mode-map-1f.json
 ```
 
+## VVC Per-TU Transform-Skip Flags
+
+Checkpoint: `vvc-tu-transform-skip-flags-1f`.
+
+This checkpoint moves VVC transform-skip selection from a residual-writer
+slice-level assumption into quantized TU metadata. The current decisions remain
+unchanged: lossless luma/chroma TUs mark transform-skip, while lossy luma/chroma
+TUs do not. The CABAC writer now consumes the per-TU flags, so later lossy
+transform-skip trials can be selected at block mode decision time without
+reintroducing a separate lossy residual writer.
+
+The first-frame matrix is byte-identical against `vvc-colocated-mode-map-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.37 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-tu-transform-skip-flags-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-colocated-mode-map-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

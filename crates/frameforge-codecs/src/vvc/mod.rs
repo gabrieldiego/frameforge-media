@@ -2556,6 +2556,14 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
             chroma_tu_intra_modes[idx] = color.chroma_tu_intra_modes[0];
         }
     }
+    let mut cb_tu_transform_skip = color.cb_tu_transform_skip;
+    let mut cr_tu_transform_skip = color.cr_tu_transform_skip;
+    if color.chroma_tu_count <= 1 {
+        for idx in 0..chroma_tu_count.min(MAX_VVC_CHROMA_TUS) {
+            cb_tu_transform_skip[idx] = color.cb_tu_transform_skip[0];
+            cr_tu_transform_skip[idx] = color.cr_tu_transform_skip[0];
+        }
+    }
     let (
         luma_tu_count,
         luma_tu_intra_modes,
@@ -2564,6 +2572,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_dc_levels,
         luma_tu_ac_levels,
         luma_tu_has_ac,
+        luma_tu_transform_skip,
     ) = vvc_luma_residual_arrays_for_geometry(
         coded,
         chroma_sampling,
@@ -2587,6 +2596,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_dc_levels,
         luma_tu_ac_levels,
         luma_tu_has_ac,
+        luma_tu_transform_skip,
         cb_dc_abs_level: color.cb_rem,
         cb_dc_negative: color.u < 128 && color.cb_rem != 0,
         chroma_tu_intra_modes,
@@ -2596,6 +2606,8 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         cr_tu_ac_levels: color.cr_tu_ac_levels,
         cb_tu_has_ac: color.cb_tu_has_ac,
         cr_tu_has_ac: color.cr_tu_has_ac,
+        cb_tu_transform_skip,
+        cr_tu_transform_skip,
     })
 }
 
@@ -2613,6 +2625,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     [i16; MAX_VVC_LUMA_TUS],
     [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
+    [bool; MAX_VVC_LUMA_TUS],
 ) {
     let mut luma_tu_count = color.luma_tu_count;
     let mut luma_tu_intra_modes = color.luma_tu_intra_modes;
@@ -2621,6 +2634,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     let mut luma_tu_dc_levels = color.luma_tu_dc_levels;
     let mut luma_tu_ac_levels = color.luma_tu_ac_levels;
     let mut luma_tu_has_ac = color.luma_tu_has_ac;
+    let mut luma_tu_transform_skip = color.luma_tu_transform_skip;
     if color.luma_tu_count > 1 {
         return (
             luma_tu_count,
@@ -2630,6 +2644,7 @@ fn vvc_luma_residual_arrays_for_geometry(
             luma_tu_dc_levels,
             luma_tu_ac_levels,
             luma_tu_has_ac,
+            luma_tu_transform_skip,
         );
     }
 
@@ -2643,6 +2658,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         luma_tu_dc_levels[idx] = color.luma_tu_dc_levels[0];
         luma_tu_ac_levels[idx] = color.luma_tu_ac_levels[0];
         luma_tu_has_ac[idx] = color.luma_tu_has_ac[0];
+        luma_tu_transform_skip[idx] = color.luma_tu_transform_skip[0];
     }
     (
         luma_tu_count,
@@ -2652,6 +2668,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         luma_tu_dc_levels,
         luma_tu_ac_levels,
         luma_tu_has_ac,
+        luma_tu_transform_skip,
     )
 }
 

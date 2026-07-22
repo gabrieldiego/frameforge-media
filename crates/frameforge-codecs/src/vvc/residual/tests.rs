@@ -154,6 +154,37 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
     assert_eq!(color.luma_tu_count, 64);
     assert!(color.luma_tu_remainders[0] > 0);
     assert_eq!(color.luma_tu_ac_levels[0], [0; VVC_LUMA_AC_COEFFS_PER_TU]);
+    assert!(color.luma_tu_transform_skip[..color.luma_tu_count]
+        .iter()
+        .all(|enabled| !*enabled));
+    assert!(color.cb_tu_transform_skip[..color.chroma_tu_count]
+        .iter()
+        .all(|enabled| !*enabled));
+    assert!(color.cr_tu_transform_skip[..color.chroma_tu_count]
+        .iter()
+        .all(|enabled| !*enabled));
+
+    let mut reconstruction = VvcReconstructionFrame::new_neutral(frame.geometry, frame.format);
+    let lossless = quant::quantize_vvc_residual_ctu_into_frame_reconstruction(
+        &frame,
+        &mut reconstruction,
+        VvcCtuRegion {
+            slice_address: 0,
+            origin_x: 0,
+            origin_y: 0,
+            geometry: frame.geometry,
+        },
+        VvcResidualCodingMode::Lossless,
+    );
+    assert!(lossless.luma_tu_transform_skip[..lossless.luma_tu_count]
+        .iter()
+        .all(|enabled| *enabled));
+    assert!(lossless.cb_tu_transform_skip[..lossless.chroma_tu_count]
+        .iter()
+        .all(|enabled| *enabled));
+    assert!(lossless.cr_tu_transform_skip[..lossless.chroma_tu_count]
+        .iter()
+        .all(|enabled| *enabled));
 }
 
 #[test]
