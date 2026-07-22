@@ -1999,6 +1999,111 @@ make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE
 make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
 ```
 
+## VVC Staged Angular Search And 4:2:2 CCLM
+
+Checkpoint: `vvc-staged-angular-cclm422-1f`.
+
+Changes retained:
+
+- VVC luma mode selection now keeps the full angular predictor/syntax feature
+  surface but no longer evaluates all 65 angular directions for every luma TU.
+- The angular search list is generated from VVC default directional families,
+  already-coded left/above luma modes, and a source-block structure-tensor
+  edge seed. Candidate generation deduplicates by VVC luma mode index.
+- After the coarse directional pass, the encoder refines around the best
+  angular family before final mode selection. This recovers most of the
+  exhaustive-search bitrate while avoiding the global full sweep.
+- The edge seed reads visible luma samples with the raw-frame stride, so thin
+  coded geometries do not probe padded/coded-space samples.
+- CCLM/MDLM chroma prediction is now enabled for 4:2:2. The predictor already
+  had 4:2:2 luma downsampling; this checkpoint removes the remaining tool flag
+  and residual candidate gates.
+
+First-frame six-vector matrix versus `vvc-full-angular-1f`:
+
+| Codec | Mode | Total bytes | FPS | Notes |
+|---|---|---:|---:|---|
+| AV2 | lossless | 6,586,445 | 2.48 | unchanged reference context |
+| AV2 | qp=24 | 2,400,148 | 1.11 | unchanged reference context |
+| VVC | lossless | 5,996,606 | 0.32 | -13,146 bytes, +0.14 fps versus full angular |
+| VVC | qp=24 | 5,880,550 | 0.27 | -835,009 bytes, +0.09 fps versus full angular |
+
+The staged search is a speed win without giving up the full predictor feature
+surface. The 4:2:2 CCLM enablement more than pays for the small residual
+regressions on 4:2:0/RGB/4:4:4 lossy rows: both 4:2:2 lossy rows are much
+smaller than the exhaustive-angular baseline and their PSNR improves.
+
+Per-row VVC deltas versus `vvc-full-angular-1f`:
+
+| Mode | Vector | Bytes | Delta bytes | FPS | PSNR mean |
+|---|---|---:|---:|---:|---:|
+| lossless | SceneComposition 420 8-bit | 357,417 | +226 | 0.42 | inf |
+| lossless | SceneComposition 422 8-bit | 424,892 | -6,643 | 0.39 | inf |
+| lossless | Wayland RGB 8-bit | 505,362 | +696 | 0.23 | inf |
+| lossless | MissionControl 420 10-bit | 1,227,907 | +832 | 0.36 | inf |
+| lossless | MissionControl 422 10-bit | 1,500,890 | -9,690 | 0.33 | inf |
+| lossless | MissionControl 444 10-bit | 1,980,138 | +1,433 | 0.27 | inf |
+| qp=24 | SceneComposition 420 8-bit | 192,458 | +4 | 0.50 | 24.635 |
+| qp=24 | SceneComposition 422 8-bit | 273,267 | -714,200 | 0.36 | 24.963 |
+| qp=24 | Wayland RGB 8-bit | 723,433 | +2,019 | 0.14 | 24.496 |
+| qp=24 | MissionControl 420 10-bit | 891,654 | +8,397 | 0.41 | 15.688 |
+| qp=24 | MissionControl 422 10-bit | 1,424,164 | -179,669 | 0.31 | 15.029 |
+| qp=24 | MissionControl 444 10-bit | 2,375,574 | +48,440 | 0.20 | 14.690 |
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-staged-angular-cclm422-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-full-angular-1f.json
+```
+
+Generated report:
+
+```text
+verification/generated/encode_matrix/vvc-staged-angular-cclm422-1f.md
+```
+
+Validation:
+
+```sh
+cargo test -p frameforge-codecs vvc --features "vvc"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+make build
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
+```
+
+## VVC Residual Path Unification
+
+Checkpoint: `vvc-residual-path-unified`.
+
+This checkpoint keeps the `vvc-staged-angular-cclm422-1f` coding decisions but
+removes another layer of lossy/lossless split from the VVC residual encoder.
+The CTU luma/chroma mode-search loops now call common TU finalization helpers:
+lossless and lossy still produce different coefficients and reconstructions,
+but the selected prediction mode flows through one decision path.
+
+The residual syntax configuration also now derives from one residual tool
+profile keyed by `VvcResidualCodingMode`. Lossless still enables transform skip
+globally because it is required by the current exact residual syntax, while
+lossy keeps transform skip disabled until the block selector can actually pick
+profitable transform-skip candidates without adding dead syntax flags.
+
+Validation:
+
+```sh
+cargo check -p frameforge-codecs --features "vvc"
+cargo test -p frameforge-codecs vvc --features "vvc"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:

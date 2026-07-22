@@ -215,7 +215,7 @@ fn vvc_sps_signals_444_capable_profiles_for_422() {
     );
     assert_eq!(vvc_u_value(&lossy, "sps_chroma_format_idc"), 2);
     assert_eq!(vvc_u_value(&lossy, "general_profile_idc"), 33);
-    assert_vvc_flag(&lossy, "sps_cclm_enabled_flag", false);
+    assert_vvc_flag(&lossy, "sps_cclm_enabled_flag", true);
 }
 
 fn assert_vvc_annex_b_has_min_picture_nals(bytes: &[u8], frames: usize) -> Vec<VvcNalInfo> {

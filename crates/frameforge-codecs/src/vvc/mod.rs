@@ -861,11 +861,14 @@ pub(super) struct VvcSliceSyntaxConfig {
 }
 
 impl VvcSyntaxToolFlags {
-    const fn residual_lossy(chroma_sampling: ChromaSampling) -> Self {
+    const fn residual(
+        chroma_sampling: ChromaSampling,
+        residual_mode: VvcResidualCodingMode,
+    ) -> Self {
         Self {
             ibc_enabled: false,
             palette_enabled: false,
-            transform_skip_enabled: false,
+            transform_skip_enabled: residual_mode.is_lossless(),
             bdpcm_enabled: false,
             mts_enabled: false,
             explicit_mts_intra_enabled: false,
@@ -879,29 +882,7 @@ impl VvcSyntaxToolFlags {
         .without_unsupported_chroma_tools(chroma_sampling)
     }
 
-    const fn yuv420_residual() -> Self {
-        Self::residual_lossy(ChromaSampling::Cs420)
-    }
-
-    const fn yuv420_lossless() -> Self {
-        Self {
-            transform_skip_enabled: true,
-            ..Self::yuv420_residual()
-        }
-    }
-
-    const fn residual_lossless(chroma_sampling: ChromaSampling) -> Self {
-        let mut tools = Self::yuv420_lossless();
-        if matches!(chroma_sampling, ChromaSampling::Cs422) {
-            tools.cclm_enabled = false;
-        }
-        tools
-    }
-
-    const fn without_unsupported_chroma_tools(mut self, chroma_sampling: ChromaSampling) -> Self {
-        if matches!(chroma_sampling, ChromaSampling::Cs422) {
-            self.cclm_enabled = false;
-        }
+    const fn without_unsupported_chroma_tools(self, _chroma_sampling: ChromaSampling) -> Self {
         self
     }
 
@@ -944,20 +925,26 @@ impl VvcSliceSyntaxConfig {
         Self::residual_lossy(ChromaSampling::Cs420)
     }
 
+    #[cfg(test)]
     const fn residual_lossy(chroma_sampling: ChromaSampling) -> Self {
-        Self::new(
-            VvcCodingTreeConfig::yuv(chroma_sampling),
-            VvcSyntaxToolFlags::residual_lossy(chroma_sampling),
-        )
+        Self::residual(chroma_sampling, VvcResidualCodingMode::Lossy)
     }
 
+    #[cfg(test)]
     fn residual_lossless(chroma_sampling: ChromaSampling, bit_depth: SampleBitDepth) -> Self {
-        let mut config = Self::new(
-            VvcCodingTreeConfig::yuv(chroma_sampling),
-            VvcSyntaxToolFlags::residual_lossless(chroma_sampling),
-        );
+        let mut config = Self::residual(chroma_sampling, VvcResidualCodingMode::Lossless);
         config.slice_qp = vvc_lossless_slice_qp(bit_depth);
         config
+    }
+
+    const fn residual(
+        chroma_sampling: ChromaSampling,
+        residual_mode: VvcResidualCodingMode,
+    ) -> Self {
+        Self::new(
+            VvcCodingTreeConfig::yuv(chroma_sampling),
+            VvcSyntaxToolFlags::residual(chroma_sampling, residual_mode),
+        )
     }
 
     const fn palette_444() -> Self {
@@ -977,7 +964,7 @@ impl VvcSliceSyntaxConfig {
     }
 
     const fn for_picture_format(format: VvcPictureFormat) -> Self {
-        Self::residual_lossy(format.chroma_sampling)
+        Self::residual(format.chroma_sampling, VvcResidualCodingMode::Lossy)
     }
 
     const fn with_vui_signal(mut self, vui_signal: VvcVuiSignal) -> Self {
@@ -1012,18 +999,13 @@ impl VvcResidualCodingMode {
     }
 
     fn slice_config(self, stream_format: VvcPictureFormat, qp: Option<u8>) -> VvcSliceSyntaxConfig {
-        match self {
-            Self::Lossy => {
-                let mut config =
-                    VvcSliceSyntaxConfig::residual_lossy(stream_format.chroma_sampling);
-                config.slice_qp = vvc_lossy_slice_qp(qp);
-                config
-            }
-            Self::Lossless => VvcSliceSyntaxConfig::residual_lossless(
-                stream_format.chroma_sampling,
-                stream_format.bit_depth,
-            ),
+        let mut config = VvcSliceSyntaxConfig::residual(stream_format.chroma_sampling, self);
+        if self.is_lossless() {
+            config.slice_qp = vvc_lossless_slice_qp(stream_format.bit_depth);
+        } else {
+            config.slice_qp = vvc_lossy_slice_qp(qp);
         }
+        config
     }
 
     const fn picture_partitioning(self) -> VvcPicturePartitioning {
@@ -1080,29 +1062,13 @@ pub(in crate::vvc) enum VvcChromaCclmMode {
     MdlmTop,
 }
 
-const VVC_LUMA_ANGULAR_CANDIDATE_COUNT: usize = 65;
-
-const fn vvc_luma_intra_mode_from_index(index: u8) -> VvcIntraPredictionMode {
+pub(in crate::vvc) const fn vvc_luma_intra_mode_from_index(index: u8) -> VvcIntraPredictionMode {
     match index {
         18 => VvcIntraPredictionMode::Horizontal,
         50 => VvcIntraPredictionMode::Vertical,
         _ => VvcIntraPredictionMode::Angular(index),
     }
 }
-
-const fn vvc_luma_angular_candidates() -> [VvcIntraPredictionMode; VVC_LUMA_ANGULAR_CANDIDATE_COUNT]
-{
-    let mut candidates = [VvcIntraPredictionMode::Angular(2); VVC_LUMA_ANGULAR_CANDIDATE_COUNT];
-    let mut idx = 0;
-    while idx < VVC_LUMA_ANGULAR_CANDIDATE_COUNT {
-        candidates[idx] = vvc_luma_intra_mode_from_index((idx + 2) as u8);
-        idx += 1;
-    }
-    candidates
-}
-
-const VVC_LUMA_ANGULAR_CANDIDATES: [VvcIntraPredictionMode; VVC_LUMA_ANGULAR_CANDIDATE_COUNT] =
-    vvc_luma_angular_candidates();
 
 const VVC_CHROMA_EXPLICIT_MODE_COUNT: usize = 4;
 const VVC_CHROMA_VDIA_REPLACEMENT_MODE: VvcIntraPredictionMode =
@@ -1170,9 +1136,7 @@ pub(in crate::vvc) fn vvc_residual_chroma_cclm_candidate_allowed(
     node: VvcCodingTreeNode,
     geometry: VvcVideoGeometry,
 ) -> bool {
-    if matches!(context.chroma_sampling(), ChromaSampling::Cs422) {
-        return false;
-    }
+    let _chroma_sampling = context.chroma_sampling();
     if !vvc_chroma_cclm_node_allowed(node) {
         return false;
     }
@@ -1182,7 +1146,7 @@ pub(in crate::vvc) fn vvc_residual_chroma_cclm_candidate_allowed(
     )
 }
 
-const VVC_LUMA_INTRA_CANDIDATE_CAPACITY: usize = 2 + VVC_LUMA_ANGULAR_CANDIDATE_COUNT;
+const VVC_LUMA_INTRA_CANDIDATE_CAPACITY: usize = 67;
 const VVC_CHROMA_INTRA_CANDIDATE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
