@@ -1033,6 +1033,12 @@ pub(in crate::vvc) enum VvcResidualCodingMode {
     Lossless,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcTuResidualCodingMode {
+    Transformed,
+    TransformSkip,
+}
+
 impl VvcResidualCodingMode {
     const fn for_encode_options(options: VvcEncodeOptions) -> Self {
         match options.lossless {
@@ -1354,6 +1360,23 @@ pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
     best_mode
 }
 
+pub(in crate::vvc) fn select_vvc_luma_tu_residual_coding(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    _mode: VvcIntraPredictionMode,
+) -> VvcTuResidualCodingMode {
+    let _selector_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        node.width,
+        node.height,
+    );
+    match context.residual_mode() {
+        VvcResidualCodingMode::Lossless => VvcTuResidualCodingMode::TransformSkip,
+        VvcResidualCodingMode::Lossy => VvcTuResidualCodingMode::Transformed,
+    }
+}
+
 pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(
     _context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
@@ -1407,6 +1430,24 @@ pub(in crate::vvc) fn select_vvc_residual_chroma_intra_mode_from_costs(
         }
     }
     best_mode
+}
+
+pub(in crate::vvc) fn select_vvc_chroma_tu_residual_coding(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    _mode: VvcChromaIntraPredictionMode,
+) -> VvcTuResidualCodingMode {
+    let _selector_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        context.is_lossless(),
+        node.width,
+        node.height,
+    );
+    match context.residual_mode() {
+        VvcResidualCodingMode::Lossless => VvcTuResidualCodingMode::TransformSkip,
+        VvcResidualCodingMode::Lossy => VvcTuResidualCodingMode::Transformed,
+    }
 }
 
 fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {

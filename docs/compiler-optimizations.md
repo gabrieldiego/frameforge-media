@@ -2390,6 +2390,38 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-transform-skip-flags-1f.json
 ```
 
+## VVC TU Residual Coding Selector
+
+Checkpoint: `vvc-tu-residual-coding-selector-1f`.
+
+This checkpoint moves the remaining VVC luma/chroma TU residual coding choice
+out of finalization's lossy/lossless branch and into a shared block-mode
+selector. The current selector still chooses transform-skip for lossless TUs and
+transformed residual coding for lossy TUs, so the bitstream is unchanged. The
+important cleanup is that future lossy transform-skip or per-block tool trials
+can now be selected by the same per-TU decision path instead of adding another
+standalone lossy path.
+
+The first-frame matrix is byte-identical against `vvc-tu-mrl-index-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.37 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-tu-residual-coding-selector-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-mrl-index-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

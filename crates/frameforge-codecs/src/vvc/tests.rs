@@ -1420,6 +1420,53 @@ fn vvc_residual_intra_mode_selector_is_shared_across_formats_and_coding_modes() 
 }
 
 #[test]
+fn vvc_tu_residual_coding_selector_is_shared_across_formats() {
+    let luma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
+    let chroma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeChroma);
+
+    for chroma_sampling in [
+        ChromaSampling::Cs420,
+        ChromaSampling::Cs422,
+        ChromaSampling::Cs444,
+    ] {
+        for bit_depth in [8, 10, 12] {
+            let format = VvcPictureFormat {
+                chroma_sampling,
+                bit_depth: SampleBitDepth::new(bit_depth).expect("supported VVC bit depth"),
+            };
+            for (residual_mode, expected) in [
+                (
+                    VvcResidualCodingMode::Lossy,
+                    VvcTuResidualCodingMode::Transformed,
+                ),
+                (
+                    VvcResidualCodingMode::Lossless,
+                    VvcTuResidualCodingMode::TransformSkip,
+                ),
+            ] {
+                let context = VvcResidualModeDecisionContext::new(format, residual_mode);
+                assert_eq!(
+                    select_vvc_luma_tu_residual_coding(
+                        context,
+                        luma_node,
+                        VvcIntraPredictionMode::Dc
+                    ),
+                    expected
+                );
+                assert_eq!(
+                    select_vvc_chroma_tu_residual_coding(
+                        context,
+                        chroma_node,
+                        VvcChromaIntraPredictionMode::Derived
+                    ),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vvc_residual_luma_selector_can_choose_planar_when_candidate_is_supplied() {
     let format = VvcPictureFormat {
         chroma_sampling: ChromaSampling::Cs420,
