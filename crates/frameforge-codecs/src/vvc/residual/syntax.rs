@@ -404,14 +404,16 @@ impl VvcResidualCtxConfig {
     }
 }
 
-const VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS: usize = 16;
+// Current production residual TUs are at most 8x8 luma and 4x4 chroma. Raise
+// this with the transform-size selector when larger emitted TUs are enabled.
+const VVC_RESIDUAL_CONTEXT_COEFFS: usize = 64;
 const VVC_MAX_RESIDUAL_SUBBLOCKS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcResidualPass1State {
     pub(in crate::vvc) config: VvcResidualCtxConfig,
-    pub(in crate::vvc) sig_coeff: [bool; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
-    pub(in crate::vvc) abs_level_pass1: [u8; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
+    pub(in crate::vvc) sig_coeff: [bool; VVC_RESIDUAL_CONTEXT_COEFFS],
+    pub(in crate::vvc) abs_level_pass1: [u8; VVC_RESIDUAL_CONTEXT_COEFFS],
     pub(in crate::vvc) sb_coded: [bool; VVC_MAX_RESIDUAL_SUBBLOCKS],
 }
 
@@ -711,8 +713,8 @@ impl VvcResidualPass1State {
         debug_assert!(config.subblock_count() <= VVC_MAX_RESIDUAL_SUBBLOCKS);
         Self {
             config,
-            sig_coeff: [false; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
-            abs_level_pass1: [0; VVC_RESIDUAL_FIRST_SUBBLOCK_COEFFS],
+            sig_coeff: [false; VVC_RESIDUAL_CONTEXT_COEFFS],
+            abs_level_pass1: [0; VVC_RESIDUAL_CONTEXT_COEFFS],
             sb_coded: [false; VVC_MAX_RESIDUAL_SUBBLOCKS],
         }
     }
@@ -724,8 +726,9 @@ impl VvcResidualPass1State {
         abs_level: u16,
         _negative: bool,
     ) {
-        let index = first4x4_coeff_index(x, y)
-            .expect("current VVC residual subset only tracks first 4x4 pass-1 coefficients");
+        let index = self
+            .coefficient_index(x, y)
+            .expect("VVC residual pass-1 coefficient is outside the tracked transform block");
         self.sig_coeff[index] = abs_level != 0;
         // VTM CoeffCodingContext::sigCtxIdAbs uses
         // min(4 + (absLevel & 1), absLevel) for the local template sum and
@@ -907,16 +910,28 @@ impl VvcResidualPass1State {
     }
 
     pub(in crate::vvc) fn sig_coeff_at(&self, x: u8, y: u8) -> bool {
-        first4x4_coeff_index(x, y).is_some_and(|index| self.sig_coeff[index])
+        self.coefficient_index(x, y)
+            .is_some_and(|index| self.sig_coeff[index])
     }
 
     pub(in crate::vvc) fn abs_level_pass1_at(&self, x: u8, y: u8) -> u8 {
-        first4x4_coeff_index(x, y).map_or(0, |index| self.abs_level_pass1[index])
+        self.coefficient_index(x, y)
+            .map_or(0, |index| self.abs_level_pass1[index])
     }
 
     pub(in crate::vvc) fn sb_coded_at(&self, x_s: u8, y_s: u8) -> bool {
         let index = self.config.subblock_index(x_s, y_s);
         index < VVC_MAX_RESIDUAL_SUBBLOCKS && self.sb_coded[index]
+    }
+
+    fn coefficient_index(&self, x: u8, y: u8) -> Option<usize> {
+        let x = usize::from(x);
+        let y = usize::from(y);
+        if x >= self.config.tb_width() || y >= self.config.tb_height() {
+            return None;
+        }
+        let index = y * self.config.tb_width() + x;
+        (index < VVC_RESIDUAL_CONTEXT_COEFFS).then_some(index)
     }
 }
 
@@ -1734,14 +1749,6 @@ const VVC_FIRST_4X4_DIAG_SCAN: [VvcScanPosition; 16] = [
     VvcScanPosition { x: 3, y: 2 },
     VvcScanPosition { x: 3, y: 3 },
 ];
-
-fn first4x4_coeff_index(x: u8, y: u8) -> Option<usize> {
-    if x < 4 && y < 4 {
-        Some(usize::from(y) * 4 + usize::from(x))
-    } else {
-        None
-    }
-}
 
 fn template_abs_sum_level(abs_level: u16) -> u8 {
     abs_level.min(4 + (abs_level & 1)) as u8

@@ -2722,6 +2722,47 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-decision-unified-1f.json
 ```
 
+## VVC 8x8 Residual Context State
+
+Checkpoint: `vvc-pass1-8x8-context-1f`.
+
+This checkpoint removes another first-4x4 assumption from VVC residual context
+derivation. `VvcResidualPass1State` can now track pass-1 coefficient presence
+and template magnitudes across the current production 8x8 luma TU footprint,
+while the emitted coefficient scan still remains the existing first-4x4 subset.
+That means the normal bitstreams are unchanged, but the context model is ready
+for a later grouped-subblock scan to set neighbour state outside the first
+subblock.
+
+The first-frame six-vector matrix was byte-identical against
+`vvc-residual-tail-stats-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.42 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.46 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_residual_pass1_state_tracks_8x8_neighbour_coefficients --features vvc
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale"
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-pass1-8x8-context-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-residual-tail-stats-1f.json
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:

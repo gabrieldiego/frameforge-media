@@ -767,6 +767,23 @@ fn vvc_residual_sig_coeff_context_uses_pass1_neighbour_state() {
 }
 
 #[test]
+fn vvc_residual_pass1_state_tracks_8x8_neighbour_coefficients() {
+    let mut state = VvcResidualPass1State::new(VvcResidualCtxConfig::luma_subset(3, 3, 4, 0));
+    state.set_pass1_coeff(4, 0, 3, false);
+
+    assert!(state.sig_coeff_at(4, 0));
+    assert_eq!(state.abs_level_pass1_at(4, 0), 3);
+    assert_eq!(
+        state.local_stats(3, 0),
+        VvcResidualLocalStats {
+            loc_num_sig: 1,
+            loc_sum_abs_pass1: 3
+        }
+    );
+    assert_eq!(state.sig_coeff_flag_ctx_inc(3, 0), 6);
+}
+
+#[test]
 fn vvc_residual_level_contexts_follow_last_significant_position() {
     let mut state = VvcResidualPass1State::new(VvcResidualCtxConfig::luma_4x4_subset(3, 3));
     assert_eq!(state.par_level_flag_ctx_inc(3, 3), 0);
