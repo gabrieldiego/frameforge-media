@@ -5,6 +5,10 @@ use super::super::{
     vvc_neutral_sample, VvcChromaIntraPredictionMode, VvcCodingTreeNode, VvcCtuPartitionParams,
     VvcIntraPredictionMode, VvcSample, VvcSampledFrame, VvcVideoGeometry,
 };
+use super::quant::{
+    reconstruct_vvc_chroma_transform_skip_residuals_into,
+    reconstruct_vvc_luma_transform_skip_residuals_into,
+};
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into,
@@ -21,11 +25,8 @@ pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
     partition_params: VvcCtuPartitionParams,
 ) -> Vec<VvcSample> {
     match frame.format.chroma_sampling {
-        ChromaSampling::Cs420 | ChromaSampling::Cs422 => {
-            reconstruct_vvc_residual_frame_subsampled(frame, quantized, partition_params)
-        }
-        ChromaSampling::Cs444 => {
-            unreachable!("4:4:4 pictures are reconstructed by the palette path for now")
+        ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444 => {
+            reconstruct_vvc_residual_frame_planar(frame, quantized, partition_params)
         }
         other => {
             unimplemented!("residual reconstruction is not wired for {other:?}")
@@ -33,7 +34,7 @@ pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
     }
 }
 
-fn reconstruct_vvc_residual_frame_subsampled(
+fn reconstruct_vvc_residual_frame_planar(
     frame: &VvcSampledFrame,
     quantized: VvcQuantizedColor,
     partition_params: VvcCtuPartitionParams,
@@ -68,15 +69,25 @@ fn reconstruct_vvc_residual_frame_subsampled(
                 frame.geometry.width,
             )),
         );
-        inverse_transform_vvc_luma_quantized_block_into(
-            &mut residuals,
-            &mut transform_scratch,
-            node.width,
-            node.height,
-            quantized.luma_tu_dc_levels[tu_idx],
-            &quantized.luma_tu_ac_levels[tu_idx],
-            frame.format.bit_depth,
-        );
+        if quantized.luma_tu_transform_skip[tu_idx] {
+            reconstruct_vvc_luma_transform_skip_residuals_into(
+                &mut residuals,
+                quantized.luma_tu_dc_levels[tu_idx],
+                &quantized.luma_tu_ac_levels[tu_idx],
+                usize::from(node.width),
+                usize::from(node.height),
+            );
+        } else {
+            inverse_transform_vvc_luma_quantized_block_into(
+                &mut residuals,
+                &mut transform_scratch,
+                node.width,
+                node.height,
+                quantized.luma_tu_dc_levels[tu_idx],
+                &quantized.luma_tu_ac_levels[tu_idx],
+                frame.format.bit_depth,
+            );
+        }
         fill_visible_luma_node(
             &mut luma,
             frame.geometry,
@@ -134,15 +145,25 @@ fn reconstruct_vvc_residual_frame_subsampled(
         );
         let chroma_node_width = node.width / chroma_subsample_x(chroma_sampling) as u16;
         let chroma_node_height = node.height / chroma_subsample_y(chroma_sampling) as u16;
-        inverse_transform_vvc_chroma_quantized_block_into(
-            &mut residuals,
-            &mut transform_scratch,
-            chroma_node_width,
-            chroma_node_height,
-            quantized.cb_tu_dc_levels[tu_idx],
-            &quantized.cb_tu_ac_levels[tu_idx],
-            frame.format.bit_depth,
-        );
+        if quantized.cb_tu_transform_skip[tu_idx] {
+            reconstruct_vvc_chroma_transform_skip_residuals_into(
+                &mut residuals,
+                quantized.cb_tu_dc_levels[tu_idx],
+                &quantized.cb_tu_ac_levels[tu_idx],
+                usize::from(chroma_node_width),
+                usize::from(chroma_node_height),
+            );
+        } else {
+            inverse_transform_vvc_chroma_quantized_block_into(
+                &mut residuals,
+                &mut transform_scratch,
+                chroma_node_width,
+                chroma_node_height,
+                quantized.cb_tu_dc_levels[tu_idx],
+                &quantized.cb_tu_ac_levels[tu_idx],
+                frame.format.bit_depth,
+            );
+        }
         fill_visible_chroma_node(
             &mut cb,
             frame.geometry,
@@ -169,15 +190,25 @@ fn reconstruct_vvc_residual_frame_subsampled(
                 frame.geometry.width,
             )),
         );
-        inverse_transform_vvc_chroma_quantized_block_into(
-            &mut residuals,
-            &mut transform_scratch,
-            chroma_node_width,
-            chroma_node_height,
-            quantized.cr_tu_dc_levels[tu_idx],
-            &quantized.cr_tu_ac_levels[tu_idx],
-            frame.format.bit_depth,
-        );
+        if quantized.cr_tu_transform_skip[tu_idx] {
+            reconstruct_vvc_chroma_transform_skip_residuals_into(
+                &mut residuals,
+                quantized.cr_tu_dc_levels[tu_idx],
+                &quantized.cr_tu_ac_levels[tu_idx],
+                usize::from(chroma_node_width),
+                usize::from(chroma_node_height),
+            );
+        } else {
+            inverse_transform_vvc_chroma_quantized_block_into(
+                &mut residuals,
+                &mut transform_scratch,
+                chroma_node_width,
+                chroma_node_height,
+                quantized.cr_tu_dc_levels[tu_idx],
+                &quantized.cr_tu_ac_levels[tu_idx],
+                frame.format.bit_depth,
+            );
+        }
         fill_visible_chroma_node(
             &mut cr,
             frame.geometry,

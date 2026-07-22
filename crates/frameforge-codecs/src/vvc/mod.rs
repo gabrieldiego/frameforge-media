@@ -1275,6 +1275,14 @@ pub(in crate::vvc) struct VvcChromaTuCodingDecision {
     pub(in crate::vvc) residual_coding: VvcTuResidualCodingMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcResidualCodingPolicy {
+    context: VvcResidualModeDecisionContext,
+    luma_max_leaf_size: u16,
+    score_metric: VvcResidualScoreMetric,
+    chroma_syntax_tie_breaker: bool,
+}
+
 impl VvcResidualCodingMode {
     const fn for_encode_options(options: VvcEncodeOptions) -> Self {
         match options.lossless {
@@ -1564,6 +1572,88 @@ impl VvcResidualModeDecisionContext {
 
     pub(in crate::vvc) const fn residual_mode(self) -> VvcResidualCodingMode {
         self.residual_mode
+    }
+}
+
+impl VvcResidualCodingPolicy {
+    pub(in crate::vvc) fn new(
+        format: VvcPictureFormat,
+        residual_mode: VvcResidualCodingMode,
+    ) -> Self {
+        let context = VvcResidualModeDecisionContext::new(format, residual_mode);
+        Self {
+            context,
+            luma_max_leaf_size: select_vvc_luma_max_leaf_size(context),
+            score_metric: select_vvc_residual_score_metric(context),
+            chroma_syntax_tie_breaker: select_vvc_chroma_mode_syntax_tie_breaker(context),
+        }
+    }
+
+    pub(in crate::vvc) const fn context(self) -> VvcResidualModeDecisionContext {
+        self.context
+    }
+
+    pub(in crate::vvc) const fn luma_max_leaf_size(self) -> u16 {
+        self.luma_max_leaf_size
+    }
+
+    pub(in crate::vvc) const fn score_metric(self) -> VvcResidualScoreMetric {
+        self.score_metric
+    }
+
+    pub(in crate::vvc) const fn chroma_syntax_tie_breaker(self) -> bool {
+        self.chroma_syntax_tie_breaker
+    }
+
+    pub(in crate::vvc) fn select_luma_intra_mode(
+        self,
+        node: VvcCodingTreeNode,
+        costs: VvcLumaIntraCandidateCosts,
+    ) -> VvcIntraPredictionMode {
+        select_vvc_residual_luma_intra_mode(self.context, node, costs)
+    }
+
+    pub(in crate::vvc) fn select_chroma_intra_mode(
+        self,
+        node: VvcCodingTreeNode,
+        costs: VvcChromaIntraCandidateCosts,
+    ) -> VvcChromaIntraPredictionMode {
+        select_vvc_residual_chroma_intra_mode_from_costs(self.context, node, costs)
+    }
+
+    pub(in crate::vvc) fn select_luma_tu_coding_decision(
+        self,
+        node: VvcCodingTreeNode,
+        mode: VvcIntraPredictionMode,
+    ) -> VvcLumaTuCodingDecision {
+        select_vvc_luma_tu_coding_decision(self.context, node, mode)
+    }
+
+    pub(in crate::vvc) fn select_chroma_tu_coding_decision(
+        self,
+        node: VvcCodingTreeNode,
+        mode: VvcChromaIntraPredictionMode,
+    ) -> VvcChromaTuCodingDecision {
+        select_vvc_chroma_tu_coding_decision(self.context, node, mode)
+    }
+
+    pub(in crate::vvc) fn luma_planar_candidate_allowed(self, node: VvcCodingTreeNode) -> bool {
+        vvc_residual_luma_planar_candidate_allowed(self.context, node)
+    }
+
+    pub(in crate::vvc) fn luma_directional_candidate_allowed(
+        self,
+        node: VvcCodingTreeNode,
+    ) -> bool {
+        vvc_residual_luma_directional_candidate_allowed(self.context, node)
+    }
+
+    pub(in crate::vvc) fn chroma_cclm_candidate_allowed(
+        self,
+        node: VvcCodingTreeNode,
+        geometry: VvcVideoGeometry,
+    ) -> bool {
+        vvc_residual_chroma_cclm_candidate_allowed(self.context, node, geometry)
     }
 }
 
@@ -2112,8 +2202,8 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     )?;
     let frame_len = stream_layout.frame_len();
     let residual_mode = VvcResidualCodingMode::for_encode_options(options);
-    let mode_context = VvcResidualModeDecisionContext::new(stream_format, residual_mode);
-    let luma_max_leaf_size = select_vvc_luma_max_leaf_size(mode_context);
+    let residual_policy = VvcResidualCodingPolicy::new(stream_format, residual_mode);
+    let luma_max_leaf_size = residual_policy.luma_max_leaf_size();
     let slice_config = vvc_slice_config_for_input_format(
         residual_mode.slice_config(stream_format, options.qp),
         format,
@@ -2194,7 +2284,7 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                         &source_frame,
                         &mut frame_recon,
                         region,
-                        residual_mode,
+                        residual_policy,
                         luma_qp,
                         chroma_qp,
                     );

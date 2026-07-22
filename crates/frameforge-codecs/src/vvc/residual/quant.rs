@@ -1,22 +1,16 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
-    chroma_subsample_x, chroma_subsample_y, select_vvc_chroma_mode_syntax_tie_breaker,
-    select_vvc_chroma_tu_coding_decision, select_vvc_luma_max_leaf_size,
-    select_vvc_luma_tu_coding_decision, select_vvc_residual_chroma_intra_mode_from_costs,
-    select_vvc_residual_luma_intra_mode, select_vvc_residual_score_metric,
-    vvc_chroma_cclm_node_allowed, vvc_chroma_explicit_candidates,
-    vvc_chroma_intra_mode_syntax_bin_count, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
-    vvc_luma_intra_mode_from_index, vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes,
-    vvc_neutral_sample, vvc_residual_chroma_cclm_candidate_allowed,
-    vvc_residual_chroma_explicit_candidate_allowed,
-    vvc_residual_luma_directional_candidate_allowed, vvc_residual_luma_planar_candidate_allowed,
-    VvcChromaCclmMode, VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode,
-    VvcChromaTuCodingDecision, VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion,
-    VvcIntraPredictionMode, VvcLumaIntraCandidateCosts, VvcLumaTuCodingDecision, VvcPictureFormat,
-    VvcReconstructionFrame, VvcResidualCodingMode, VvcResidualModeDecisionContext,
-    VvcResidualScoreMetric, VvcSample, VvcSampledColor, VvcSampledFrame, VvcTuResidualCodingMode,
-    VvcVideoGeometry, VVC_CTU_SIZE,
+    chroma_subsample_x, chroma_subsample_y, vvc_chroma_cclm_node_allowed,
+    vvc_chroma_explicit_candidates, vvc_chroma_intra_mode_syntax_bin_count,
+    vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_intra_mode_from_index,
+    vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes, vvc_neutral_sample,
+    vvc_residual_chroma_explicit_candidate_allowed, VvcChromaCclmMode,
+    VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode, VvcChromaTuCodingDecision,
+    VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
+    VvcLumaIntraCandidateCosts, VvcLumaTuCodingDecision, VvcPictureFormat, VvcReconstructionFrame,
+    VvcResidualCodingMode, VvcResidualCodingPolicy, VvcResidualScoreMetric, VvcSample,
+    VvcSampledColor, VvcSampledFrame, VvcTuResidualCodingMode, VvcVideoGeometry, VVC_CTU_SIZE,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
@@ -75,11 +69,12 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     region: VvcCtuRegion,
     residual_mode: VvcResidualCodingMode,
 ) -> VvcQuantizedColor {
+    let policy = VvcResidualCodingPolicy::new(source_frame.format, residual_mode);
     quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp(
         source_frame,
         frame_recon,
         region,
-        residual_mode,
+        policy,
         super::VVC_DEFAULT_LOSSY_LUMA_QP,
         super::VVC_DEFAULT_LOSSY_CHROMA_QP,
     )
@@ -89,7 +84,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     source_frame: &VvcSampledFrame,
     frame_recon: &mut VvcReconstructionFrame,
     region: VvcCtuRegion,
-    residual_mode: VvcResidualCodingMode,
+    policy: VvcResidualCodingPolicy,
     luma_qp: i32,
     chroma_qp: i32,
 ) -> VvcQuantizedColor {
@@ -131,10 +126,10 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     #[cfg(feature = "vvc-stats")]
     let mut residual_energy_stats = VvcResidualEnergyStats::default();
 
-    let mode_context = VvcResidualModeDecisionContext::new(source_frame.format, residual_mode);
-    let score_metric = select_vvc_residual_score_metric(mode_context);
-    let chroma_syntax_tie_breaker = select_vvc_chroma_mode_syntax_tie_breaker(mode_context);
-    let luma_max_leaf_size = select_vvc_luma_max_leaf_size(mode_context);
+    let residual_mode = policy.context().residual_mode();
+    let score_metric = policy.score_metric();
+    let chroma_syntax_tie_breaker = policy.chroma_syntax_tie_breaker();
+    let luma_max_leaf_size = policy.luma_max_leaf_size();
     let ctu_shape = VvcCtuPartitionShape {
         root_width: VVC_CTU_SIZE as u16,
         root_height: VVC_CTU_SIZE as u16,
@@ -185,7 +180,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let mut luma_candidate_costs = VvcLumaIntraCandidateCosts::new(dc_score);
         #[cfg(feature = "vvc-stats")]
         intra_search_stats.add_luma_dc();
-        if vvc_residual_luma_planar_candidate_allowed(mode_context, node) {
+        if policy.luma_planar_candidate_allowed(node) {
             predict_vvc_luma_intra_block_into_with_availability(
                 &mut candidate_luma_prediction,
                 &mut prediction_scratch,
@@ -223,7 +218,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
             }
         }
-        if vvc_residual_luma_directional_candidate_allowed(mode_context, node) {
+        if policy.luma_directional_candidate_allowed(node) {
             let mut luma_directional_candidates = vvc_luma_directional_search_candidates(
                 source_frame,
                 &luma_mode_search_state,
@@ -311,14 +306,12 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 }
             }
         }
-        let luma_mode =
-            select_vvc_residual_luma_intra_mode(mode_context, node, luma_candidate_costs);
+        let luma_mode = policy.select_luma_intra_mode(node, luma_candidate_costs);
         debug_assert_eq!(luma_mode, best_luma_mode);
         let _best_luma_score = best_luma_score;
         luma_tu_intra_modes[luma_tu_count] = luma_mode;
         luma_mode_search_state.mark_node(local_node, luma_mode);
-        let luma_coding_decision =
-            select_vvc_luma_tu_coding_decision(mode_context, node, luma_mode);
+        let luma_coding_decision = policy.select_luma_tu_coding_decision(node, luma_mode);
         #[cfg(feature = "vvc-stats")]
         residual_energy_stats.add_luma_residuals(
             &luma_residuals,
@@ -502,7 +495,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 std::mem::swap(&mut cr_residuals, &mut candidate_cr_residuals);
             }
         }
-        if vvc_residual_chroma_cclm_candidate_allowed(mode_context, node, source_frame.geometry) {
+        if policy.chroma_cclm_candidate_allowed(node, source_frame.geometry) {
             for cclm_mode in [
                 VvcChromaCclmMode::Linear,
                 VvcChromaCclmMode::MdlmLeft,
@@ -581,16 +574,11 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 }
             }
         }
-        let chroma_mode = select_vvc_residual_chroma_intra_mode_from_costs(
-            mode_context,
-            node,
-            chroma_candidate_costs,
-        );
+        let chroma_mode = policy.select_chroma_intra_mode(node, chroma_candidate_costs);
         debug_assert_eq!(chroma_mode, best_chroma_mode);
         let _best_chroma_score = best_chroma_score;
         chroma_tu_intra_modes[chroma_tu_count] = chroma_mode;
-        let chroma_coding_decision =
-            select_vvc_chroma_tu_coding_decision(mode_context, node, chroma_mode);
+        let chroma_coding_decision = policy.select_chroma_tu_coding_decision(node, chroma_mode);
         #[cfg(feature = "vvc-stats")]
         {
             residual_energy_stats.add_chroma_residuals(&cb_residuals, chroma_width, chroma_height);

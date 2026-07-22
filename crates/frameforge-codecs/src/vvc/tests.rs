@@ -1613,6 +1613,70 @@ fn vvc_residual_score_policy_is_shared_across_formats() {
     }
 }
 
+#[test]
+fn vvc_residual_coding_policy_carries_block_selection_contract() {
+    let luma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
+    let chroma_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeChroma);
+
+    for chroma_sampling in [
+        ChromaSampling::Cs420,
+        ChromaSampling::Cs422,
+        ChromaSampling::Cs444,
+    ] {
+        for bit_depth in [8, 10, 12] {
+            let format = VvcPictureFormat {
+                chroma_sampling,
+                bit_depth: SampleBitDepth::new(bit_depth).expect("supported VVC bit depth"),
+            };
+            for residual_mode in [
+                VvcResidualCodingMode::Lossy,
+                VvcResidualCodingMode::Lossless,
+            ] {
+                let policy = VvcResidualCodingPolicy::new(format, residual_mode);
+                let context = policy.context();
+                assert_eq!(context.residual_mode(), residual_mode);
+                assert_eq!(
+                    policy.luma_max_leaf_size(),
+                    select_vvc_luma_max_leaf_size(context)
+                );
+                assert_eq!(
+                    policy.score_metric(),
+                    select_vvc_residual_score_metric(context)
+                );
+                assert_eq!(
+                    policy.chroma_syntax_tie_breaker(),
+                    select_vvc_chroma_mode_syntax_tie_breaker(context)
+                );
+                assert_eq!(
+                    policy
+                        .select_luma_tu_coding_decision(luma_node, VvcIntraPredictionMode::Dc)
+                        .residual_coding,
+                    select_vvc_luma_tu_coding_decision(
+                        context,
+                        luma_node,
+                        VvcIntraPredictionMode::Dc,
+                    )
+                    .residual_coding
+                );
+                assert_eq!(
+                    policy
+                        .select_chroma_tu_coding_decision(
+                            chroma_node,
+                            VvcChromaIntraPredictionMode::Derived,
+                        )
+                        .residual_coding,
+                    select_vvc_chroma_tu_coding_decision(
+                        context,
+                        chroma_node,
+                        VvcChromaIntraPredictionMode::Derived,
+                    )
+                    .residual_coding
+                );
+            }
+        }
+    }
+}
+
 #[cfg(feature = "vvc-stats")]
 #[test]
 fn vvc_ctu_bit_categories_classify_context_and_bypass_bins() {

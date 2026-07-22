@@ -2896,6 +2896,51 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Residual Coding Policy
+
+Checkpoint: `vvc-residual-policy-unified-1f`.
+
+This checkpoint makes the unified VVC residual path explicit by introducing a
+single `VvcResidualCodingPolicy` for CTU quantization. The policy carries the
+residual-mode context, luma leaf-size selection, residual score metric, chroma
+syntax tie-breaker, intra-mode selection, and per-TU coding decisions. Lossless
+and lossy still select different tools where needed, but those differences now
+live at block-mode selection boundaries instead of being pulled piecemeal by
+the quantizer.
+
+The test-only residual reconstruction helper was also updated to consume the
+per-TU transform-skip flags. It now reconstructs planar 4:2:0, 4:2:2, and
+4:4:4 residual frames through the same transformed or transform-skip metadata
+used by the encoder path.
+
+The first-frame six-vector matrix was byte-identical against
+`vvc-luma-dct-selector-gated-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.35 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-residual-policy-unified-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-dct-selector-gated-1f.json
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:

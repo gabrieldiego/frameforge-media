@@ -460,6 +460,67 @@ fn vvc_quantized_frame_reconstruction_matches_explicit_reconstruction() {
 }
 
 #[test]
+fn vvc_lossless_transform_skip_reconstruction_matches_explicit_reconstruction() {
+    let mut luma = vec![0; 16 * 16];
+    let mut cb = vec![0; 8 * 8];
+    let mut cr = vec![0; 8 * 8];
+    for y in 0..16 {
+        for x in 0..16 {
+            luma[y * 16 + x] = ((x * 13 + y * 17) & 0xff) as u16;
+        }
+    }
+    for y in 0..8 {
+        for x in 0..8 {
+            cb[y * 8 + x] = (32 + x * 9 + y * 5) as u16;
+            cr[y * 8 + x] = (192usize.saturating_sub(x * 7 + y * 11)) as u16;
+        }
+    }
+    let frame = VvcSampledFrame {
+        geometry: VvcVideoGeometry {
+            width: 16,
+            height: 16,
+        },
+        format: VvcPictureFormat {
+            chroma_sampling: ChromaSampling::Cs420,
+            bit_depth: SampleBitDepth::new(8).expect("valid bit depth"),
+        },
+        luma,
+        cb,
+        cr,
+        chroma_len: 8 * 8,
+    };
+    let region = VvcCtuRegion {
+        slice_address: 0,
+        origin_x: 0,
+        origin_y: 0,
+        geometry: frame.geometry,
+    };
+    let mut frame_recon = VvcReconstructionFrame::new_neutral(frame.geometry, frame.format);
+    let quantized = quantize_vvc_residual_ctu_into_frame_reconstruction(
+        &frame,
+        &mut frame_recon,
+        region,
+        VvcResidualCodingMode::Lossless,
+    );
+    let params = vvc_ctu_partition_params_with_luma_max_leaf_size(
+        frame.geometry,
+        quantized.clone(),
+        VVC_LOSSLESS_LUMA_LEAF_SIZE,
+    )
+    .expect("lossless 16x16 CTU params");
+    let explicit = reconstruct_vvc_residual_frame(&frame, quantized, params);
+
+    let mut source_samples = Vec::new();
+    source_samples.extend_from_slice(&frame.luma);
+    source_samples.extend_from_slice(&frame.cb);
+    source_samples.extend_from_slice(&frame.cr);
+    assert_eq!(frame_recon.luma, frame.luma);
+    assert_eq!(frame_recon.cb, frame.cb);
+    assert_eq!(frame_recon.cr, frame.cr);
+    assert_eq!(explicit, source_samples);
+}
+
+#[test]
 fn vvc_chroma_quantization_keeps_black_neutral_and_nonzero_colored() {
     assert_eq!(quantize_vvc_chroma(0, 0), 16);
     assert_eq!(reconstruct_vvc_chroma(16), 0);

@@ -36,6 +36,8 @@ pub(super) use prediction::{
 pub use quant::quantize_vvc_color;
 #[cfg(test)]
 pub(super) use quant::quantize_vvc_frame_with_reconstruction;
+#[cfg(test)]
+pub(super) use quant::quantize_vvc_residual_ctu_into_frame_reconstruction;
 pub(super) use quant::{
     quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp,
 };
