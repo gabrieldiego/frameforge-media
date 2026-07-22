@@ -4,7 +4,8 @@ use super::super::{
     chroma_subsample_x, chroma_subsample_y, select_vvc_chroma_tu_residual_coding,
     select_vvc_luma_max_leaf_size, select_vvc_luma_tu_mrl_index, select_vvc_luma_tu_mts_index,
     select_vvc_luma_tu_residual_coding, select_vvc_residual_chroma_intra_mode_from_costs,
-    select_vvc_residual_luma_intra_mode, vvc_chroma_explicit_candidates,
+    select_vvc_residual_luma_intra_mode, vvc_chroma_cclm_node_allowed,
+    vvc_chroma_explicit_candidates, vvc_chroma_intra_mode_syntax_bin_count,
     vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_intra_mode_from_index,
     vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes, vvc_neutral_sample,
     vvc_residual_chroma_cclm_candidate_allowed, vvc_residual_chroma_explicit_candidate_allowed,
@@ -359,6 +360,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let chroma_height = usize::from(node.height) / subsample_y;
         let co_located_luma_mode =
             luma_mode_search_state.co_located_mode_for_chroma_node(node, region);
+        let cclm_syntax_enabled = vvc_chroma_cclm_node_allowed(node);
         let initial_chroma_mode = VvcChromaIntraPredictionMode::Derived;
         predict_vvc_chroma_mode_block_into_with_availability(
             &mut predicted_cb,
@@ -410,8 +412,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             chroma_height,
             &predicted_cr,
         );
-        let initial_score =
-            chroma_residual_mode_selection_score(mode_context, &cb_residuals, &cr_residuals);
+        let initial_score = chroma_mode_selection_score(
+            mode_context,
+            &cb_residuals,
+            &cr_residuals,
+            initial_chroma_mode,
+            cclm_syntax_enabled,
+        );
         let mut best_chroma_mode = initial_chroma_mode;
         let mut best_chroma_score = initial_score;
         let mut chroma_candidate_costs = VvcChromaIntraCandidateCosts::new(initial_score);
@@ -472,10 +479,12 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                 chroma_height,
                 &candidate_cr_prediction,
             );
-            let candidate_score = chroma_residual_mode_selection_score(
+            let candidate_score = chroma_mode_selection_score(
                 mode_context,
                 &candidate_cb_residuals,
                 &candidate_cr_residuals,
+                chroma_mode,
+                cclm_syntax_enabled,
             );
             #[cfg(feature = "vvc-stats")]
             intra_search_stats.add_chroma_explicit();
@@ -547,10 +556,12 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
                     chroma_height,
                     &candidate_cr_prediction,
                 );
-                let candidate_score = chroma_residual_mode_selection_score(
+                let candidate_score = chroma_mode_selection_score(
                     mode_context,
                     &candidate_cb_residuals,
                     &candidate_cr_residuals,
+                    chroma_mode,
+                    cclm_syntax_enabled,
                 );
                 #[cfg(feature = "vvc-stats")]
                 intra_search_stats.add_chroma_cclm();
@@ -897,6 +908,26 @@ fn luma_mode_selection_score(
         .saturating_add(u64::from(vvc_luma_intra_mode_syntax_bin_count(
             mode, left, above,
         )))
+}
+
+fn chroma_mode_selection_score(
+    context: VvcResidualModeDecisionContext,
+    cb_residuals: &[i16],
+    cr_residuals: &[i16],
+    mode: VvcChromaIntraPredictionMode,
+    cclm_enabled: bool,
+) -> u64 {
+    const SYNTAX_TIE_BREAKER_SCALE: u64 = 64;
+    let residual_score = chroma_residual_mode_selection_score(context, cb_residuals, cr_residuals);
+    let syntax_tie_breaker = match context.residual_mode() {
+        VvcResidualCodingMode::Lossless => {
+            vvc_chroma_intra_mode_syntax_bin_count(mode, cclm_enabled)
+        }
+        VvcResidualCodingMode::Lossy => 0,
+    };
+    residual_score
+        .saturating_mul(SYNTAX_TIE_BREAKER_SCALE)
+        .saturating_add(u64::from(syntax_tie_breaker))
 }
 
 fn residual_mode_selection_score(

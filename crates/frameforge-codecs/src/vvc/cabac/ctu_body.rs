@@ -106,6 +106,26 @@ pub(in crate::vvc) fn vvc_luma_intra_mode_syntax_bin_count(
     )
 }
 
+pub(in crate::vvc) fn vvc_chroma_intra_mode_syntax_bin_count(
+    mode: VvcChromaIntraPredictionMode,
+    cclm_enabled: bool,
+) -> u8 {
+    let cclm_flag_bins = u8::from(cclm_enabled);
+    match mode {
+        VvcChromaIntraPredictionMode::Cclm(cclm_mode) => {
+            debug_assert!(cclm_enabled);
+            cclm_flag_bins
+                + 1
+                + match cclm_mode {
+                    VvcChromaCclmMode::Linear => 0,
+                    VvcChromaCclmMode::MdlmLeft | VvcChromaCclmMode::MdlmTop => 1,
+                }
+        }
+        VvcChromaIntraPredictionMode::Derived => cclm_flag_bins + 1,
+        VvcChromaIntraPredictionMode::Explicit(_) => cclm_flag_bins + 3,
+    }
+}
+
 fn vvc_wrap_luma_angular_mode(mode: i16) -> u8 {
     ((mode - VVC_LUMA_ANGULAR_BASE).rem_euclid(VVC_NUM_INTRA_ANGULAR_MODES_MINUS_ONE)
         + VVC_LUMA_ANGULAR_BASE) as u8

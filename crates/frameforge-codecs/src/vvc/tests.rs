@@ -1028,6 +1028,39 @@ fn vvc_luma_mode_syntax_bin_count_matches_mpm_coding_shape() {
 }
 
 #[test]
+fn vvc_chroma_mode_syntax_bin_count_matches_cclm_and_explicit_paths() {
+    assert_eq!(
+        vvc_chroma_intra_mode_syntax_bin_count(VvcChromaIntraPredictionMode::Derived, false),
+        1
+    );
+    assert_eq!(
+        vvc_chroma_intra_mode_syntax_bin_count(VvcChromaIntraPredictionMode::Derived, true),
+        2
+    );
+    assert_eq!(
+        vvc_chroma_intra_mode_syntax_bin_count(
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Dc),
+            false,
+        ),
+        3
+    );
+    assert_eq!(
+        vvc_chroma_intra_mode_syntax_bin_count(
+            VvcChromaIntraPredictionMode::Cclm(VvcChromaCclmMode::Linear),
+            true,
+        ),
+        2
+    );
+    assert_eq!(
+        vvc_chroma_intra_mode_syntax_bin_count(
+            VvcChromaIntraPredictionMode::Cclm(VvcChromaCclmMode::MdlmTop),
+            true,
+        ),
+        3
+    );
+}
+
+#[test]
 fn vvc_residual_contexts_have_rtl_ids_for_full_table_132_ranges() {
     let mut ids = std::collections::BTreeSet::new();
 

@@ -2552,6 +2552,25 @@ Lossy PSNR moved only within small tie-breaker differences: three rows lost
 0.014 to 0.038 dB, two rows gained 0.004 to 0.024 dB, and no reconstruction or
 reference-validity rule changed.
 
+## VVC Lossless Chroma Syntax Tie-Breaking
+
+Checkpoint: `vvc-lossless-chroma-syntax-tiebreak-1f`.
+
+This checkpoint adds the same residual-dominant syntax tie-breaker to the
+shared chroma intra mode selector, but only when the residual mode is lossless.
+The syntax helper mirrors the emitted CABAC shape for derived, explicit, and
+CCLM chroma modes, so exact residual-score ties prefer the cheaper chroma mode
+syntax. An unrestricted lossy probe increased the six-vector QP24 total by
+6,875 bytes, so the selector leaves lossy chroma scoring byte-identical to the
+previous checkpoint until a fuller rate-distortion cost is available.
+
+First-frame six-vector matrix versus `vvc-luma-mpm-tiebreak-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.37 | -346 |
+| VVC | qp=24 | 5,714,171 | 0.41 | 0 |
+
 ## References
 
 - Cargo profile settings:
