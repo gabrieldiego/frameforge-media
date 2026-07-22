@@ -8,9 +8,10 @@ use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_cclm_node_allowed,
-    vvc_chroma_explicit_candidate_index, VvcChromaIntraPredictionMode, VvcIntraPredictionMode,
-    VvcResidualComponent, VvcSliceSyntaxConfig, VvcVideoGeometry, VVC_CHROMA_AC_COEFFS_PER_TU,
-    VVC_CTU_SIZE, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
+    vvc_chroma_explicit_candidate_index, VvcChromaCclmMode, VvcChromaIntraPredictionMode,
+    VvcIntraPredictionMode, VvcResidualComponent, VvcSliceSyntaxConfig, VvcVideoGeometry,
+    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
+    VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
 const VVC_LUMA_ANGULAR_BASE: i16 = 2;
@@ -1081,12 +1082,23 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
     ) {
         let mode = self.params.chroma_tu_intra_modes[tu_idx];
         if self.chroma_cclm_enabled(node) {
-            let is_cclm = mode == VvcChromaIntraPredictionMode::Cclm;
+            let cclm_mode = match mode {
+                VvcChromaIntraPredictionMode::Cclm(cclm_mode) => Some(cclm_mode),
+                _ => None,
+            };
             self.contexts
-                .encode(cabac, VvcCabacContext::CclmModeFlag, is_cclm);
-            if is_cclm {
+                .encode(cabac, VvcCabacContext::CclmModeFlag, cclm_mode.is_some());
+            if let Some(cclm_mode) = cclm_mode {
+                let symbol = match cclm_mode {
+                    VvcChromaCclmMode::Linear => 0,
+                    VvcChromaCclmMode::MdlmLeft => 1,
+                    VvcChromaCclmMode::MdlmTop => 2,
+                };
                 self.contexts
-                    .encode(cabac, VvcCabacContext::CclmModeIdx, false);
+                    .encode(cabac, VvcCabacContext::CclmModeIdx, symbol != 0);
+                if symbol > 0 {
+                    cabac.encode_bin_ep(symbol == 2);
+                }
                 return;
             }
         }
@@ -1106,7 +1118,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                         .expect("selected VVC chroma explicit mode must be in the candidate table");
                 cabac.encode_bins_ep(u32::from(candidate_index), 2);
             }
-            VvcChromaIntraPredictionMode::Cclm => {
+            VvcChromaIntraPredictionMode::Cclm(_) => {
                 panic!("selected VVC CCLM mode for a node where CCLM is not signaled");
             }
         }

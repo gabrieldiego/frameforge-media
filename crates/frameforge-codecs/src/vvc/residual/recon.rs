@@ -257,9 +257,10 @@ fn predict_vvc_recon_chroma_mode_into(
                 chroma_availability,
             );
         }
-        VvcChromaIntraPredictionMode::Cclm => {
+        VvcChromaIntraPredictionMode::Cclm(cclm_mode) => {
             predict_vvc_chroma_cclm_block_into_with_availability(
                 prediction,
+                cclm_mode,
                 chroma,
                 luma,
                 geometry,

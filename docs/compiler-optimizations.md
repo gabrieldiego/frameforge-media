@@ -1832,6 +1832,84 @@ make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE
 make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
 ```
 
+## VVC MDLM Chroma Modes
+
+Checkpoint: `vvc-mdlm-candidates-1f`.
+
+Changes retained:
+
+- VVC now models CCLM as three explicit chroma modes: base LM, MDLM_L, and
+  MDLM_T.
+- CABAC chroma mode syntax now writes the VTM-shaped `cclm_mode_idx` path:
+  base LM uses symbol 0, while MDLM_L and MDLM_T use symbol 1/2 with the
+  bypass follow-up bin. `cclm_mode_idx` also has a semantic instrumentation ID
+  so CABAC vector dumps stay complete when MDLM is selected.
+- The chroma predictor now derives MDLM parameters from extended below-left or
+  top-right templates, then reuses the same linear chroma-from-luma fit used by
+  base LM.
+- The existing lossless/lossy chroma SAD selector evaluates all three LM-family
+  candidates when CCLM is legal. No constants or thresholds were tuned.
+- `vvc-stats` now records `chroma_mode_cclm_linear`,
+  `chroma_mode_mdlm_left`, and `chroma_mode_mdlm_top` in addition to the
+  aggregate `chroma_mode_cclm` counter.
+
+First-frame six-vector matrix versus `vvc-cclm-base-1f`:
+
+| Codec | Mode | Total bytes | FPS | Notes |
+|---|---|---:|---:|---|
+| AV2 | lossless | 6,586,445 | 2.63 | unchanged reference context |
+| AV2 | qp=24 | 2,400,148 | 1.15 | unchanged reference context |
+| VVC | lossless | 6,395,280 | 0.82 | -41,679 bytes versus prior VVC checkpoint |
+| VVC | qp=24 | 6,683,289 | 0.39 | -2,144,894 bytes versus prior VVC checkpoint |
+
+Affected VVC lossy rows improved in both size and PSNR because the new chroma
+predictors remove residual energy instead of only moving syntax around. The
+largest first-frame wins were the Wayland RGB row, from 2,090,954 bytes at
+21.990 dB to 760,612 bytes at 24.373 dB, and the 10-bit 4:4:4 MissionControl
+row, from 2,822,393 bytes at 13.830 dB to 2,254,980 bytes at 14.930 dB. The
+4:2:2 rows remain byte-identical because CCLM is still disabled for 4:2:2 in
+the current syntax gate.
+
+Small reference-validation spot checks versus `vvc-cclm-base-1f`:
+
+| Set | Vector | Previous | After | Delta |
+|---|---|---:|---:|---:|
+| smoke | checker_420 | 124 | 116 | -8 |
+| smoke | blocks_444 | 328 | 251 | -77 |
+| high-depth-smoke | canary_444_10 | 580 | 554 | -26 |
+| high-depth-smoke | canary_444_12 | 765 | 754 | -11 |
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mdlm-candidates-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-cclm-base-1f.json
+```
+
+Generated report:
+
+```text
+verification/generated/encode_matrix/vvc-mdlm-candidates-1f.md
+```
+
+Validation:
+
+```sh
+cargo check -p frameforge-codecs --features "vvc"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+cargo test -p frameforge-codecs vvc --features "vvc"
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make build
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
+```
+
 ## References
 
 - Cargo profile settings:

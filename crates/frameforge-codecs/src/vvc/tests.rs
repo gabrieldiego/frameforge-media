@@ -1149,6 +1149,34 @@ fn vvc_ctu_body_routes_ac_coefficients_without_a_feature_gate() {
 }
 
 #[test]
+fn vvc_chroma_lm_modes_have_distinct_cabac_syntax() {
+    assert_eq!(VvcCabacContext::CclmModeIdx.rtl_context_id(), Some(304));
+
+    fn bits_for_mode(mode: VvcChromaCclmMode) -> Vec<bool> {
+        let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
+        let mut params = vvc_ctu_partition_params(
+            VvcVideoGeometry {
+                width: 64,
+                height: 64,
+            },
+            black,
+        )
+        .expect("64x64 partition parameters");
+        assert!(params.chroma_tu_count > 0);
+        params.chroma_tu_intra_modes[0] = VvcChromaIntraPredictionMode::Cclm(mode);
+        vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config())
+    }
+
+    let linear = bits_for_mode(VvcChromaCclmMode::Linear);
+    let mdlm_left = bits_for_mode(VvcChromaCclmMode::MdlmLeft);
+    let mdlm_top = bits_for_mode(VvcChromaCclmMode::MdlmTop);
+
+    assert_ne!(linear, mdlm_left);
+    assert_ne!(linear, mdlm_top);
+    assert_ne!(mdlm_left, mdlm_top);
+}
+
+#[test]
 fn vvc_split_cu_flag_context_uses_spec_ctx_set_formula() {
     assert_eq!(
         VvcSplitCtxInput::qt_split_without_neighbours().split_cu_flag_ctx(),
@@ -1452,6 +1480,26 @@ fn vvc_residual_chroma_selector_can_choose_explicit_candidates() {
             )
         ),
         VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Horizontal)
+    );
+    assert_eq!(
+        select_vvc_residual_chroma_intra_mode_from_costs(
+            context,
+            node,
+            VvcChromaIntraCandidateCosts::new(10_000)
+                .with_candidate(
+                    VvcChromaIntraPredictionMode::Cclm(VvcChromaCclmMode::Linear),
+                    Some(1_000),
+                )
+                .with_candidate(
+                    VvcChromaIntraPredictionMode::Cclm(VvcChromaCclmMode::MdlmLeft),
+                    Some(750),
+                )
+                .with_candidate(
+                    VvcChromaIntraPredictionMode::Cclm(VvcChromaCclmMode::MdlmTop),
+                    Some(250),
+                )
+        ),
+        VvcChromaIntraPredictionMode::Cclm(VvcChromaCclmMode::MdlmTop)
     );
 }
 

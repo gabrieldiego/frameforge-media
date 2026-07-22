@@ -95,6 +95,7 @@ impl VvcCabacContext {
             VvcCabacContext::ParLevelFlag(0) => Some(11),
             VvcCabacContext::AbsLevelGtxFlag(32) => Some(12),
             VvcCabacContext::CclmModeFlag => Some(13),
+            VvcCabacContext::CclmModeIdx => Some(304),
             VvcCabacContext::IntraChromaPredMode(0) => Some(14),
             VvcCabacContext::QtCbfCb(0) => Some(15),
             VvcCabacContext::QtCbfCr(0) => Some(16),

@@ -1,8 +1,8 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
-    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcCodingTreeNode,
-    VvcIntraPredictionMode, VvcSample, VvcVideoGeometry, VVC_CTU_SIZE,
+    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcChromaCclmMode,
+    VvcCodingTreeNode, VvcIntraPredictionMode, VvcSample, VvcVideoGeometry, VVC_CTU_SIZE,
 };
 
 const VVC_LUMA_MODE_DIAGONAL: u8 = 34;
@@ -220,6 +220,7 @@ pub(in crate::vvc) fn predict_vvc_chroma_intra_block_into_with_availability(
 
 pub(in crate::vvc) fn predict_vvc_chroma_cclm_block_into_with_availability(
     prediction: &mut Vec<VvcSample>,
+    mode: VvcChromaCclmMode,
     chroma: &[VvcSample],
     luma: &[VvcSample],
     geometry: VvcVideoGeometry,
@@ -237,21 +238,16 @@ pub(in crate::vvc) fn predict_vvc_chroma_cclm_block_into_with_availability(
     let chroma_y = usize::from(node.y) / subsample_y;
     let plane_width = geometry.width / subsample_x;
     let plane_height = geometry.height / subsample_y;
-    let left_available = cclm_left_template_available(
-        chroma_availability,
-        plane_width,
-        plane_height,
-        chroma_x,
-        chroma_y,
-        chroma_height,
-    );
-    let above_available = cclm_top_template_available(
+    let template = vvc_cclm_template(
+        mode,
         chroma_availability,
         plane_width,
         plane_height,
         chroma_x,
         chroma_y,
         chroma_width,
+        chroma_height,
+        chroma_sampling,
     );
     let params = derive_vvc_cclm_parameters(
         chroma,
@@ -262,8 +258,7 @@ pub(in crate::vvc) fn predict_vvc_chroma_cclm_block_into_with_availability(
         bit_depth,
         chroma_availability,
         luma_availability,
-        above_available,
-        left_available,
+        template,
     );
     prediction.clear();
     prediction.resize(chroma_width * chroma_height, 0);
@@ -279,7 +274,7 @@ pub(in crate::vvc) fn predict_vvc_chroma_cclm_block_into_with_availability(
                 luma_availability,
                 x,
                 y,
-                left_available,
+                template.left_available,
             );
             let predicted = right_shift_i32(params.a * luma_sample, params.shift) + params.b;
             prediction[y * chroma_width + x] = predicted.clamp(0, max_sample) as VvcSample;
@@ -320,6 +315,85 @@ struct VvcCclmParameters {
     shift: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcCclmTemplate {
+    above_available: bool,
+    left_available: bool,
+    actual_top: usize,
+    actual_left: usize,
+}
+
+fn vvc_cclm_template(
+    mode: VvcChromaCclmMode,
+    availability: Option<VvcPlaneAvailability<'_>>,
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    width: usize,
+    height: usize,
+    chroma_sampling: ChromaSampling,
+) -> VvcCclmTemplate {
+    let top_available =
+        cclm_top_template_available(availability, plane_width, start_x, start_y, width);
+    let left_available =
+        cclm_left_template_available(availability, plane_height, start_x, start_y, height);
+    match mode {
+        VvcChromaCclmMode::Linear => VvcCclmTemplate {
+            above_available: top_available,
+            left_available,
+            actual_top: usize::from(top_available) * width,
+            actual_left: usize::from(left_available) * height,
+        },
+        VvcChromaCclmMode::MdlmTop => {
+            let unit_width = cclm_chroma_unit_width(chroma_sampling);
+            let max_extra = (height / unit_width) * unit_width;
+            let extra = if top_available {
+                cclm_top_right_template_available_count(
+                    availability,
+                    plane_width,
+                    start_x,
+                    start_y,
+                    width,
+                    max_extra,
+                    unit_width,
+                )
+            } else {
+                0
+            };
+            VvcCclmTemplate {
+                above_available: top_available,
+                left_available: false,
+                actual_top: usize::from(top_available) * (width + extra),
+                actual_left: 0,
+            }
+        }
+        VvcChromaCclmMode::MdlmLeft => {
+            let unit_height = cclm_chroma_unit_height(chroma_sampling);
+            let max_extra = (width / unit_height) * unit_height;
+            let extra = if left_available {
+                cclm_below_left_template_available_count(
+                    availability,
+                    plane_height,
+                    start_x,
+                    start_y,
+                    height,
+                    max_extra,
+                    unit_height,
+                )
+            } else {
+                0
+            };
+            VvcCclmTemplate {
+                above_available: false,
+                left_available,
+                actual_top: 0,
+                actual_left: usize::from(left_available) * (height + extra),
+            }
+        }
+    }
+}
+
 fn derive_vvc_cclm_parameters(
     chroma: &[VvcSample],
     luma: &[VvcSample],
@@ -329,10 +403,9 @@ fn derive_vvc_cclm_parameters(
     bit_depth: SampleBitDepth,
     chroma_availability: Option<VvcPlaneAvailability<'_>>,
     luma_availability: Option<VvcPlaneAvailability<'_>>,
-    above_available: bool,
-    left_available: bool,
+    template: VvcCclmTemplate,
 ) -> VvcCclmParameters {
-    if !above_available && !left_available {
+    if !template.above_available && !template.left_available {
         return VvcCclmParameters {
             a: 0,
             b: i32::from(vvc_neutral_sample(bit_depth)),
@@ -340,14 +413,10 @@ fn derive_vvc_cclm_parameters(
         };
     }
 
-    let subsample_x = chroma_subsample_x(chroma_sampling);
-    let subsample_y = chroma_subsample_y(chroma_sampling);
-    let chroma_width = usize::from(node.width) / subsample_x;
-    let chroma_height = usize::from(node.height) / subsample_y;
-    let actual_top = if above_available { chroma_width } else { 0 };
-    let actual_left = if left_available { chroma_height } else { 0 };
-    let above_is4 = usize::from(!left_available);
-    let left_is4 = usize::from(!above_available);
+    let actual_top = template.actual_top;
+    let actual_left = template.actual_left;
+    let above_is4 = usize::from(!template.left_available);
+    let left_is4 = usize::from(!template.above_available);
     let top_start = actual_top >> (2 + above_is4);
     let top_step = (actual_top >> (1 + above_is4)).max(1);
     let left_start = actual_left >> (2 + left_is4);
@@ -357,7 +426,7 @@ fn derive_vvc_cclm_parameters(
     let mut select_chroma = [0i32; 4];
     let mut top_count = 0usize;
     let mut total_count = 0usize;
-    if above_available {
+    if template.above_available {
         top_count = actual_top.min((1 + above_is4) << 1);
         let mut pos = top_start;
         for idx in 0..top_count {
@@ -369,7 +438,7 @@ fn derive_vvc_cclm_parameters(
                 bit_depth,
                 luma_availability,
                 pos,
-                left_available,
+                template.left_available,
             );
             select_chroma[idx] = i32::from(cclm_chroma_sample(
                 chroma,
@@ -385,7 +454,7 @@ fn derive_vvc_cclm_parameters(
             total_count += 1;
         }
     }
-    if left_available {
+    if template.left_available {
         let left_count = actual_left.min((1 + left_is4) << 1);
         let mut pos = left_start;
         for idx in 0..left_count {
@@ -479,7 +548,6 @@ fn derive_vvc_cclm_parameters(
 fn cclm_top_template_available(
     availability: Option<VvcPlaneAvailability<'_>>,
     plane_width: usize,
-    _plane_height: usize,
     start_x: usize,
     start_y: usize,
     width: usize,
@@ -495,7 +563,6 @@ fn cclm_top_template_available(
 
 fn cclm_left_template_available(
     availability: Option<VvcPlaneAvailability<'_>>,
-    _plane_width: usize,
     plane_height: usize,
     start_x: usize,
     start_y: usize,
@@ -508,6 +575,60 @@ fn cclm_left_template_available(
     checked_height > 0
         && (0..checked_height)
             .all(|y| reference_sample_available(availability, start_x - 1, start_y + y))
+}
+
+fn cclm_top_right_template_available_count(
+    availability: Option<VvcPlaneAvailability<'_>>,
+    plane_width: usize,
+    start_x: usize,
+    start_y: usize,
+    width: usize,
+    max_extra: usize,
+    unit_width: usize,
+) -> usize {
+    if start_y == 0 || start_x.saturating_add(width) >= plane_width || max_extra == 0 {
+        return 0;
+    }
+    let available_extra = max_extra.min(plane_width - start_x - width);
+    let mut count = 0usize;
+    while count < available_extra {
+        if !reference_sample_available(availability, start_x + width + count, start_y - 1) {
+            break;
+        }
+        count += 1;
+    }
+    (count / unit_width) * unit_width
+}
+
+fn cclm_below_left_template_available_count(
+    availability: Option<VvcPlaneAvailability<'_>>,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    height: usize,
+    max_extra: usize,
+    unit_height: usize,
+) -> usize {
+    if start_x == 0 || start_y.saturating_add(height) >= plane_height || max_extra == 0 {
+        return 0;
+    }
+    let available_extra = max_extra.min(plane_height - start_y - height);
+    let mut count = 0usize;
+    while count < available_extra {
+        if !reference_sample_available(availability, start_x - 1, start_y + height + count) {
+            break;
+        }
+        count += 1;
+    }
+    (count / unit_height) * unit_height
+}
+
+fn cclm_chroma_unit_width(chroma_sampling: ChromaSampling) -> usize {
+    (4 / chroma_subsample_x(chroma_sampling)).max(1)
+}
+
+fn cclm_chroma_unit_height(chroma_sampling: ChromaSampling) -> usize {
+    (4 / chroma_subsample_y(chroma_sampling)).max(1)
 }
 
 fn cclm_chroma_sample(
