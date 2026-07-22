@@ -2941,6 +2941,45 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Progressive Residual Contexts
+
+Checkpoint: `vvc-progressive-residual-contexts-1f`.
+
+This checkpoint changes production VVC coefficient emission to derive residual
+CABAC contexts from a progressively populated pass-1 coefficient state, matching
+decoder-order residual traversal. The symbolic residual stream remains
+test-only, while production now uses a compact delayed-bypass symbol queue for
+second-pass remainders and bypass-coded levels.
+
+The active default path is byte-identical against
+`vvc-luma-dct-selector-gated-1f`, so this is a compatibility cleanup for larger
+transformed intra-block experiments rather than a tuned coding change:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.35 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-progressive-residual-contexts-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-dct-selector-gated-1f.json
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
 ## References
 
 - Cargo profile settings:
