@@ -513,9 +513,11 @@ def aggregate_categories(rows: Iterable[SbRow]) -> dict[str, int]:
 def format_categories(categories: dict[str, int], total: int) -> str:
     if not categories:
         return "n/a"
+    category_total = sum(categories.values())
+    denominator = max(total, category_total)
     parts = []
     for key, value in sorted(categories.items(), key=lambda item: item[1], reverse=True)[:3]:
-        percent = value * 100.0 / total if total else 0.0
+        percent = value * 100.0 / denominator if denominator else 0.0
         parts.append(f"{key.removesuffix('_bits')}={value} ({percent:.1f}%)")
     return ", ".join(parts)
 

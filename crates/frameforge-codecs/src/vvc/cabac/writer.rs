@@ -35,11 +35,11 @@ pub(in crate::vvc) struct VvcCabacDumpSymbol {
 }
 
 impl VvcCabacDumpSymbol {
-    const BIN_EP: u8 = 0;
-    const BIN_TRM: u8 = 1;
-    const BIN_CTX: u8 = 2;
-    const BIN_CTX_DIRECT: u8 = 3;
-    const BINS_EP: u8 = 4;
+    pub(in crate::vvc) const BIN_EP: u8 = 0;
+    pub(in crate::vvc) const BIN_TRM: u8 = 1;
+    pub(in crate::vvc) const BIN_CTX: u8 = 2;
+    pub(in crate::vvc) const BIN_CTX_DIRECT: u8 = 3;
+    pub(in crate::vvc) const BINS_EP: u8 = 4;
 
     fn bin_ep(bin: bool) -> Self {
         Self {

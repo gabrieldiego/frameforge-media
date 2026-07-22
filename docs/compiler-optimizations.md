@@ -2591,6 +2591,30 @@ The first-frame matrix is byte-identical against
 | VVC | lossless | 5,884,724 | 0.36 | 0 |
 | VVC | qp=24 | 5,714,171 | 0.40 | 0 |
 
+## VVC CTU Bit Categories
+
+Checkpoint: `vvc-ctu-category-stats-1f`.
+
+This checkpoint extends the compile-gated VVC CTU JSONL sink with category
+counters for partition, luma mode, chroma mode, residual, intra-block-copy,
+inter, palette, and other syntax. The counters are syntax-bin costs derived
+from the CABAC semantic dump, while `total_symbol_bits` remains the final
+arithmetic-coded CTU bit length. The summarizer now normalizes category
+percentages against category totals when those domains differ, so VVC
+syntax-bin categories do not report impossible shares above 100%.
+
+The instrumented first-frame six-vector matrix was byte-identical against
+`vvc-score-policy-selectors-1f` for VVC lossless and QP24 lossy. The current
+VVC residual path remains CTU-quantization bound and residual-syntax dominated:
+
+| Measurement | Value |
+|---|---:|
+| CTU quantize stage share | 89.0% |
+| Frame entropy write stage share | 10.2% |
+| Residual syntax-bin share | 93.5% |
+| Luma-mode syntax-bin share | 2.5% |
+| Partition syntax-bin share | 2.1% |
+
 ## References
 
 - Cargo profile settings:

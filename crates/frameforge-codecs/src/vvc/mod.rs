@@ -329,6 +329,99 @@ struct VvcCtuBitSink {
 }
 
 #[cfg(feature = "vvc-stats")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct VvcCtuBitCategories {
+    partition_bits: usize,
+    luma_mode_bits: usize,
+    chroma_mode_bits: usize,
+    residual_bits: usize,
+    intrabc_bits: usize,
+    inter_bits: usize,
+    palette_bits: usize,
+    other_bits: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcCtuBitCategories {
+    fn from_symbols(symbols: &[VvcCabacDumpSymbol]) -> Self {
+        let mut categories = Self::default();
+        for symbol in symbols {
+            categories.add_symbol(*symbol);
+        }
+        categories
+    }
+
+    fn add_symbol(&mut self, symbol: VvcCabacDumpSymbol) {
+        let bits = vvc_cabac_symbol_bin_count(symbol);
+        match vvc_cabac_symbol_category(symbol) {
+            VvcCtuBitCategory::Partition => self.partition_bits += bits,
+            VvcCtuBitCategory::LumaMode => self.luma_mode_bits += bits,
+            VvcCtuBitCategory::ChromaMode => self.chroma_mode_bits += bits,
+            VvcCtuBitCategory::Residual => self.residual_bits += bits,
+            VvcCtuBitCategory::Intrabc => self.intrabc_bits += bits,
+            VvcCtuBitCategory::Inter => self.inter_bits += bits,
+            VvcCtuBitCategory::Palette => self.palette_bits += bits,
+            VvcCtuBitCategory::Other => self.other_bits += bits,
+        }
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VvcCtuBitCategory {
+    Partition,
+    LumaMode,
+    ChromaMode,
+    Residual,
+    Intrabc,
+    Inter,
+    Palette,
+    Other,
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_cabac_symbol_bin_count(symbol: VvcCabacDumpSymbol) -> usize {
+    match symbol.kind {
+        VvcCabacDumpSymbol::BIN_EP
+        | VvcCabacDumpSymbol::BIN_TRM
+        | VvcCabacDumpSymbol::BIN_CTX
+        | VvcCabacDumpSymbol::BIN_CTX_DIRECT => 1,
+        VvcCabacDumpSymbol::BINS_EP => (symbol.data & 0x3f) as usize,
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_cabac_symbol_category(symbol: VvcCabacDumpSymbol) -> VvcCtuBitCategory {
+    match symbol.kind {
+        VvcCabacDumpSymbol::BIN_CTX => {
+            vvc_context_id_bit_category(((symbol.data >> 8) & 0x03ff) as u16)
+        }
+        // The residual path's bypass payload is dominated by coefficient signs
+        // and remainders. Mode-index bypass bins are comparatively small, so
+        // the category is a useful residual-pressure proxy rather than an
+        // exact arithmetic-coded bit attribution.
+        VvcCabacDumpSymbol::BIN_EP | VvcCabacDumpSymbol::BINS_EP => VvcCtuBitCategory::Residual,
+        VvcCabacDumpSymbol::BIN_TRM => VvcCtuBitCategory::Other,
+        _ => VvcCtuBitCategory::Other,
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_context_id_bit_category(ctx_id: u16) -> VvcCtuBitCategory {
+    match ctx_id {
+        0..=3 | 19 | 20 | 24..=41 => VvcCtuBitCategory::Partition,
+        4 | 21 | 53 => VvcCtuBitCategory::LumaMode,
+        13 | 14 | 304 => VvcCtuBitCategory::ChromaMode,
+        42..=52 => VvcCtuBitCategory::Palette,
+        274..=282 => VvcCtuBitCategory::Intrabc,
+        265..=273 | 283..=294 => VvcCtuBitCategory::Inter,
+        5..=12 | 15..=18 | 22 | 23 | 54..=70 | 71..=264 | 295..=303 => VvcCtuBitCategory::Residual,
+        _ => VvcCtuBitCategory::Other,
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
 impl VvcCtuBitSink {
     fn from_env() -> Result<Self, String> {
         Ok(Self {
@@ -369,9 +462,10 @@ impl VvcCtuBitSink {
         let luma_modes = vvc_luma_mode_counts(quantized);
         let chroma_modes = vvc_chroma_mode_counts(quantized);
         let residual_coding = vvc_tu_residual_coding_counts(quantized);
+        let bit_categories = VvcCtuBitCategories::from_symbols(&dump.semantic_symbols);
         let search = quantized.intra_search_stats;
         let line = format!(
-            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_tu_transform_skip_count\":{},\"luma_tu_transformed_count\":{},\"cb_tu_transform_skip_count\":{},\"cb_tu_transformed_count\":{},\"cr_tu_transform_skip_count\":{},\"cr_tu_transformed_count\":{},\"chroma_tu_transform_skip_count\":{},\"chroma_tu_transformed_count\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
+            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_tu_transform_skip_count\":{},\"luma_tu_transformed_count\":{},\"cb_tu_transform_skip_count\":{},\"cb_tu_transformed_count\":{},\"cr_tu_transform_skip_count\":{},\"cr_tu_transformed_count\":{},\"chroma_tu_transform_skip_count\":{},\"chroma_tu_transformed_count\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
             frame_idx,
             region.slice_address,
             region.origin_x / VVC_CTU_SIZE,
@@ -421,6 +515,14 @@ impl VvcCtuBitSink {
             chroma_modes.cclm_linear,
             chroma_modes.mdlm_left,
             chroma_modes.mdlm_top,
+            bit_categories.partition_bits,
+            bit_categories.luma_mode_bits,
+            bit_categories.chroma_mode_bits,
+            bit_categories.residual_bits,
+            bit_categories.intrabc_bits,
+            bit_categories.inter_bits,
+            bit_categories.palette_bits,
+            bit_categories.other_bits,
             dump.context_bin_count,
             dump.semantic_symbols.len(),
             dump.bin_engine_events.len(),

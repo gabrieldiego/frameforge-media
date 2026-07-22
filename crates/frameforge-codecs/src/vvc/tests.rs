@@ -1629,6 +1629,35 @@ fn vvc_residual_score_policy_is_shared_across_formats() {
     }
 }
 
+#[cfg(feature = "vvc-stats")]
+#[test]
+fn vvc_ctu_bit_categories_classify_context_and_bypass_bins() {
+    let categories = VvcCtuBitCategories::from_symbols(&[
+        VvcCabacDumpSymbol::bin_ctx(false, 0),
+        VvcCabacDumpSymbol::bin_ctx(true, 4),
+        VvcCabacDumpSymbol::bin_ctx(false, 13),
+        VvcCabacDumpSymbol::bin_ctx(true, 56),
+        VvcCabacDumpSymbol::bin_ctx(false, 274),
+        VvcCabacDumpSymbol {
+            kind: VvcCabacDumpSymbol::BINS_EP,
+            data: 5,
+        },
+        VvcCabacDumpSymbol {
+            kind: VvcCabacDumpSymbol::BIN_TRM,
+            data: 1,
+        },
+    ]);
+
+    assert_eq!(categories.partition_bits, 1);
+    assert_eq!(categories.luma_mode_bits, 1);
+    assert_eq!(categories.chroma_mode_bits, 1);
+    assert_eq!(categories.residual_bits, 6);
+    assert_eq!(categories.intrabc_bits, 1);
+    assert_eq!(categories.inter_bits, 0);
+    assert_eq!(categories.palette_bits, 0);
+    assert_eq!(categories.other_bits, 1);
+}
+
 #[test]
 fn vvc_residual_luma_selector_can_choose_planar_when_candidate_is_supplied() {
     let format = VvcPictureFormat {
