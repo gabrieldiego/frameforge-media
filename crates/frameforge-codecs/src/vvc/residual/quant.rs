@@ -97,6 +97,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     let mut luma_tu_has_ac = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_transform_skip = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_mrl_index = [0; MAX_VVC_LUMA_TUS];
+    let mut luma_tu_mts_index = [0; MAX_VVC_LUMA_TUS];
     let mut cb_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
     let mut cr_tu_dc_levels = [0; MAX_VVC_CHROMA_TUS];
     let mut cb_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
@@ -305,6 +306,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_tu_has_ac[luma_tu_count] = luma_tu.has_ac;
         luma_tu_transform_skip[luma_tu_count] = luma_tu.transform_skip;
         luma_tu_mrl_index[luma_tu_count] = luma_tu.mrl_index;
+        luma_tu_mts_index[luma_tu_count] = luma_tu.mts_index;
         luma_tu_count += 1;
     }
 
@@ -596,6 +598,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_tu_has_ac,
         luma_tu_transform_skip,
         luma_tu_mrl_index,
+        luma_tu_mts_index,
         luma_tu_count,
         chroma_tu_count,
         chroma_tu_intra_modes,
@@ -884,6 +887,7 @@ struct VvcFinalizedLumaTu {
     has_ac: bool,
     transform_skip: bool,
     mrl_index: u8,
+    mts_index: u8,
 }
 
 fn finalize_vvc_luma_tu(
@@ -918,6 +922,7 @@ fn finalize_vvc_luma_tu(
                 has_ac,
                 transform_skip: true,
                 mrl_index: 0,
+                mts_index: 0,
             }
         }
         VvcTuResidualCodingMode::Transformed => {
@@ -954,6 +959,7 @@ fn finalize_vvc_luma_tu(
                 has_ac: quantized.has_ac,
                 transform_skip: false,
                 mrl_index: 0,
+                mts_index: 0,
             }
         }
     };

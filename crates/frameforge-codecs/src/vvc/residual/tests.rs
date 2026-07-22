@@ -157,6 +157,9 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
     assert!(color.luma_tu_mrl_index[..color.luma_tu_count]
         .iter()
         .all(|index| *index == 0));
+    assert!(color.luma_tu_mts_index[..color.luma_tu_count]
+        .iter()
+        .all(|index| *index == 0));
     assert!(color.luma_tu_transform_skip[..color.luma_tu_count]
         .iter()
         .all(|enabled| !*enabled));
@@ -183,6 +186,9 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
         .iter()
         .all(|enabled| *enabled));
     assert!(lossless.luma_tu_mrl_index[..lossless.luma_tu_count]
+        .iter()
+        .all(|index| *index == 0));
+    assert!(lossless.luma_tu_mts_index[..lossless.luma_tu_count]
         .iter()
         .all(|index| *index == 0));
     assert!(lossless.cb_tu_transform_skip[..lossless.chroma_tu_count]

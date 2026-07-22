@@ -297,6 +297,7 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
         luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
         luma_tu_mrl_index: [0; MAX_VVC_LUMA_TUS],
+        luma_tu_mts_index: [0; MAX_VVC_LUMA_TUS],
         luma_tu_count: 1,
         chroma_tu_count: 0,
         chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
@@ -1099,6 +1100,22 @@ fn vvc_residual_cabac_encoder_labels_disabled_tool_paths() {
         initial_transform_skip_state
     );
     assert_ne!(contexts.mts_idx[0].state(), initial_mts_state);
+
+    let mut contexts = VvcCabacContexts::new();
+    let mut cabac = VvcCabacEncoder::new();
+    cabac.start();
+    let initial_transform_skip_state = contexts.transform_skip_flag[0].state();
+    let initial_mts_state = contexts.mts_idx[0].state();
+    let mut enabled = VvcResidualCabacEncoder::new(&mut contexts, enabled_options);
+    let mut config = VvcResidualCtxConfig::luma_4x4_subset(0, 0);
+    config.transform_skip = true;
+    let state = VvcResidualPass1State::new(config);
+    enabled.emit_default_tool_control_hooks(&mut cabac, &state);
+    assert_ne!(
+        contexts.transform_skip_flag[0].state(),
+        initial_transform_skip_state
+    );
+    assert_eq!(contexts.mts_idx[0].state(), initial_mts_state);
 }
 
 #[test]
@@ -1279,6 +1296,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
             luma_tu_mrl_index: [0; MAX_VVC_LUMA_TUS],
+            luma_tu_mts_index: [0; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
             chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
@@ -1763,6 +1781,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
             luma_tu_mrl_index: [0; MAX_VVC_LUMA_TUS],
+            luma_tu_mts_index: [0; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
             chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],

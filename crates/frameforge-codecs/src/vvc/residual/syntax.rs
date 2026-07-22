@@ -211,7 +211,7 @@ impl<'a> VvcResidualCabacEncoder<'a> {
             state.config.transform_skip,
             state.config.bdpcm,
         );
-        self.emit_mts_idx_zero(cabac);
+        self.emit_mts_idx(cabac, state);
         self.observe_future_chroma_defaults();
         self.observe_current_disabled_tool_defaults();
         let _default_sb_symbol = VvcResidualCabacSymbol::SbCodedFlag {
@@ -247,10 +247,17 @@ impl<'a> VvcResidualCabacEncoder<'a> {
         );
     }
 
-    fn emit_mts_idx_zero(&mut self, cabac: &mut VvcCabacEncoder) {
+    fn emit_mts_idx(&mut self, cabac: &mut VvcCabacEncoder, state: &VvcResidualPass1State) {
         if !self.options.explicit_mts_intra_enabled {
             return;
         }
+        if state.config.component != VvcResidualComponent::Luma || state.config.transform_skip {
+            return;
+        }
+        assert_eq!(
+            state.config.mts_index, 0,
+            "nonzero VVC MTS index is not wired into transform/reconstruction yet"
+        );
 
         // Table 132 maps mts_idx binIdx 0..3 to ctxInc 0..3. For mts_idx=0
         // under TR(cMax=4,cRiceParam=0), only the first zero bin is emitted.
@@ -284,6 +291,7 @@ pub(in crate::vvc) struct VvcResidualCtxConfig {
     pub(in crate::vvc) transform_skip: bool,
     pub(in crate::vvc) ts_residual_coding_disabled: bool,
     pub(in crate::vvc) bdpcm: bool,
+    pub(in crate::vvc) mts_index: u8,
     pub(in crate::vvc) last_significant_x: u8,
     pub(in crate::vvc) last_significant_y: u8,
 }
@@ -327,6 +335,7 @@ impl VvcResidualCtxConfig {
             transform_skip: false,
             ts_residual_coding_disabled: true,
             bdpcm: false,
+            mts_index: 0,
             last_significant_x,
             last_significant_y,
         }
@@ -1040,6 +1049,7 @@ impl VvcResidualCabacSymbolStream {
         dc_level: i16,
         ac_levels: &[i16; 15],
         has_ac: bool,
+        mts_index: u8,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
@@ -1052,6 +1062,7 @@ impl VvcResidualCabacSymbolStream {
             has_ac,
             false,
             false,
+            mts_index,
             encoder,
             cabac,
         );
@@ -1075,6 +1086,7 @@ impl VvcResidualCabacSymbolStream {
             has_ac,
             true,
             false,
+            0,
             encoder,
             cabac,
         );
@@ -1145,6 +1157,7 @@ impl VvcResidualCabacSymbolStream {
             has_ac,
             false,
             false,
+            0,
             encoder,
             cabac,
         );
@@ -1173,6 +1186,7 @@ impl VvcResidualCabacSymbolStream {
             has_ac,
             true,
             false,
+            0,
             encoder,
             cabac,
         );
@@ -1277,6 +1291,7 @@ impl VvcResidualCabacSymbolStream {
             &coeffs,
             transform_skip,
             bdpcm,
+            0,
             encoder,
             cabac,
         );
@@ -1291,6 +1306,7 @@ impl VvcResidualCabacSymbolStream {
         has_ac: bool,
         transform_skip: bool,
         bdpcm: bool,
+        mts_index: u8,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
@@ -1304,6 +1320,7 @@ impl VvcResidualCabacSymbolStream {
             &coeffs,
             transform_skip,
             bdpcm,
+            mts_index,
             encoder,
             cabac,
         );
@@ -1316,6 +1333,7 @@ impl VvcResidualCabacSymbolStream {
         coeffs: &impl VvcCoeffAccessor,
         transform_skip: bool,
         bdpcm: bool,
+        mts_index: u8,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
@@ -1326,6 +1344,7 @@ impl VvcResidualCabacSymbolStream {
             coeffs,
             transform_skip,
             bdpcm,
+            mts_index,
         );
         encoder.emit_default_tool_control_hooks(cabac, &plan.pass1_state);
         let mut sink = VvcResidualDirectSymbolSink {
@@ -1399,6 +1418,7 @@ impl VvcResidualCabacSymbolStream {
             &coeffs,
             transform_skip,
             bdpcm,
+            0,
         )
     }
 
@@ -1409,6 +1429,7 @@ impl VvcResidualCabacSymbolStream {
         coeffs: &impl VvcCoeffAccessor,
         transform_skip: bool,
         bdpcm: bool,
+        mts_index: u8,
     ) -> VvcResidualCoefficientPlan {
         // H.266 7.3.11.11 residual_coding() first codes the last significant
         // coefficient position and then walks earlier scan positions with
@@ -1446,6 +1467,7 @@ impl VvcResidualCabacSymbolStream {
         config.transform_skip = transform_skip;
         config.ts_residual_coding_disabled = true;
         config.bdpcm = bdpcm;
+        config.mts_index = mts_index;
         let mut pass1_state = VvcResidualPass1State::new(config);
         for pos in scan.iter().take(last_scan_pos + 1) {
             let level = coeffs.level_at(pos.x, pos.y);

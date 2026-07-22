@@ -2494,6 +2494,25 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-residual-coding-selector-1f.json
 ```
 
+## VVC Per-TU MTS Index
+
+Checkpoint: `vvc-tu-mts-index-1f`.
+
+This checkpoint carries an explicit MTS index beside the luma TU residual
+coding decision. The selector still chooses index 0 for every TU because
+nonzero MTS transform/reconstruction is not wired yet. Keeping the value in
+per-TU metadata removes another hardcoded lossy syntax assumption from the
+CABAC emitter, while preserving byte-identical streams until mode selection can
+legally choose another transform.
+
+The first-frame matrix is byte-identical against
+`vvc-luma-partition-selector-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,996,606 | 0.36 | 0 |
+| VVC | qp=24 | 5,727,069 | 0.40 | 0 |
+
 ## References
 
 - Cargo profile settings:

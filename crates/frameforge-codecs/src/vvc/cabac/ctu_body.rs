@@ -645,9 +645,11 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         let ac_levels = &self.params.luma_tu_ac_levels[tu_idx];
         let has_ac = self.params.luma_tu_has_ac[tu_idx];
         let transform_skip = self.params.luma_tu_transform_skip[tu_idx];
+        let mts_index = self.params.luma_tu_mts_index[tu_idx];
         let mut residual =
             VvcResidualCabacEncoder::new(&mut *self.contexts, self.slice_config.residual_options());
         if transform_skip {
+            debug_assert_eq!(mts_index, 0);
             VvcResidualCabacSymbolStream::emit_luma_transform_skip_first4x4_coefficients(
                 log2_width,
                 log2_height,
@@ -664,6 +666,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 dc_level,
                 ac_levels,
                 has_ac,
+                mts_index,
                 &mut residual,
                 cabac,
             );
