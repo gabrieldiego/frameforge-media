@@ -18,8 +18,6 @@ use super::super::{
     VvcResidualScoreMetric, VvcSample, VvcSampledColor, VvcSampledFrame, VvcTuResidualCodingMode,
     VvcVideoGeometry, VVC_CTU_SIZE,
 };
-#[cfg(feature = "vvc-stats")]
-use super::VvcIntraSearchStats;
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into_with_qp,
@@ -33,6 +31,8 @@ use super::{
     MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
     VVC_LUMA_AC_COEFFS_PER_TU,
 };
+#[cfg(feature = "vvc-stats")]
+use super::{VvcIntraSearchStats, VvcResidualEnergyStats};
 
 pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
     quantize_vvc_frame(&VvcSampledFrame::solid(color))
@@ -128,6 +128,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     let mut candidate_cr_residuals = Vec::new();
     #[cfg(feature = "vvc-stats")]
     let mut intra_search_stats = VvcIntraSearchStats::default();
+    #[cfg(feature = "vvc-stats")]
+    let mut residual_energy_stats = VvcResidualEnergyStats::default();
 
     let mode_context = VvcResidualModeDecisionContext::new(source_frame.format, residual_mode);
     let score_metric = select_vvc_residual_score_metric(mode_context);
@@ -317,6 +319,12 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_mode_search_state.mark_node(local_node, luma_mode);
         let luma_coding_decision =
             select_vvc_luma_tu_coding_decision(mode_context, node, luma_mode);
+        #[cfg(feature = "vvc-stats")]
+        residual_energy_stats.add_luma_residuals(
+            &luma_residuals,
+            usize::from(node.width),
+            usize::from(node.height),
+        );
         let luma_tu = finalize_vvc_luma_tu(
             luma_coding_decision,
             source_frame,
@@ -583,6 +591,11 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         chroma_tu_intra_modes[chroma_tu_count] = chroma_mode;
         let chroma_coding_decision =
             select_vvc_chroma_tu_coding_decision(mode_context, node, chroma_mode);
+        #[cfg(feature = "vvc-stats")]
+        {
+            residual_energy_stats.add_chroma_residuals(&cb_residuals, chroma_width, chroma_height);
+            residual_energy_stats.add_chroma_residuals(&cr_residuals, chroma_width, chroma_height);
+        }
         let chroma_tu = finalize_vvc_chroma_tu(
             chroma_coding_decision,
             source_frame,
@@ -656,6 +669,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         cr_rem,
         #[cfg(feature = "vvc-stats")]
         intra_search_stats,
+        #[cfg(feature = "vvc-stats")]
+        residual_energy_stats,
     }
 }
 

@@ -313,6 +313,8 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         cr_rem: 16,
         #[cfg(feature = "vvc-stats")]
         intra_search_stats: Default::default(),
+        #[cfg(feature = "vvc-stats")]
+        residual_energy_stats: Default::default(),
     }
 }
 

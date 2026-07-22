@@ -462,10 +462,11 @@ impl VvcCtuBitSink {
         let luma_modes = vvc_luma_mode_counts(quantized);
         let chroma_modes = vvc_chroma_mode_counts(quantized);
         let residual_coding = vvc_tu_residual_coding_counts(quantized);
+        let energy = quantized.residual_energy_stats;
         let bit_categories = VvcCtuBitCategories::from_symbols(&dump.semantic_symbols);
         let search = quantized.intra_search_stats;
         let line = format!(
-            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_tu_transform_skip_count\":{},\"luma_tu_transformed_count\":{},\"cb_tu_transform_skip_count\":{},\"cb_tu_transformed_count\":{},\"cr_tu_transform_skip_count\":{},\"cr_tu_transformed_count\":{},\"chroma_tu_transform_skip_count\":{},\"chroma_tu_transformed_count\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
+            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_tu_transform_skip_count\":{},\"luma_tu_transformed_count\":{},\"cb_tu_transform_skip_count\":{},\"cb_tu_transformed_count\":{},\"cr_tu_transform_skip_count\":{},\"cr_tu_transformed_count\":{},\"chroma_tu_transform_skip_count\":{},\"chroma_tu_transformed_count\":{},\"luma_residual_sse_total\":{},\"luma_residual_sse_coded_first4x4\":{},\"luma_residual_sse_uncoded_tail\":{},\"chroma_residual_sse_total\":{},\"chroma_residual_sse_coded_first4x4\":{},\"chroma_residual_sse_uncoded_tail\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
             frame_idx,
             region.slice_address,
             region.origin_x / VVC_CTU_SIZE,
@@ -490,6 +491,12 @@ impl VvcCtuBitSink {
             residual_coding.cr_transformed,
             residual_coding.chroma_transform_skip(),
             residual_coding.chroma_transformed(),
+            energy.luma_total_sse,
+            energy.luma_coded_first4x4_sse,
+            energy.luma_uncoded_tail_sse,
+            energy.chroma_total_sse,
+            energy.chroma_coded_first4x4_sse,
+            energy.chroma_uncoded_tail_sse,
             search.luma_candidates(),
             search.luma_dc_candidates,
             search.luma_planar_candidates,
@@ -733,6 +740,25 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
     stats.add_counter(
         "chroma_tu_transformed_count",
         residual_coding.chroma_transformed() as u64,
+    );
+    let energy = quantized.residual_energy_stats;
+    stats.add_counter("luma_residual_sse_total", energy.luma_total_sse);
+    stats.add_counter(
+        "luma_residual_sse_coded_first4x4",
+        energy.luma_coded_first4x4_sse,
+    );
+    stats.add_counter(
+        "luma_residual_sse_uncoded_tail",
+        energy.luma_uncoded_tail_sse,
+    );
+    stats.add_counter("chroma_residual_sse_total", energy.chroma_total_sse);
+    stats.add_counter(
+        "chroma_residual_sse_coded_first4x4",
+        energy.chroma_coded_first4x4_sse,
+    );
+    stats.add_counter(
+        "chroma_residual_sse_uncoded_tail",
+        energy.chroma_uncoded_tail_sse,
     );
     let search = quantized.intra_search_stats;
     stats.add_counter("luma_candidate_count", search.luma_candidates() as u64);

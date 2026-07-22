@@ -2657,6 +2657,71 @@ The first-frame six-vector matrix was byte-identical against
 | VVC | lossless | 5,884,724 | 0.36 | 0 |
 | VVC | qp=24 | 5,714,171 | 0.40 | 0 |
 
+## VVC Residual Tail Energy Instrumentation
+
+Checkpoint: `vvc-residual-tail-stats`.
+
+This checkpoint adds compile-gated residual-energy counters to the VVC stats
+path. Normal builds and bitstreams are unchanged; with
+`frameforge-codecs/vvc-stats`, each quantized CTU now reports total residual
+SSE, the portion covered by the currently coded first-4x4 coefficient subset,
+and the uncoded tail outside that subset for luma and chroma.
+
+The first-frame matrix was byte-identical against
+`vvc-tu-decision-unified-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.42 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.45 | 0 |
+
+Probe on the first SceneComposition 4:2:0 frame, VVC QP24:
+
+| Component | Total SSE | First4x4 SSE | Tail SSE | Tail share |
+|---|---:|---:|---:|---:|
+| luma | 712,894,918 | 169,371,320 | 543,523,598 | 76.2% |
+| chroma | 37,585,004 | 37,585,004 | 0 | 0.0% |
+
+The same probe still shows residual syntax as the dominant CTU category:
+1,701,400 residual syntax-bin bits, or 88.3% of categorized syntax-bin cost.
+The largest CTUs spend about 97% of categorized syntax bins on residuals. This
+confirms that the next VVC intra feature work should target wider or staged
+coefficient coding for luma before more mode-search constants.
+
+Commands:
+
+```sh
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make build VVC_STATS=1
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_residual_tail_stats_probe.jsonl \
+FRAMEFORGE_VVC_CTU_BITS=verification/generated/profiling/vvc_residual_tail_ctu_probe.jsonl \
+  ./ff encode \
+  verification/generated/test_vectors/aomctc_b2_SceneComposition_1_420_1920x1080_15_1f_yuv420p8.yuv \
+  --frames 1 \
+  --encode vvc:verification/generated/profiling/vvc_residual_tail_probe.vvc \
+  --recon verification/generated/profiling/vvc_residual_tail_probe_recon.yuv \
+  --qp 24
+
+python3 scripts/summarize_encoder_instrumentation.py \
+  --vvc-stats scene420/frameforge=verification/generated/profiling/vvc_residual_tail_stats_probe.jsonl \
+  --top 12
+
+python3 scripts/summarize_encoder_instrumentation.py \
+  --sb-bits scene420/frameforge=verification/generated/profiling/vvc_residual_tail_ctu_probe.jsonl \
+  --top 5
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-residual-tail-stats-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-tu-decision-unified-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

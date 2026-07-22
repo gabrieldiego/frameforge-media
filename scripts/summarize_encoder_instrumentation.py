@@ -467,6 +467,8 @@ def print_vvc_counter_summary(rows: list[VvcCounterRow], top: int) -> None:
         "chroma_tu_",
         "cb_tu_",
         "cr_tu_",
+        "luma_residual_sse_",
+        "chroma_residual_sse_",
     )
     print("## VVC Counter Summary")
     print("| Case | Source | Counter | Total | Per frame |")
@@ -478,6 +480,7 @@ def print_vvc_counter_summary(rows: list[VvcCounterRow], top: int) -> None:
         per_frame = value / frames if frames else 0.0
         print(f"| {case} | {source} | `{counter}` | {value} | {per_frame:.2f} |")
     print()
+    print_vvc_residual_tail_summary(totals)
 
     index_rows = [
         (case, source, counter, value)
@@ -495,6 +498,30 @@ def print_vvc_counter_summary(rows: list[VvcCounterRow], top: int) -> None:
         frames = len(frame_counts[(case, source)])
         per_frame = value / frames if frames else 0.0
         print(f"| {case} | {source} | `{counter}` | {value} | {per_frame:.2f} |")
+    print()
+
+
+def print_vvc_residual_tail_summary(
+    totals: dict[tuple[str, str, str], int],
+) -> None:
+    rows = []
+    for case, source, counter in totals:
+        if counter not in ("luma_residual_sse_total", "chroma_residual_sse_total"):
+            continue
+        component = counter.removesuffix("_residual_sse_total")
+        total = totals[(case, source, f"{component}_residual_sse_total")]
+        coded = totals[(case, source, f"{component}_residual_sse_coded_first4x4")]
+        tail = totals[(case, source, f"{component}_residual_sse_uncoded_tail")]
+        rows.append((case, source, component, total, coded, tail))
+    if not rows:
+        return
+
+    print("## VVC Residual Tail Energy")
+    print("| Case | Source | Component | Total SSE | First4x4 SSE | Tail SSE | Tail share |")
+    print("|---|---|---|---:|---:|---:|---:|")
+    for case, source, component, total, coded, tail in sorted(rows):
+        share = tail * 100.0 / total if total else 0.0
+        print(f"| {case} | {source} | {component} | {total} | {coded} | {tail} | {share:.1f}% |")
     print()
 
 

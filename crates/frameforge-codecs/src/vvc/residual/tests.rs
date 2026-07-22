@@ -199,6 +199,27 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
         .all(|enabled| *enabled));
 }
 
+#[cfg(feature = "vvc-stats")]
+#[test]
+fn vvc_residual_energy_stats_split_first4x4_from_tail() {
+    let mut residuals = vec![0; 8 * 8];
+    residuals[0] = 2;
+    residuals[3 * 8 + 3] = -3;
+    residuals[4 * 8] = 4;
+    residuals[7 * 8 + 7] = -5;
+
+    let mut stats = VvcResidualEnergyStats::default();
+    stats.add_luma_residuals(&residuals, 8, 8);
+    stats.add_chroma_residuals(&residuals, 8, 8);
+
+    assert_eq!(stats.luma_total_sse, 54);
+    assert_eq!(stats.luma_coded_first4x4_sse, 13);
+    assert_eq!(stats.luma_uncoded_tail_sse, 41);
+    assert_eq!(stats.chroma_total_sse, 54);
+    assert_eq!(stats.chroma_coded_first4x4_sse, 13);
+    assert_eq!(stats.chroma_uncoded_tail_sse, 41);
+}
+
 #[test]
 fn vvc_transform_skip_reconstruction_uses_encoded_luma_coefficients() {
     let residuals = [7, -1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11, 12, -13, 14, -15];

@@ -78,6 +78,8 @@ pub struct VvcQuantizedColor {
     pub(super) cr_rem: u8,
     #[cfg(feature = "vvc-stats")]
     pub(super) intra_search_stats: VvcIntraSearchStats,
+    #[cfg(feature = "vvc-stats")]
+    pub(super) residual_energy_stats: VvcResidualEnergyStats,
 }
 
 #[cfg(feature = "vvc-stats")]
@@ -135,6 +137,73 @@ impl VvcIntraSearchStats {
     pub(super) fn add_chroma_cclm(&mut self) {
         self.chroma_cclm_candidates += 1;
     }
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VvcResidualEnergyStats {
+    pub(super) luma_total_sse: u64,
+    pub(super) luma_coded_first4x4_sse: u64,
+    pub(super) luma_uncoded_tail_sse: u64,
+    pub(super) chroma_total_sse: u64,
+    pub(super) chroma_coded_first4x4_sse: u64,
+    pub(super) chroma_uncoded_tail_sse: u64,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcResidualEnergyStats {
+    pub(super) fn add_luma_residuals(&mut self, residuals: &[i16], width: usize, height: usize) {
+        let split = residual_energy_split(residuals, width, height);
+        self.luma_total_sse = self.luma_total_sse.saturating_add(split.total_sse);
+        self.luma_coded_first4x4_sse = self
+            .luma_coded_first4x4_sse
+            .saturating_add(split.coded_first4x4_sse);
+        self.luma_uncoded_tail_sse = self
+            .luma_uncoded_tail_sse
+            .saturating_add(split.uncoded_tail_sse);
+    }
+
+    pub(super) fn add_chroma_residuals(&mut self, residuals: &[i16], width: usize, height: usize) {
+        let split = residual_energy_split(residuals, width, height);
+        self.chroma_total_sse = self.chroma_total_sse.saturating_add(split.total_sse);
+        self.chroma_coded_first4x4_sse = self
+            .chroma_coded_first4x4_sse
+            .saturating_add(split.coded_first4x4_sse);
+        self.chroma_uncoded_tail_sse = self
+            .chroma_uncoded_tail_sse
+            .saturating_add(split.uncoded_tail_sse);
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcResidualEnergySplit {
+    total_sse: u64,
+    coded_first4x4_sse: u64,
+    uncoded_tail_sse: u64,
+}
+
+#[cfg(feature = "vvc-stats")]
+fn residual_energy_split(residuals: &[i16], width: usize, height: usize) -> VvcResidualEnergySplit {
+    debug_assert_eq!(residuals.len(), width * height);
+    let mut split = VvcResidualEnergySplit {
+        total_sse: 0,
+        coded_first4x4_sse: 0,
+        uncoded_tail_sse: 0,
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let residual = i64::from(residuals[y * width + x]);
+            let sse = (residual * residual) as u64;
+            split.total_sse = split.total_sse.saturating_add(sse);
+            if x < 4 && y < 4 {
+                split.coded_first4x4_sse = split.coded_first4x4_sse.saturating_add(sse);
+            } else {
+                split.uncoded_tail_sse = split.uncoded_tail_sse.saturating_add(sse);
+            }
+        }
+    }
+    split
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
