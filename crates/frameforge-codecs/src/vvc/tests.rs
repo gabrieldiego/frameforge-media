@@ -297,6 +297,7 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
         luma_tu_count: 1,
         chroma_tu_count: 0,
+        chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
         cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
         cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
         cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
@@ -1244,6 +1245,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
+            chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
             cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
@@ -1363,12 +1365,16 @@ fn vvc_residual_intra_mode_selector_is_shared_across_formats_and_coding_modes() 
             ] {
                 let context = VvcResidualModeDecisionContext::new(format, residual_mode);
                 assert_eq!(
-                    select_vvc_residual_luma_intra_mode(context, luma_node, 100, None),
+                    select_vvc_residual_luma_intra_mode(
+                        context,
+                        luma_node,
+                        VvcLumaIntraCandidateCosts::new(100)
+                    ),
                     VvcIntraPredictionMode::Dc
                 );
                 assert_eq!(
                     select_vvc_residual_chroma_intra_mode(context, chroma_node),
-                    VvcIntraPredictionMode::Dc
+                    VvcChromaIntraPredictionMode::Derived
                 );
             }
         }
@@ -1385,9 +1391,140 @@ fn vvc_residual_luma_selector_can_choose_planar_when_candidate_is_supplied() {
     let node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
 
     assert_eq!(
-        select_vvc_residual_luma_intra_mode(context, node, 10_000, Some(1_000)),
+        select_vvc_residual_luma_intra_mode(
+            context,
+            node,
+            VvcLumaIntraCandidateCosts::new(10_000)
+                .with_candidate(VvcIntraPredictionMode::Planar, Some(1_000))
+        ),
         VvcIntraPredictionMode::Planar
     );
+}
+
+#[test]
+fn vvc_residual_luma_selector_can_choose_angular_candidates() {
+    let format = VvcPictureFormat {
+        chroma_sampling: ChromaSampling::Cs420,
+        bit_depth: SampleBitDepth::new(8).expect("supported VVC bit depth"),
+    };
+    let context = VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossy);
+    let node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
+
+    assert_eq!(
+        select_vvc_residual_luma_intra_mode(
+            context,
+            node,
+            VvcLumaIntraCandidateCosts::new(10_000)
+                .with_candidate(VvcIntraPredictionMode::Horizontal, Some(500))
+                .with_candidate(VvcIntraPredictionMode::Vertical, Some(1_000))
+        ),
+        VvcIntraPredictionMode::Horizontal
+    );
+    assert_eq!(
+        select_vvc_residual_luma_intra_mode(
+            context,
+            node,
+            VvcLumaIntraCandidateCosts::new(10_000)
+                .with_candidate(VvcIntraPredictionMode::Horizontal, Some(1_000))
+                .with_candidate(VvcIntraPredictionMode::Vertical, Some(500))
+                .with_candidate(VvcIntraPredictionMode::Angular(34), Some(250))
+        ),
+        VvcIntraPredictionMode::Angular(34)
+    );
+}
+
+#[test]
+fn vvc_residual_chroma_selector_can_choose_explicit_candidates() {
+    let format = VvcPictureFormat {
+        chroma_sampling: ChromaSampling::Cs420,
+        bit_depth: SampleBitDepth::new(8).expect("supported VVC bit depth"),
+    };
+    let context = VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossy);
+    let node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeChroma);
+
+    assert_eq!(
+        select_vvc_residual_chroma_intra_mode_from_costs(
+            context,
+            node,
+            VvcChromaIntraCandidateCosts::new(10_000).with_candidate(
+                VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Horizontal),
+                Some(500),
+            )
+        ),
+        VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Horizontal)
+    );
+}
+
+#[test]
+fn vvc_chroma_explicit_candidates_replace_co_located_luma_mode() {
+    assert_eq!(
+        vvc_chroma_explicit_candidates(VvcIntraPredictionMode::Dc),
+        [
+            VvcIntraPredictionMode::Planar,
+            VvcIntraPredictionMode::Vertical,
+            VvcIntraPredictionMode::Horizontal,
+            VvcIntraPredictionMode::Angular(66),
+        ]
+    );
+    assert_eq!(
+        vvc_chroma_explicit_candidate_index(
+            VvcIntraPredictionMode::Dc,
+            VvcIntraPredictionMode::Vertical
+        ),
+        Some(3)
+    );
+    assert_eq!(
+        vvc_chroma_explicit_candidate_index(
+            VvcIntraPredictionMode::Vertical,
+            VvcIntraPredictionMode::Vertical
+        ),
+        None
+    );
+}
+
+#[test]
+fn vvc_chroma_explicit_default_search_uses_reference_proven_modes() {
+    assert!(vvc_residual_chroma_explicit_candidate_allowed(
+        VvcIntraPredictionMode::Planar
+    ));
+    assert!(vvc_residual_chroma_explicit_candidate_allowed(
+        VvcIntraPredictionMode::Dc
+    ));
+    assert!(vvc_residual_chroma_explicit_candidate_allowed(
+        VvcIntraPredictionMode::Horizontal
+    ));
+    assert!(vvc_residual_chroma_explicit_candidate_allowed(
+        VvcIntraPredictionMode::Vertical
+    ));
+    assert!(!vvc_residual_chroma_explicit_candidate_allowed(
+        VvcIntraPredictionMode::Angular(66)
+    ));
+}
+
+#[test]
+fn vvc_residual_luma_extra_candidates_are_lossy_only_for_now() {
+    let format = VvcPictureFormat {
+        chroma_sampling: ChromaSampling::Cs444,
+        bit_depth: SampleBitDepth::new(10).expect("supported VVC bit depth"),
+    };
+    let node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
+
+    assert!(vvc_residual_luma_planar_candidate_allowed(
+        VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossy),
+        node
+    ));
+    assert!(vvc_residual_luma_directional_candidate_allowed(
+        VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossy),
+        node
+    ));
+    assert!(!vvc_residual_luma_planar_candidate_allowed(
+        VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossless),
+        node
+    ));
+    assert!(!vvc_residual_luma_directional_candidate_allowed(
+        VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossless),
+        node
+    ));
 }
 
 #[test]
@@ -1491,6 +1628,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
             cb_dc_negative: false,
+            chroma_tu_intra_modes: [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS],
             cb_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cr_tu_dc_levels: [0; MAX_VVC_CHROMA_TUS],
             cb_tu_ac_levels: [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],
@@ -1782,7 +1920,10 @@ fn vvc_lossless_input_path_accepts_16x16_gbrp8_frames() {
         geometry,
         VvcVideoLimits::unbounded(),
         PixelFormat::Gbrp8,
-        VvcEncodeOptions { lossless: true },
+        VvcEncodeOptions {
+            lossless: true,
+            ..VvcEncodeOptions::default()
+        },
         None,
     )
     .expect("VVC gbrp8 should pass through the 4:4:4 lossless component path");
@@ -1963,7 +2104,10 @@ fn vvc_input_path_accepts_lossless_yuv420_high_depth_exact_reconstruction() {
         geometry,
         VvcVideoLimits::unbounded(),
         format,
-        VvcEncodeOptions { lossless: true },
+        VvcEncodeOptions {
+            lossless: true,
+            ..VvcEncodeOptions::default()
+        },
         None,
     )
     .expect("lossless 4:2:0 should encode");
@@ -1990,7 +2134,10 @@ fn vvc_input_path_accepts_thin_lossless_yuv420_high_depth_exact_reconstruction()
             geometry,
             VvcVideoLimits::unbounded(),
             format,
-            VvcEncodeOptions { lossless: true },
+            VvcEncodeOptions {
+                lossless: true,
+                ..VvcEncodeOptions::default()
+            },
             None,
         )
         .unwrap_or_else(|err| panic!("thin lossless {width}x{height} 4:2:0 should encode: {err}"));
@@ -2020,7 +2167,10 @@ fn vvc_input_path_accepts_lossless_yuv422_high_depth_exact_reconstruction() {
         geometry,
         VvcVideoLimits::unbounded(),
         format,
-        VvcEncodeOptions { lossless: true },
+        VvcEncodeOptions {
+            lossless: true,
+            ..VvcEncodeOptions::default()
+        },
         None,
     )
     .expect("lossless 4:2:2 should encode");
@@ -2049,7 +2199,10 @@ fn vvc_input_path_accepts_lossless_yuv444_high_depth_exact_reconstruction() {
         geometry,
         VvcVideoLimits::unbounded(),
         format,
-        VvcEncodeOptions { lossless: true },
+        VvcEncodeOptions {
+            lossless: true,
+            ..VvcEncodeOptions::default()
+        },
         None,
     )
     .expect("lossless 4:4:4 should encode");
@@ -2166,7 +2319,10 @@ fn vvc_lossless_input_path_accepts_larger_yuv420_picture() {
             max_height: 512,
         },
         PixelFormat::Yuv420p8,
-        VvcEncodeOptions { lossless: true },
+        VvcEncodeOptions {
+            lossless: true,
+            ..VvcEncodeOptions::default()
+        },
         None,
     )
     .unwrap();

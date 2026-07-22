@@ -2,14 +2,16 @@ use crate::picture::{ChromaSampling, PlanarYuvGeometry};
 
 use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_transform_nodes, vvc_luma_transform_nodes,
-    vvc_neutral_sample, VvcCtuPartitionParams, VvcSample, VvcSampledFrame,
+    vvc_neutral_sample, VvcCodingTreeNode, VvcCtuPartitionParams, VvcIntraPredictionMode,
+    VvcSample, VvcSampledFrame,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into,
-    inverse_transform_vvc_luma_quantized_block_into, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_intra_block_into, VvcDcPredictionScratch, VvcInverseTransformScratch,
-    VvcQuantizedColor,
+    inverse_transform_vvc_luma_quantized_block_into,
+    predict_vvc_chroma_intra_block_into_with_availability,
+    predict_vvc_luma_intra_block_into_with_availability, VvcDcPredictionScratch,
+    VvcInverseTransformScratch, VvcPlaneAvailability, VvcQuantizedColor, MAX_VVC_LUMA_TUS,
 };
 
 pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
@@ -43,16 +45,16 @@ fn reconstruct_vvc_residual_frame_subsampled(
     );
     let neutral = vvc_neutral_sample(frame.format.bit_depth);
     let mut luma = vec![neutral; layout.luma_samples()];
+    let mut luma_available = vec![false; layout.luma_samples()];
     let mut tu_idx = 0;
     let mut prediction_scratch = VvcDcPredictionScratch::default();
     let mut predicted_luma = Vec::new();
     let mut transform_scratch = VvcInverseTransformScratch::default();
     let mut residuals = Vec::new();
-    for node in vvc_luma_transform_nodes(
-        partition_params.shape(),
-        partition_params.luma_max_leaf_size,
-    ) {
-        predict_vvc_luma_intra_block_into(
+    let shape = partition_params.shape();
+    let luma_nodes = vvc_luma_transform_nodes(shape, partition_params.luma_max_leaf_size);
+    for node in luma_nodes.iter().copied() {
+        predict_vvc_luma_intra_block_into_with_availability(
             &mut predicted_luma,
             &mut prediction_scratch,
             quantized.luma_tu_intra_modes[tu_idx],
@@ -60,6 +62,10 @@ fn reconstruct_vvc_residual_frame_subsampled(
             frame.geometry,
             node,
             frame.format.bit_depth,
+            Some(VvcPlaneAvailability::new(
+                &luma_available,
+                frame.geometry.width,
+            )),
         );
         inverse_transform_vvc_luma_quantized_block_into(
             &mut residuals,
@@ -78,37 +84,55 @@ fn reconstruct_vvc_residual_frame_subsampled(
             &residuals,
             frame.format.bit_depth,
         );
+        mark_vvc_recon_plane_available(
+            &mut luma_available,
+            frame.geometry.width,
+            frame.geometry.height,
+            usize::from(node.x),
+            usize::from(node.y),
+            usize::from(node.width),
+            usize::from(node.height),
+        );
         tu_idx += 1;
     }
 
     let chroma_len = layout.chroma_samples();
-    let chroma_width = layout.chroma_width();
-    let chroma_height = layout.chroma_height();
+    let frame_chroma_width = layout.chroma_width();
+    let frame_chroma_height = layout.chroma_height();
     let mut cb = vec![neutral; chroma_len];
     let mut cr = vec![neutral; chroma_len];
+    let mut cb_available = vec![false; chroma_len];
+    let mut cr_available = vec![false; chroma_len];
     let chroma_sampling = frame.format.chroma_sampling;
     let mut predicted_cb = Vec::new();
     let mut predicted_cr = Vec::new();
-    for (tu_idx, node) in vvc_chroma_transform_nodes(partition_params.shape())
-        .into_iter()
-        .enumerate()
-    {
-        predict_vvc_chroma_dc_block_into(
+    for (tu_idx, node) in vvc_chroma_transform_nodes(shape).into_iter().enumerate() {
+        let prediction_mode = quantized.chroma_tu_intra_modes[tu_idx].prediction_mode(
+            vvc_co_located_luma_mode_for_chroma_node(
+                &luma_nodes,
+                &quantized.luma_tu_intra_modes,
+                partition_params.luma_tu_count,
+                node,
+            ),
+        );
+        predict_vvc_chroma_intra_block_into_with_availability(
             &mut predicted_cb,
             &mut prediction_scratch,
+            prediction_mode,
             &cb,
             frame.geometry,
             node,
             chroma_sampling,
             frame.format.bit_depth,
+            Some(VvcPlaneAvailability::new(&cb_available, frame_chroma_width)),
         );
-        let chroma_width = node.width / chroma_subsample_x(chroma_sampling) as u16;
-        let chroma_height = node.height / chroma_subsample_y(chroma_sampling) as u16;
+        let chroma_node_width = node.width / chroma_subsample_x(chroma_sampling) as u16;
+        let chroma_node_height = node.height / chroma_subsample_y(chroma_sampling) as u16;
         inverse_transform_vvc_chroma_quantized_block_into(
             &mut residuals,
             &mut transform_scratch,
-            chroma_width,
-            chroma_height,
+            chroma_node_width,
+            chroma_node_height,
             quantized.cb_tu_dc_levels[tu_idx],
             &quantized.cb_tu_ac_levels[tu_idx],
             frame.format.bit_depth,
@@ -122,20 +146,22 @@ fn reconstruct_vvc_residual_frame_subsampled(
             &residuals,
             frame.format.bit_depth,
         );
-        predict_vvc_chroma_dc_block_into(
+        predict_vvc_chroma_intra_block_into_with_availability(
             &mut predicted_cr,
             &mut prediction_scratch,
+            prediction_mode,
             &cr,
             frame.geometry,
             node,
             chroma_sampling,
             frame.format.bit_depth,
+            Some(VvcPlaneAvailability::new(&cr_available, frame_chroma_width)),
         );
         inverse_transform_vvc_chroma_quantized_block_into(
             &mut residuals,
             &mut transform_scratch,
-            chroma_width,
-            chroma_height,
+            chroma_node_width,
+            chroma_node_height,
             quantized.cr_tu_dc_levels[tu_idx],
             &quantized.cr_tu_ac_levels[tu_idx],
             frame.format.bit_depth,
@@ -149,11 +175,75 @@ fn reconstruct_vvc_residual_frame_subsampled(
             &residuals,
             frame.format.bit_depth,
         );
+        let subsample_x = chroma_subsample_x(chroma_sampling);
+        let subsample_y = chroma_subsample_y(chroma_sampling);
+        mark_vvc_recon_plane_available(
+            &mut cb_available,
+            frame_chroma_width,
+            frame_chroma_height,
+            usize::from(node.x) / subsample_x,
+            usize::from(node.y) / subsample_y,
+            usize::from(node.width) / subsample_x,
+            usize::from(node.height) / subsample_y,
+        );
+        mark_vvc_recon_plane_available(
+            &mut cr_available,
+            frame_chroma_width,
+            frame_chroma_height,
+            usize::from(node.x) / subsample_x,
+            usize::from(node.y) / subsample_y,
+            usize::from(node.width) / subsample_x,
+            usize::from(node.height) / subsample_y,
+        );
     }
 
     let mut out = Vec::with_capacity(layout.luma_samples() + chroma_len * 2);
     out.extend_from_slice(&luma);
-    out.extend_from_slice(&cb[..chroma_width * chroma_height]);
-    out.extend_from_slice(&cr[..chroma_width * chroma_height]);
+    out.extend_from_slice(&cb[..frame_chroma_width * frame_chroma_height]);
+    out.extend_from_slice(&cr[..frame_chroma_width * frame_chroma_height]);
     out
+}
+
+fn mark_vvc_recon_plane_available(
+    available: &mut [bool],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    width: usize,
+    height: usize,
+) {
+    let end_x = (start_x + width).min(plane_width);
+    let end_y = (start_y + height).min(plane_height);
+    for y in start_y..end_y {
+        let row = y * plane_width;
+        for x in start_x..end_x {
+            available[row + x] = true;
+        }
+    }
+}
+
+fn vvc_co_located_luma_mode_for_chroma_node(
+    local_luma_nodes: &[VvcCodingTreeNode],
+    luma_modes: &[VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
+    luma_tu_count: usize,
+    chroma_node: VvcCodingTreeNode,
+) -> VvcIntraPredictionMode {
+    let ref_x = chroma_node.x.saturating_add(chroma_node.width >> 1);
+    let ref_y = chroma_node.y.saturating_add(chroma_node.height >> 1);
+    for (idx, luma_node) in local_luma_nodes
+        .iter()
+        .copied()
+        .take(luma_tu_count)
+        .enumerate()
+    {
+        if ref_x >= luma_node.x
+            && ref_x < luma_node.x.saturating_add(luma_node.width)
+            && ref_y >= luma_node.y
+            && ref_y < luma_node.y.saturating_add(luma_node.height)
+        {
+            return luma_modes[idx];
+        }
+    }
+    VvcIntraPredictionMode::Dc
 }

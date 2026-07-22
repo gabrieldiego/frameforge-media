@@ -11,8 +11,9 @@ pub mod pipeline;
 
 pub use error::{MediaError, Result};
 pub use frame::{
-    convert_planar_frame_bit_depth, planar_sample_sse, read_planar_sample, scale_sample_bit_depth,
-    write_planar_sample, ChromaSampling, Frame, FrameInfo, PixelFormat, SampleBitDepth,
+    convert_frame_format, convert_planar_frame_bit_depth, planar_sample_sse, read_planar_sample,
+    scale_sample_bit_depth, write_planar_sample, ChromaSampling, Frame, FrameInfo, PixelFormat,
+    SampleBitDepth,
 };
 pub use packet::{Packet, StreamId, Timestamp};
 pub use pipeline::{Decoder, Encoder, Filter, Sink, Source};

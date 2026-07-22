@@ -1583,6 +1583,115 @@ cargo test -p frameforge-codecs --features "vvc vvc-stats"
 
 Results: both VVC test builds passed with 122 tests.
 
+## VVC Intra Feature Plumbing
+
+Checkpoint: `vvc-intra-feature-default`.
+
+Changes retained:
+
+- VVC now accepts CLI `--qp` and maps it into the emitted slice QP. Chroma QP
+  follows the existing VVC lossy chroma offset, preserving the old default when
+  `--qp` is omitted.
+- Packed `rgb24` source handling moved into the common frame conversion layer.
+  AV2 and VVC now use the same reversible `rgb24` <-> planar `gbrp8`
+  conversion at the CLI boundary, while codec internals continue to consume
+  native planar frames.
+- VVC compile-gated instrumentation now includes frame-level stage stats and a
+  CTU bit JSONL sink through `FRAMEFORGE_VVC_STATS` and
+  `FRAMEFORGE_VVC_CTU_BITS`.
+- VVC luma intra mode selection now uses a shared candidate-cost path and can
+  select horizontal and vertical prediction in addition to DC and planar.
+- Generic VVC `Angular(index)` prediction and CABAC mode signalling are wired
+  as infrastructure, but non-cardinal angular modes are not selected by
+  default yet. The first probe produced mixed bitrate results, so the default
+  selector remains on the smaller H/V candidate set until reference filtering
+  and rate-aware selection are implemented.
+
+First-frame VVC lossy deltas versus the previous default-DC/planar checkpoint:
+
+| Vector | Format | Bytes delta | FPS delta | PSNR delta |
+|---|---|---:|---:|---:|
+| SceneComposition_1_420 | yuv420p8 | -12,639 | +0.02 | +0.088 |
+| SceneComposition_1_422 | yuv422p8 | -12,639 | -0.02 | +0.066 |
+| Wayland screen capture | rgb24 | -23,391 | +0.00 | +0.059 |
+| MissionControlClip1_420 | yuv420p10le | +2,110 | +0.05 | +0.087 |
+| MissionControlClip1_422 | yuv422p10le | +2,108 | +0.04 | +0.053 |
+| MissionControlClip1_444 | yuv444p10le | +2,102 | -0.01 | +0.030 |
+
+Current six-vector comparison, first frame only. Bytes are summed across the
+six rows; FPS and PSNR are unweighted row averages, with full per-vector rows
+kept in the generated report.
+
+| Codec | Mode | Total bytes | Avg FPS | Avg PSNR |
+|---|---|---:|---:|---:|
+| AV2 | lossless | 6,586,445 | 3.04 | inf |
+| AV2 | qp=24 | 2,400,148 | 1.33 | 49.418 |
+| VVC | lossless | 10,659,047 | 1.96 | inf |
+| VVC | qp=24 | 9,198,820 | 0.64 | 18.371 |
+
+Current six-vector comparison, 50 frames:
+
+| Codec | Mode | Total bytes | Avg FPS | Avg PSNR |
+|---|---|---:|---:|---:|
+| AV2 | lossless | 83,531,302 | 8.83 | inf |
+| AV2 | qp=24 | 41,098,794 | 4.83 | 51.805 |
+| VVC | lossless | 545,598,292 | 1.86 | inf |
+| VVC | qp=24 | 463,160,046 | 0.65 | 18.394 |
+
+Matrix commands:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-intra-feature-default-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-intra-feature-default-50f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy"
+```
+
+Generated reports:
+
+```text
+verification/generated/encode_matrix/vvc-intra-feature-default-1f.md
+verification/generated/encode_matrix/vvc-intra-feature-default-50f.md
+```
+
+Instrumentation smoke command:
+
+```sh
+make build VVC_STATS=1
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_stats_probe.jsonl \
+FRAMEFORGE_VVC_CTU_BITS=verification/generated/profiling/vvc_ctu_bits_probe.jsonl \
+  ./ff encode \
+  verification/generated/test_vectors/aomctc_b2_SceneComposition_1_420_1920x1080_15_1f_yuv420p8.yuv \
+  --frames 1 \
+  --encode vvc:verification/generated/profiling/vvc_stats_probe.obu \
+  --recon verification/generated/profiling/vvc_stats_probe.recon \
+  --qp 24
+```
+
+Validation:
+
+```sh
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+cargo test -p frameforge-core --features ""
+cargo test -p frameforge-cli encode_job \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale"
+cargo test -p frameforge-codecs vvc --features "vvc"
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
+```
+
+Results: all commands completed successfully. The geometry sweep covered AV2
+and VVC, lossless and lossy, across the current screenshot sweep manifests.
+
 ## References
 
 - Cargo profile settings:

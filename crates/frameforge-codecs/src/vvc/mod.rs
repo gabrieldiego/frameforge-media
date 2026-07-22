@@ -67,9 +67,10 @@ pub use residual::quantize_vvc_color;
 #[cfg(test)]
 use residual::VVC_LUMA_DC_BASE;
 use residual::{
-    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction, VvcQuantizedColor,
-    VvcResidualCabacOptions, VvcResidualComponent, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS,
-    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_LUMA_AC_COEFFS_PER_TU,
+    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp,
+    VvcPlaneAvailability, VvcQuantizedColor, VvcResidualCabacOptions, VvcResidualComponent,
+    MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_DEFAULT_LOSSY_CHROMA_QP,
+    VVC_DEFAULT_LOSSY_LUMA_QP, VVC_LUMA_AC_COEFFS_PER_TU,
 };
 #[cfg(test)]
 use residual::{VvcResidualCabacEncoder, VvcResidualCtxConfig, VvcResidualPass1State};
@@ -140,6 +141,7 @@ impl VvcEncodeRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VvcEncodeOptions {
     pub lossless: bool,
+    pub qp: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,10 +170,15 @@ struct VvcStatsSink {
 }
 
 #[cfg(feature = "vvc-stats")]
+const VVC_STATS_ENV: &str = "FRAMEFORGE_VVC_STATS";
+#[cfg(feature = "vvc-stats")]
+const VVC_CTU_BITS_ENV: &str = "FRAMEFORGE_VVC_CTU_BITS";
+
+#[cfg(feature = "vvc-stats")]
 impl VvcStatsSink {
     fn from_env() -> Result<Self, String> {
         Ok(Self {
-            sink: JsonlInstrumentationSink::append_from_env("FRAMEFORGE_VVC_STATS")
+            sink: JsonlInstrumentationSink::append_from_env(VVC_STATS_ENV)
                 .map_err(|err| err.to_string())?,
         })
     }
@@ -194,6 +201,8 @@ struct VvcFrameStats {
     chroma_sampling: ChromaSampling,
     bit_depth: SampleBitDepth,
     lossless: bool,
+    slice_qp: i32,
+    chroma_qp: i32,
     ctu_count: usize,
     bitstream_bytes: usize,
     stages: Vec<VvcStageStats>,
@@ -207,6 +216,8 @@ impl VvcFrameStats {
         geometry: VvcVideoGeometry,
         format: VvcPictureFormat,
         lossless: bool,
+        slice_qp: i32,
+        chroma_qp: i32,
     ) -> Self {
         Self {
             frame_idx,
@@ -215,6 +226,8 @@ impl VvcFrameStats {
             chroma_sampling: format.chroma_sampling,
             bit_depth: format.bit_depth,
             lossless,
+            slice_qp,
+            chroma_qp,
             ctu_count: vvc_picture_ctu_count(geometry),
             bitstream_bytes: 0,
             stages: Vec::new(),
@@ -253,13 +266,15 @@ impl VvcFrameStats {
 
     fn to_json_line(&self) -> String {
         let mut json = format!(
-            "{{\"kind\":\"frameforge.vvc.stats.v1\",\"frame_index\":{},\"width\":{},\"height\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"ctu_count\":{},\"bitstream_bytes\":{},\"stages\":[",
+            "{{\"kind\":\"frameforge.vvc.stats.v1\",\"frame_index\":{},\"width\":{},\"height\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"ctu_count\":{},\"bitstream_bytes\":{},\"stages\":[",
             self.frame_idx,
             self.width,
             self.height,
             self.chroma_sampling,
             self.bit_depth.bits(),
             self.lossless,
+            self.slice_qp,
+            self.chroma_qp,
             self.ctu_count,
             self.bitstream_bytes
         );
@@ -298,6 +313,90 @@ struct VvcStageStats {
 struct VvcCounterStats {
     name: &'static str,
     value: u64,
+}
+
+#[cfg(feature = "vvc-stats")]
+struct VvcCtuBitSink {
+    sink: Option<JsonlInstrumentationSink>,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcCtuBitSink {
+    fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            sink: JsonlInstrumentationSink::append_from_env(VVC_CTU_BITS_ENV)
+                .map_err(|err| err.to_string())?,
+        })
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    fn write_ctu(
+        &mut self,
+        frame_idx: usize,
+        region: VvcCtuRegion,
+        format: VvcPictureFormat,
+        lossless: bool,
+        slice_qp: i32,
+        chroma_qp: i32,
+        quantized: &VvcQuantizedColor,
+        luma_max_leaf_size: u16,
+        slice_config: VvcSliceSyntaxConfig,
+    ) -> Result<(), String> {
+        let Some(sink) = self.sink.as_mut() else {
+            return Ok(());
+        };
+        let Some(params) = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+            region.geometry,
+            quantized.clone(),
+            luma_max_leaf_size,
+            slice_config.coding_tree.chroma_sampling,
+            slice_config.coding_tree.dual_tree_intra,
+        ) else {
+            return Ok(());
+        };
+        let dump = vvc_ctu_partition_cabac_dump(&params, slice_config);
+        let luma_modes = vvc_luma_mode_counts(quantized);
+        let chroma_modes = vvc_chroma_mode_counts(quantized);
+        let line = format!(
+            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
+            frame_idx,
+            region.slice_address,
+            region.origin_x / VVC_CTU_SIZE,
+            region.origin_y / VVC_CTU_SIZE,
+            region.origin_x,
+            region.origin_y,
+            region.geometry.width,
+            region.geometry.height,
+            VVC_CTU_SIZE,
+            format.chroma_sampling,
+            format.bit_depth.bits(),
+            lossless,
+            slice_qp,
+            chroma_qp,
+            quantized.luma_tu_count,
+            quantized.chroma_tu_count,
+            luma_modes.dc,
+            luma_modes.planar,
+            luma_modes.horizontal,
+            luma_modes.vertical,
+            luma_modes.angular,
+            chroma_modes.derived,
+            chroma_modes.dc,
+            chroma_modes.planar,
+            chroma_modes.horizontal,
+            chroma_modes.vertical,
+            chroma_modes.angular,
+            dump.context_bin_count,
+            dump.semantic_symbols.len(),
+            dump.bin_engine_events.len(),
+            dump.bits.len(),
+        );
+        sink.write_json_line(&line).map_err(|err| err.to_string())?;
+        sink.flush().map_err(|err| err.to_string())
+    }
 }
 
 /// Luma coded-picture dimensions are rounded to this granularity before SPS/PPS
@@ -468,6 +567,19 @@ pub(in crate::vvc) struct VvcQuantizedCtu {
 fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuantizedColor) {
     stats.add_counter("luma_tu_count", quantized.luma_tu_count as u64);
     stats.add_counter("chroma_tu_count", quantized.chroma_tu_count as u64);
+    let modes = vvc_luma_mode_counts(quantized);
+    stats.add_counter("luma_mode_dc", modes.dc as u64);
+    stats.add_counter("luma_mode_planar", modes.planar as u64);
+    stats.add_counter("luma_mode_horizontal", modes.horizontal as u64);
+    stats.add_counter("luma_mode_vertical", modes.vertical as u64);
+    stats.add_counter("luma_mode_angular", modes.angular as u64);
+    let chroma_modes = vvc_chroma_mode_counts(quantized);
+    stats.add_counter("chroma_mode_derived", chroma_modes.derived as u64);
+    stats.add_counter("chroma_mode_dc", chroma_modes.dc as u64);
+    stats.add_counter("chroma_mode_planar", chroma_modes.planar as u64);
+    stats.add_counter("chroma_mode_horizontal", chroma_modes.horizontal as u64);
+    stats.add_counter("chroma_mode_vertical", chroma_modes.vertical as u64);
+    stats.add_counter("chroma_mode_angular", chroma_modes.angular as u64);
     for idx in 0..quantized.luma_tu_count {
         let dc_nonzero = quantized.luma_tu_dc_levels[idx] != 0;
         let ac_nonzero = quantized.luma_tu_ac_levels[idx]
@@ -510,6 +622,66 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
     }
 }
 
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Clone, Copy, Default)]
+struct VvcLumaModeCounts {
+    dc: usize,
+    planar: usize,
+    horizontal: usize,
+    vertical: usize,
+    angular: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_luma_mode_counts(quantized: &VvcQuantizedColor) -> VvcLumaModeCounts {
+    let mut counts = VvcLumaModeCounts::default();
+    for idx in 0..quantized.luma_tu_count {
+        match quantized.luma_tu_intra_modes[idx] {
+            VvcIntraPredictionMode::Dc => counts.dc += 1,
+            VvcIntraPredictionMode::Planar => counts.planar += 1,
+            VvcIntraPredictionMode::Horizontal => counts.horizontal += 1,
+            VvcIntraPredictionMode::Vertical => counts.vertical += 1,
+            VvcIntraPredictionMode::Angular(_) => counts.angular += 1,
+        }
+    }
+    counts
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Clone, Copy, Default)]
+struct VvcChromaModeCounts {
+    derived: usize,
+    dc: usize,
+    planar: usize,
+    horizontal: usize,
+    vertical: usize,
+    angular: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_chroma_mode_counts(quantized: &VvcQuantizedColor) -> VvcChromaModeCounts {
+    let mut counts = VvcChromaModeCounts::default();
+    for idx in 0..quantized.chroma_tu_count {
+        match quantized.chroma_tu_intra_modes[idx] {
+            VvcChromaIntraPredictionMode::Derived => counts.derived += 1,
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Dc) => counts.dc += 1,
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Planar) => {
+                counts.planar += 1
+            }
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Horizontal) => {
+                counts.horizontal += 1
+            }
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Vertical) => {
+                counts.vertical += 1
+            }
+            VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Angular(_)) => {
+                counts.angular += 1
+            }
+        }
+    }
+    counts
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VvcReconstructionFrame {
     geometry: VvcVideoGeometry,
@@ -517,6 +689,9 @@ struct VvcReconstructionFrame {
     luma: Vec<VvcSample>,
     cb: Vec<VvcSample>,
     cr: Vec<VvcSample>,
+    luma_available: Vec<bool>,
+    cb_available: Vec<bool>,
+    cr_available: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,9 +929,14 @@ impl VvcResidualCodingMode {
         }
     }
 
-    fn slice_config(self, stream_format: VvcPictureFormat) -> VvcSliceSyntaxConfig {
+    fn slice_config(self, stream_format: VvcPictureFormat, qp: Option<u8>) -> VvcSliceSyntaxConfig {
         match self {
-            Self::Lossy => VvcSliceSyntaxConfig::residual_lossy(stream_format.chroma_sampling),
+            Self::Lossy => {
+                let mut config =
+                    VvcSliceSyntaxConfig::residual_lossy(stream_format.chroma_sampling);
+                config.slice_qp = vvc_lossy_slice_qp(qp);
+                config
+            }
             Self::Lossless => VvcSliceSyntaxConfig::residual_lossless(
                 stream_format.chroma_sampling,
                 stream_format.bit_depth,
@@ -786,6 +966,207 @@ impl VvcResidualCodingMode {
 pub(in crate::vvc) enum VvcIntraPredictionMode {
     Planar,
     Dc,
+    Horizontal,
+    Vertical,
+    #[allow(dead_code)]
+    Angular(u8),
+}
+
+impl VvcIntraPredictionMode {
+    const fn luma_mode_index(self) -> u8 {
+        match self {
+            Self::Planar => 0,
+            Self::Dc => 1,
+            Self::Horizontal => 18,
+            Self::Vertical => 50,
+            Self::Angular(index) => index,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcChromaIntraPredictionMode {
+    Derived,
+    Explicit(VvcIntraPredictionMode),
+}
+
+impl VvcChromaIntraPredictionMode {
+    pub(in crate::vvc) const fn prediction_mode(
+        self,
+        co_located_luma_mode: VvcIntraPredictionMode,
+    ) -> VvcIntraPredictionMode {
+        match self {
+            Self::Derived => co_located_luma_mode,
+            Self::Explicit(mode) => mode,
+        }
+    }
+}
+
+// Non-cardinal `Angular(index)` prediction and syntax are wired, but those
+// modes need reference filtering and rate-aware selection before becoming a
+// default search set. H/V are broadly useful with the current SAD selector.
+const VVC_LOSSY_LUMA_ANGULAR_CANDIDATES: [VvcIntraPredictionMode; 2] = [
+    VvcIntraPredictionMode::Horizontal,
+    VvcIntraPredictionMode::Vertical,
+];
+
+const VVC_CHROMA_EXPLICIT_MODE_COUNT: usize = 4;
+const VVC_CHROMA_VDIA_REPLACEMENT_MODE: VvcIntraPredictionMode =
+    VvcIntraPredictionMode::Angular(66);
+
+pub(in crate::vvc) fn vvc_chroma_explicit_candidates(
+    co_located_luma_mode: VvcIntraPredictionMode,
+) -> [VvcIntraPredictionMode; VVC_CHROMA_EXPLICIT_MODE_COUNT] {
+    let mut modes = [
+        VvcIntraPredictionMode::Planar,
+        VvcIntraPredictionMode::Vertical,
+        VvcIntraPredictionMode::Horizontal,
+        VvcIntraPredictionMode::Dc,
+    ];
+    let luma_mode_index = co_located_luma_mode.luma_mode_index();
+    let mut idx = 0;
+    while idx < modes.len() {
+        if modes[idx].luma_mode_index() == luma_mode_index {
+            modes[idx] = VVC_CHROMA_VDIA_REPLACEMENT_MODE;
+            break;
+        }
+        idx += 1;
+    }
+    modes
+}
+
+pub(in crate::vvc) fn vvc_chroma_explicit_candidate_index(
+    mode: VvcIntraPredictionMode,
+    co_located_luma_mode: VvcIntraPredictionMode,
+) -> Option<u8> {
+    let modes = vvc_chroma_explicit_candidates(co_located_luma_mode);
+    modes
+        .iter()
+        .position(|candidate| candidate.luma_mode_index() == mode.luma_mode_index())
+        .map(|index| index as u8)
+}
+
+pub(in crate::vvc) fn vvc_residual_chroma_explicit_candidate_allowed(
+    mode: VvcIntraPredictionMode,
+) -> bool {
+    match mode {
+        VvcIntraPredictionMode::Planar
+        | VvcIntraPredictionMode::Horizontal
+        | VvcIntraPredictionMode::Vertical => true,
+        VvcIntraPredictionMode::Dc => true,
+        // TODO: enable non-cardinal Angular after its prediction and
+        // reference-sample handling are VTM-exact.
+        VvcIntraPredictionMode::Angular(_) => false,
+    }
+}
+
+const VVC_LUMA_INTRA_CANDIDATE_CAPACITY: usize = 8;
+const VVC_CHROMA_INTRA_CANDIDATE_CAPACITY: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcLumaIntraCandidateCost {
+    mode: VvcIntraPredictionMode,
+    sad: u64,
+}
+
+impl VvcLumaIntraCandidateCost {
+    const fn new(mode: VvcIntraPredictionMode, sad: u64) -> Self {
+        Self { mode, sad }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcLumaIntraCandidateCosts {
+    candidates: [VvcLumaIntraCandidateCost; VVC_LUMA_INTRA_CANDIDATE_CAPACITY],
+    count: usize,
+}
+
+impl VvcLumaIntraCandidateCosts {
+    pub(in crate::vvc) const fn new(dc_sad: u64) -> Self {
+        Self {
+            candidates: [VvcLumaIntraCandidateCost::new(VvcIntraPredictionMode::Dc, 0);
+                VVC_LUMA_INTRA_CANDIDATE_CAPACITY],
+            count: 1,
+        }
+        .with_required_candidate(VvcIntraPredictionMode::Dc, dc_sad)
+    }
+
+    const fn with_required_candidate(mut self, mode: VvcIntraPredictionMode, sad: u64) -> Self {
+        self.candidates[self.count - 1] = VvcLumaIntraCandidateCost::new(mode, sad);
+        self
+    }
+
+    pub(in crate::vvc) fn with_candidate(
+        mut self,
+        mode: VvcIntraPredictionMode,
+        sad: Option<u64>,
+    ) -> Self {
+        if let Some(sad) = sad {
+            assert!(self.count < self.candidates.len());
+            self.candidates[self.count] = VvcLumaIntraCandidateCost::new(mode, sad);
+            self.count += 1;
+        }
+        self
+    }
+
+    fn iter(self) -> impl Iterator<Item = VvcLumaIntraCandidateCost> {
+        self.candidates.into_iter().take(self.count)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcChromaIntraCandidateCost {
+    mode: VvcChromaIntraPredictionMode,
+    sad: u64,
+}
+
+impl VvcChromaIntraCandidateCost {
+    const fn new(mode: VvcChromaIntraPredictionMode, sad: u64) -> Self {
+        Self { mode, sad }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) struct VvcChromaIntraCandidateCosts {
+    candidates: [VvcChromaIntraCandidateCost; VVC_CHROMA_INTRA_CANDIDATE_CAPACITY],
+    count: usize,
+}
+
+impl VvcChromaIntraCandidateCosts {
+    pub(in crate::vvc) const fn new(derived_sad: u64) -> Self {
+        Self {
+            candidates: [VvcChromaIntraCandidateCost::new(VvcChromaIntraPredictionMode::Derived, 0);
+                VVC_CHROMA_INTRA_CANDIDATE_CAPACITY],
+            count: 1,
+        }
+        .with_required_candidate(VvcChromaIntraPredictionMode::Derived, derived_sad)
+    }
+
+    const fn with_required_candidate(
+        mut self,
+        mode: VvcChromaIntraPredictionMode,
+        sad: u64,
+    ) -> Self {
+        self.candidates[self.count - 1] = VvcChromaIntraCandidateCost::new(mode, sad);
+        self
+    }
+
+    pub(in crate::vvc) fn with_candidate(
+        mut self,
+        mode: VvcChromaIntraPredictionMode,
+        sad: Option<u64>,
+    ) -> Self {
+        if let Some(sad) = sad {
+            assert!(self.count < self.candidates.len());
+            self.candidates[self.count] = VvcChromaIntraCandidateCost::new(mode, sad);
+            self.count += 1;
+        }
+        self
+    }
+
+    fn iter(self) -> impl Iterator<Item = VvcChromaIntraCandidateCost> {
+        self.candidates.into_iter().take(self.count)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -821,44 +1202,70 @@ impl VvcResidualModeDecisionContext {
 pub(in crate::vvc) fn select_vvc_residual_luma_intra_mode(
     context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
-    dc_sad: u64,
-    planar_sad: Option<u64>,
+    costs: VvcLumaIntraCandidateCosts,
 ) -> VvcIntraPredictionMode {
-    if let Some(planar_sad) = planar_sad {
-        let samples = u64::from(node.width) * u64::from(node.height);
-        let bit_depth_margin = u64::from(context.bit_depth().bits().saturating_sub(7));
-        let absolute_margin = samples.saturating_mul(bit_depth_margin.max(1));
-        if planar_sad
-            .saturating_mul(100)
-            .saturating_add(absolute_margin)
-            < dc_sad.saturating_mul(96)
-        {
-            return VvcIntraPredictionMode::Planar;
+    let _selector_scope = (
+        context.chroma_sampling(),
+        context.bit_depth(),
+        node.width,
+        node.height,
+    );
+    let mut best_mode = VvcIntraPredictionMode::Dc;
+    let mut best_sad = u64::MAX;
+    for candidate in costs.iter() {
+        if candidate.sad < best_sad {
+            best_sad = candidate.sad;
+            best_mode = candidate.mode;
         }
     }
-    VvcIntraPredictionMode::Dc
+    best_mode
 }
 
 pub(in crate::vvc) fn vvc_residual_luma_planar_candidate_allowed(
     context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
 ) -> bool {
-    let _candidate_scope = (
-        context.chroma_sampling(),
-        context.bit_depth(),
-        context.is_lossless(),
-        node.width,
-        node.height,
-    );
-    // TODO: Re-enable Planar candidate generation once FrameForge's luma
-    // reference filtering and PDPC path is reference-decoder bit-exact.
-    false
+    let _candidate_scope = (context.chroma_sampling(), context.bit_depth());
+    if context.is_lossless() {
+        return false;
+    }
+    node.width >= 4
+        && node.height >= 4
+        && node.width.is_power_of_two()
+        && node.height.is_power_of_two()
 }
 
+pub(in crate::vvc) fn vvc_residual_luma_directional_candidate_allowed(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+) -> bool {
+    let _candidate_scope = (context.chroma_sampling(), context.bit_depth());
+    if context.is_lossless() {
+        return false;
+    }
+    node.width >= 4
+        && node.height >= 4
+        && node.width.is_power_of_two()
+        && node.height.is_power_of_two()
+}
+
+#[cfg(test)]
 pub(in crate::vvc) fn select_vvc_residual_chroma_intra_mode(
     context: VvcResidualModeDecisionContext,
     node: VvcCodingTreeNode,
-) -> VvcIntraPredictionMode {
+) -> VvcChromaIntraPredictionMode {
+    select_vvc_residual_chroma_intra_mode_from_costs(
+        context,
+        node,
+        VvcChromaIntraCandidateCosts::new(0),
+    )
+}
+
+pub(in crate::vvc) fn select_vvc_residual_chroma_intra_mode_from_costs(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    costs: VvcChromaIntraCandidateCosts,
+) -> VvcChromaIntraPredictionMode {
     let _candidate_scope = (
         context.chroma_sampling(),
         context.bit_depth(),
@@ -866,11 +1273,30 @@ pub(in crate::vvc) fn select_vvc_residual_chroma_intra_mode(
         node.width,
         node.height,
     );
-    VvcIntraPredictionMode::Dc
+    let mut best_mode = VvcChromaIntraPredictionMode::Derived;
+    let mut best_sad = u64::MAX;
+    for candidate in costs.iter() {
+        if candidate.sad < best_sad {
+            best_sad = candidate.sad;
+            best_mode = candidate.mode;
+        }
+    }
+    best_mode
 }
 
 fn vvc_lossless_slice_qp(bit_depth: SampleBitDepth) -> i32 {
     -((i32::from(bit_depth.bits()) - 8) * 6)
+}
+
+fn vvc_lossy_slice_qp(qp: Option<u8>) -> i32 {
+    qp.map_or(VVC_DEFAULT_LOSSY_LUMA_QP, |qp| i32::from(qp).clamp(1, 63))
+}
+
+fn vvc_lossy_chroma_qp_for_slice_qp(slice_qp: i32) -> i32 {
+    if slice_qp == VVC_DEFAULT_LOSSY_LUMA_QP {
+        return VVC_DEFAULT_LOSSY_CHROMA_QP;
+    }
+    (slice_qp + (VVC_DEFAULT_LOSSY_CHROMA_QP - VVC_DEFAULT_LOSSY_LUMA_QP)).clamp(0, 63)
 }
 
 #[cfg(test)]
@@ -1202,8 +1628,12 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     )?;
     let frame_len = stream_layout.frame_len();
     let residual_mode = VvcResidualCodingMode::for_encode_options(options);
-    let slice_config =
-        vvc_slice_config_for_input_format(residual_mode.slice_config(stream_format), format);
+    let slice_config = vvc_slice_config_for_input_format(
+        residual_mode.slice_config(stream_format, options.qp),
+        format,
+    );
+    let luma_qp = slice_config.slice_qp.clamp(0, 63);
+    let chroma_qp = vvc_lossy_chroma_qp_for_slice_qp(luma_qp);
     let picture_partitioning = residual_mode.picture_partitioning();
     write_annex_b_to(
         bitstream,
@@ -1215,13 +1645,21 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
 
     #[cfg(feature = "vvc-stats")]
     let mut vvc_stats = VvcStatsSink::from_env()?;
+    #[cfg(feature = "vvc-stats")]
+    let mut vvc_ctu_bits = VvcCtuBitSink::from_env()?;
 
     let mut frame_buf = vec![0; frame_len];
     let mut frame_idx = 0usize;
     while frame_limit.should_read(frame_idx) {
         #[cfg(feature = "vvc-stats")]
-        let mut frame_stats =
-            VvcFrameStats::new(frame_idx, geometry, stream_format, options.lossless);
+        let mut frame_stats = VvcFrameStats::new(
+            frame_idx,
+            geometry,
+            stream_format,
+            options.lossless,
+            slice_config.slice_qp,
+            chroma_qp,
+        );
         #[cfg(feature = "vvc-stats")]
         {
             frame_stats.add_counter(
@@ -1266,14 +1704,30 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 for region in vvc_ctu_regions(geometry) {
                     #[cfg(feature = "vvc-stats")]
                     let stage_start = Instant::now();
-                    let quantized = quantize_vvc_residual_ctu_into_frame_reconstruction(
+                    let quantized = quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp(
                         &source_frame,
                         &mut frame_recon,
                         region,
                         residual_mode,
+                        luma_qp,
+                        chroma_qp,
                     );
                     #[cfg(feature = "vvc-stats")]
                     add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
+                    #[cfg(feature = "vvc-stats")]
+                    if vvc_ctu_bits.is_enabled() {
+                        vvc_ctu_bits.write_ctu(
+                            frame_idx,
+                            region,
+                            stream_format,
+                            options.lossless,
+                            slice_config.slice_qp,
+                            chroma_qp,
+                            &quantized,
+                            residual_mode.luma_max_leaf_size(),
+                            slice_config,
+                        )?;
+                    }
                     #[cfg(feature = "vvc-stats")]
                     frame_stats.add_elapsed("ctu_quantize", stage_start);
                     frame_ctus.push(VvcQuantizedCtu {
@@ -1390,7 +1844,71 @@ impl VvcReconstructionFrame {
             luma: vec![neutral; layout.luma_samples()],
             cb: vec![neutral; layout.chroma_samples()],
             cr: vec![neutral; layout.chroma_samples()],
+            luma_available: vec![false; layout.luma_samples()],
+            cb_available: vec![false; layout.chroma_samples()],
+            cr_available: vec![false; layout.chroma_samples()],
         }
+    }
+
+    fn luma_availability(&self) -> VvcPlaneAvailability<'_> {
+        VvcPlaneAvailability::new(&self.luma_available, self.geometry.width)
+    }
+
+    fn cb_availability(&self) -> VvcPlaneAvailability<'_> {
+        VvcPlaneAvailability::new(&self.cb_available, self.chroma_width())
+    }
+
+    fn cr_availability(&self) -> VvcPlaneAvailability<'_> {
+        VvcPlaneAvailability::new(&self.cr_available, self.chroma_width())
+    }
+
+    fn mark_luma_node_available(&mut self, node: VvcCodingTreeNode) {
+        mark_vvc_plane_node_available(
+            &mut self.luma_available,
+            self.geometry.width,
+            self.geometry.height,
+            usize::from(node.x),
+            usize::from(node.y),
+            usize::from(node.width),
+            usize::from(node.height),
+        );
+    }
+
+    fn mark_chroma_node_available(&mut self, node: VvcCodingTreeNode) {
+        let subsample_x = chroma_subsample_x(self.format.chroma_sampling);
+        let subsample_y = chroma_subsample_y(self.format.chroma_sampling);
+        let chroma_width = self.chroma_width();
+        let chroma_height = self.chroma_height();
+        let x = usize::from(node.x) / subsample_x;
+        let y = usize::from(node.y) / subsample_y;
+        let width = usize::from(node.width) / subsample_x;
+        let height = usize::from(node.height) / subsample_y;
+        mark_vvc_plane_node_available(
+            &mut self.cb_available,
+            chroma_width,
+            chroma_height,
+            x,
+            y,
+            width,
+            height,
+        );
+        mark_vvc_plane_node_available(
+            &mut self.cr_available,
+            chroma_width,
+            chroma_height,
+            x,
+            y,
+            width,
+            height,
+        );
+    }
+
+    fn chroma_width(&self) -> usize {
+        self.geometry.width / chroma_subsample_x(self.format.chroma_sampling)
+    }
+
+    fn chroma_height(&self) -> usize {
+        self.geometry.height / chroma_subsample_y(self.format.chroma_sampling)
     }
 
     fn into_yuv(self) -> Vec<u8> {
@@ -1406,6 +1924,25 @@ impl VvcReconstructionFrame {
         pack_planar_samples(&self.cb, cb_plane, self.format.bit_depth);
         pack_planar_samples(&self.cr, cr_plane, self.format.bit_depth);
         output
+    }
+}
+
+fn mark_vvc_plane_node_available(
+    available: &mut [bool],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    width: usize,
+    height: usize,
+) {
+    let end_x = (start_x + width).min(plane_width);
+    let end_y = (start_y + height).min(plane_height);
+    for y in start_y..end_y {
+        let row = y * plane_width;
+        for x in start_x..end_x {
+            available[row + x] = true;
+        }
     }
 }
 
@@ -1888,6 +2425,12 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
     } else {
         vvc_chroma_transform_nodes(shape).len()
     };
+    let mut chroma_tu_intra_modes = color.chroma_tu_intra_modes;
+    if color.chroma_tu_count <= 1 {
+        for idx in 0..chroma_tu_count.min(MAX_VVC_CHROMA_TUS) {
+            chroma_tu_intra_modes[idx] = color.chroma_tu_intra_modes[0];
+        }
+    }
     let (
         luma_tu_count,
         luma_tu_intra_modes,
@@ -1921,6 +2464,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_has_ac,
         cb_dc_abs_level: color.cb_rem,
         cb_dc_negative: color.u < 128 && color.cb_rem != 0,
+        chroma_tu_intra_modes,
         cb_tu_dc_levels: color.cb_tu_dc_levels,
         cr_tu_dc_levels: color.cr_tu_dc_levels,
         cb_tu_ac_levels: color.cb_tu_ac_levels,

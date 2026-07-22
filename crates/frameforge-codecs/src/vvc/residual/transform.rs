@@ -11,8 +11,8 @@ pub(in crate::vvc) const VVC_LUMA_DC_BASE: i16 = 114;
 pub(in crate::vvc) const VVC_CHROMA_DC_BASE: i16 = 128;
 const VVC_LUMA_DC_NUM: i32 = 5;
 const VVC_LUMA_DC_DEN: i32 = 16;
-const VVC_LUMA_QP: i32 = 32;
-const VVC_CHROMA_QP: i32 = 34;
+pub(in crate::vvc) const VVC_DEFAULT_LOSSY_LUMA_QP: i32 = 32;
+pub(in crate::vvc) const VVC_DEFAULT_LOSSY_CHROMA_QP: i32 = 34;
 const VVC_LUMA_AC_HADAMARD_QUANT_SHIFT: u32 = 8;
 const VVC_CHROMA_AC_QUANT_SHIFT_FOR_8X8: i32 = 19;
 const VVC_LUMA_AC_LEVEL_LIMIT: i16 = 2;
@@ -100,23 +100,41 @@ pub(in crate::vvc) fn transform_vvc_tu(
     }
 }
 
+#[cfg(test)]
 pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy(
     residuals: &[i16],
     width: u16,
     height: u16,
     bit_depth: SampleBitDepth,
 ) -> VvcQuantizedTransformBlock {
+    quantize_vvc_luma_residual_greedy_with_qp(
+        residuals,
+        width,
+        height,
+        bit_depth,
+        VVC_DEFAULT_LOSSY_LUMA_QP,
+    )
+}
+
+pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    qp: i32,
+) -> VvcQuantizedTransformBlock {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
+    debug_assert!((0..=63).contains(&qp));
 
-    let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth);
+    let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth, qp);
 
     // H.266 7.3.11.10 transform_unit() can carry all AC coefficients. The
     // current luma subset keeps the full first 4x4 coefficient group so the
     // residual syntax remains ready for the next transform expansion.
-    let (ac_coeffs, has_ac) = quantize_direct_luma_ac_coeffs(residuals, width, height);
+    let (ac_coeffs, has_ac) = quantize_direct_luma_ac_coeffs(residuals, width, height, qp);
     VvcQuantizedTransformBlock {
         reconstructed_dc_coeff: dc_level,
         reconstructed_ac_coeffs: ac_coeffs,
@@ -130,10 +148,11 @@ fn quantize_vvc_luma_residual_dc_by_search(
     width: u16,
     height: u16,
     bit_depth: SampleBitDepth,
+    qp: i32,
 ) -> i16 {
     let sample_count = residuals.len() as i64;
     let (residual_sum, original_sse) = residual_sum_and_sse(residuals);
-    let unit = dc_only_residual_from_level(1, width, height, VVC_LUMA_QP, bit_depth);
+    let unit = dc_only_residual_from_level(1, width, height, qp, bit_depth);
     if unit == 0 {
         let residual_avg = div_round_nearest_i64(residual_sum, sample_count);
         return div_round_nearest_i64(
@@ -150,11 +169,7 @@ fn quantize_vvc_luma_residual_dc_by_search(
     for candidate in (estimate - 4)..=(estimate + 4) {
         let level = candidate.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
         let reconstructed = i64::from(dc_only_residual_from_level(
-            level,
-            width,
-            height,
-            VVC_LUMA_QP,
-            bit_depth,
+            level, width, height, qp, bit_depth,
         ));
         let sse = original_sse + (sample_count * reconstructed * reconstructed)
             - (2 * reconstructed * residual_sum);
@@ -180,6 +195,7 @@ impl Default for VvcInverseTransformScratch {
     }
 }
 
+#[cfg(test)]
 pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into(
     residuals: &mut Vec<i16>,
     scratch: &mut VvcInverseTransformScratch,
@@ -189,18 +205,34 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into(
     ac_levels: &[i16; 15],
     bit_depth: SampleBitDepth,
 ) {
-    inverse_transform_vvc_quantized_block_into(
+    inverse_transform_vvc_luma_quantized_block_into_with_qp(
         residuals,
         scratch,
         width,
         height,
         dc_level,
         ac_levels,
-        VVC_LUMA_QP,
         bit_depth,
+        VVC_DEFAULT_LOSSY_LUMA_QP,
     );
 }
 
+pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    dc_level: i16,
+    ac_levels: &[i16; 15],
+    bit_depth: SampleBitDepth,
+    qp: i32,
+) {
+    inverse_transform_vvc_quantized_block_into(
+        residuals, scratch, width, height, dc_level, ac_levels, qp, bit_depth,
+    );
+}
+
+#[cfg(test)]
 pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into(
     residuals: &mut Vec<i16>,
     scratch: &mut VvcInverseTransformScratch,
@@ -210,16 +242,30 @@ pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into(
     ac_levels: &[i16; 15],
     bit_depth: SampleBitDepth,
 ) {
-    // Current SPS/PPS chroma QP mapping table maps slice QP 32 to chroma QP 34.
-    inverse_transform_vvc_quantized_block_into(
+    inverse_transform_vvc_chroma_quantized_block_into_with_qp(
         residuals,
         scratch,
         width,
         height,
         dc_level,
         ac_levels,
-        VVC_CHROMA_QP,
         bit_depth,
+        VVC_DEFAULT_LOSSY_CHROMA_QP,
+    );
+}
+
+pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into_with_qp(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    dc_level: i16,
+    ac_levels: &[i16; 15],
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) {
+    inverse_transform_vvc_quantized_block_into(
+        residuals, scratch, width, height, dc_level, ac_levels, chroma_qp, bit_depth,
     );
 }
 
@@ -287,7 +333,7 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_residual_levels(
         width,
         height,
         coeff_levels,
-        VVC_LUMA_QP,
+        VVC_DEFAULT_LOSSY_LUMA_QP,
         bit_depth,
     );
     residuals
@@ -375,19 +421,42 @@ fn inverse_transform_vvc_dequantized_levels_into(
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(in crate::vvc) fn quantize_vvc_chroma_residual_dc(
     residuals: &[i16],
     width: u16,
     height: u16,
     bit_depth: SampleBitDepth,
 ) -> i16 {
+    quantize_vvc_chroma_residual_dc_with_qp(
+        residuals,
+        width,
+        height,
+        bit_depth,
+        VVC_DEFAULT_LOSSY_CHROMA_QP,
+    )
+}
+
+pub(in crate::vvc) fn quantize_vvc_chroma_residual_dc_with_qp(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> i16 {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
+    debug_assert!((0..=63).contains(&chroma_qp));
 
     let (residual_sum, original_sse) = residual_sum_and_sse(residuals);
-    if width == 4 && height == 4 && bit_depth.bits() == 8 {
+    if width == 4
+        && height == 4
+        && bit_depth.bits() == 8
+        && chroma_qp == VVC_DEFAULT_LOSSY_CHROMA_QP
+    {
         return quantize_vvc_chroma_4x4_dc_level_from_sum(residual_sum);
     }
 
@@ -398,6 +467,7 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_dc(
         width,
         height,
         bit_depth,
+        chroma_qp,
     )
 }
 
@@ -427,17 +497,14 @@ fn quantize_vvc_chroma_residual_dc_by_search(
     width: u16,
     height: u16,
     bit_depth: SampleBitDepth,
+    chroma_qp: i32,
 ) -> i16 {
     let mut best_level = 0;
     let mut best_sse = original_sse;
 
     for level in -VVC_CHROMA_DC_LEVEL_LIMIT..=VVC_CHROMA_DC_LEVEL_LIMIT {
         let reconstructed = i64::from(dc_only_residual_from_level(
-            level,
-            width,
-            height,
-            VVC_CHROMA_QP,
-            bit_depth,
+            level, width, height, chroma_qp, bit_depth,
         ));
         let sse = original_sse + (sample_count * reconstructed * reconstructed)
             - (2 * reconstructed * residual_sum);
@@ -449,18 +516,38 @@ fn quantize_vvc_chroma_residual_dc_by_search(
     best_level
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
     residuals: &[i16],
     width: u16,
     height: u16,
     bit_depth: SampleBitDepth,
 ) -> VvcQuantizedTransformBlock {
+    quantize_vvc_chroma_residual_greedy_with_qp(
+        residuals,
+        width,
+        height,
+        bit_depth,
+        VVC_DEFAULT_LOSSY_CHROMA_QP,
+    )
+}
+
+pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy_with_qp(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> VvcQuantizedTransformBlock {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
+    debug_assert!((0..=63).contains(&chroma_qp));
 
-    let dc_level = quantize_vvc_chroma_residual_dc(residuals, width, height, bit_depth);
+    let dc_level =
+        quantize_vvc_chroma_residual_dc_with_qp(residuals, width, height, bit_depth, chroma_qp);
     let mut ac_coeffs = [0; 15];
     let mut has_ac = false;
     if residuals_have_ac_energy(residuals) {
@@ -468,7 +555,7 @@ pub(in crate::vvc) fn quantize_vvc_chroma_residual_greedy(
         // coefficient group. Keep the stored residual shape ready for the
         // lossless transform-skip path even when the lossy quantizer selects
         // only a small subset of nonzero levels.
-        (ac_coeffs, has_ac) = quantize_direct_chroma_ac_coeffs(residuals, width, height);
+        (ac_coeffs, has_ac) = quantize_direct_chroma_ac_coeffs(residuals, width, height, chroma_qp);
     }
 
     VvcQuantizedTransformBlock {
@@ -502,10 +589,17 @@ pub(in crate::vvc) fn reconstruct_vvc_chroma(chroma_residual: u8) -> u8 {
     (((16 - chroma_residual.min(16)) as u16 * 128 + 8) / 16) as u8
 }
 
-fn quantize_direct_luma_ac_coeffs(residuals: &[i16], width: u16, height: u16) -> ([i16; 15], bool) {
+fn quantize_direct_luma_ac_coeffs(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    qp: i32,
+) -> ([i16; 15], bool) {
     let cell_sums = luma_hadamard_cell_sums(residuals, width);
     let mut ac_coeffs = [0; 15];
     let mut has_ac = false;
+    let quant_shift = luma_ac_quant_shift(qp);
+    let level_limit = luma_ac_level_limit(qp);
     for ky in 0..usize::from(height).min(4) {
         for kx in 0..usize::from(width).min(4) {
             if kx == 0 && ky == 0 {
@@ -519,15 +613,25 @@ fn quantize_direct_luma_ac_coeffs(residuals: &[i16], width: u16, height: u16) ->
                         * i64::from(luma_lossy_hadamard4_basis(ky, cell_y));
                 }
             }
-            let level = div_round_nearest_i64(acc, 1i64 << VVC_LUMA_AC_HADAMARD_QUANT_SHIFT);
-            ac_coeffs[ky * 4 + kx - 1] = level.clamp(
-                i64::from(-VVC_LUMA_AC_LEVEL_LIMIT),
-                i64::from(VVC_LUMA_AC_LEVEL_LIMIT),
-            ) as i16;
+            let level = div_round_nearest_i64(acc, 1i64 << quant_shift);
+            ac_coeffs[ky * 4 + kx - 1] =
+                level.clamp(i64::from(-level_limit), i64::from(level_limit)) as i16;
             has_ac |= ac_coeffs[ky * 4 + kx - 1] != 0;
         }
     }
     (ac_coeffs, has_ac)
+}
+
+fn luma_ac_quant_shift(qp: i32) -> u32 {
+    qp_adjusted_quant_shift(
+        VVC_LUMA_AC_HADAMARD_QUANT_SHIFT,
+        qp,
+        VVC_DEFAULT_LOSSY_LUMA_QP,
+    )
+}
+
+fn luma_ac_level_limit(qp: i32) -> i16 {
+    qp_adjusted_level_limit(VVC_LUMA_AC_LEVEL_LIMIT, qp, VVC_DEFAULT_LOSSY_LUMA_QP)
 }
 
 fn luma_hadamard_cell_sums(residuals: &[i16], width: u16) -> [i64; 16] {
@@ -592,6 +696,7 @@ fn quantize_direct_chroma_ac_coeffs(
     residuals: &[i16],
     width: u16,
     height: u16,
+    chroma_qp: i32,
 ) -> ([i16; VVC_CHROMA_AC_COEFFS_PER_TU], bool) {
     let width_usize = usize::from(width);
     let height_usize = usize::from(height);
@@ -601,6 +706,8 @@ fn quantize_direct_chroma_ac_coeffs(
     let mut ac_coeffs = [0; VVC_CHROMA_AC_COEFFS_PER_TU];
     let mut has_ac = false;
     let mut vertical = [0i64; 4 * VVC_MAX_TRANSFORM_EDGE];
+    let quant_shift = chroma_ac_quant_shift(width, height, chroma_qp);
+    let level_limit = chroma_ac_level_limit(chroma_qp);
     for ky in 0..active_height {
         for x in 0..width_usize {
             let mut sum = 0i64;
@@ -619,20 +726,45 @@ fn quantize_direct_chroma_ac_coeffs(
                 acc +=
                     vertical[ky * VVC_MAX_TRANSFORM_EDGE + x] * i64::from(dct2_value(width, kx, x));
             }
-            let level = div_round_nearest_i64(acc, 1i64 << chroma_ac_quant_shift(width, height));
-            ac_coeffs[ky * 4 + kx - 1] = level.clamp(
-                i64::from(-VVC_CHROMA_AC_LEVEL_LIMIT),
-                i64::from(VVC_CHROMA_AC_LEVEL_LIMIT),
-            ) as i16;
+            let level = div_round_nearest_i64(acc, 1i64 << quant_shift);
+            ac_coeffs[ky * 4 + kx - 1] =
+                level.clamp(i64::from(-level_limit), i64::from(level_limit)) as i16;
             has_ac |= ac_coeffs[ky * 4 + kx - 1] != 0;
         }
     }
     (ac_coeffs, has_ac)
 }
 
-fn chroma_ac_quant_shift(width: u16, height: u16) -> u32 {
+fn chroma_ac_quant_shift(width: u16, height: u16, chroma_qp: i32) -> u32 {
     let log2_sum = width.ilog2() as i32 + height.ilog2() as i32;
-    (VVC_CHROMA_AC_QUANT_SHIFT_FOR_8X8 + log2_sum - 6).max(0) as u32
+    let base_shift = (VVC_CHROMA_AC_QUANT_SHIFT_FOR_8X8 + log2_sum - 6).max(0) as u32;
+    qp_adjusted_quant_shift(base_shift, chroma_qp, VVC_DEFAULT_LOSSY_CHROMA_QP)
+}
+
+fn chroma_ac_level_limit(chroma_qp: i32) -> i16 {
+    qp_adjusted_level_limit(
+        VVC_CHROMA_AC_LEVEL_LIMIT,
+        chroma_qp,
+        VVC_DEFAULT_LOSSY_CHROMA_QP,
+    )
+}
+
+fn qp_adjusted_quant_shift(base_shift: u32, qp: i32, base_qp: i32) -> u32 {
+    let delta = qp - base_qp;
+    if delta >= 0 {
+        base_shift.saturating_add((delta / 6) as u32)
+    } else {
+        base_shift.saturating_sub(((-delta + 5) / 6) as u32)
+    }
+}
+
+fn qp_adjusted_level_limit(base_limit: i16, qp: i32, base_qp: i32) -> i16 {
+    let delta = base_qp - qp;
+    if delta <= 0 {
+        return base_limit.max(1);
+    }
+    let shift = ((delta + 5) / 6).clamp(0, 4) as u32;
+    ((i32::from(base_limit) << shift).min(i32::from(i16::MAX))) as i16
 }
 
 fn residuals_have_ac_energy(residuals: &[i16]) -> bool {

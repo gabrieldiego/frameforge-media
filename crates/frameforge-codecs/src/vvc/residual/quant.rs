@@ -1,21 +1,26 @@
 use super::super::{
-    chroma_subsample_x, chroma_subsample_y, select_vvc_residual_chroma_intra_mode,
-    select_vvc_residual_luma_intra_mode, vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8,
-    vvc_luma_transform_nodes, vvc_neutral_sample, vvc_residual_luma_planar_candidate_allowed,
-    VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
+    chroma_subsample_x, chroma_subsample_y, select_vvc_residual_chroma_intra_mode_from_costs,
+    select_vvc_residual_luma_intra_mode, vvc_chroma_explicit_candidates,
+    vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_transform_nodes,
+    vvc_neutral_sample, vvc_residual_chroma_explicit_candidate_allowed,
+    vvc_residual_luma_directional_candidate_allowed, vvc_residual_luma_planar_candidate_allowed,
+    VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode, VvcCodingTreeNode,
+    VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode, VvcLumaIntraCandidateCosts,
     VvcPictureFormat, VvcReconstructionFrame, VvcResidualCodingMode,
     VvcResidualModeDecisionContext, VvcSample, VvcSampledColor, VvcSampledFrame, VvcVideoGeometry,
-    VVC_CTU_SIZE,
+    VVC_CTU_SIZE, VVC_LOSSY_LUMA_ANGULAR_CANDIDATES,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
-    inverse_transform_vvc_chroma_quantized_block_into,
-    inverse_transform_vvc_luma_quantized_block_into, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_intra_block_into, quantize_vvc_chroma_residual_greedy,
-    quantize_vvc_chroma_sample, quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
-    VvcDcPredictionScratch, VvcInverseTransformScratch, VvcQuantizedColor,
-    VvcQuantizedResidualFrame, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
-    VVC_CHROMA_AC_POSITIONS_4X4, VVC_LUMA_AC_COEFFS_PER_TU,
+    inverse_transform_vvc_chroma_quantized_block_into_with_qp,
+    inverse_transform_vvc_luma_quantized_block_into_with_qp,
+    predict_vvc_chroma_intra_block_into_with_availability,
+    predict_vvc_luma_intra_block_into_with_availability,
+    quantize_vvc_chroma_residual_greedy_with_qp, quantize_vvc_chroma_sample,
+    quantize_vvc_luma_residual_greedy_with_qp, reconstruct_vvc_chroma, VvcDcPredictionScratch,
+    VvcInverseTransformScratch, VvcQuantizedColor, VvcQuantizedResidualFrame, MAX_VVC_CHROMA_TUS,
+    MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
+    VVC_LUMA_AC_COEFFS_PER_TU,
 };
 
 pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
@@ -59,6 +64,24 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     region: VvcCtuRegion,
     residual_mode: VvcResidualCodingMode,
 ) -> VvcQuantizedColor {
+    quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp(
+        source_frame,
+        frame_recon,
+        region,
+        residual_mode,
+        super::VVC_DEFAULT_LOSSY_LUMA_QP,
+        super::VVC_DEFAULT_LOSSY_CHROMA_QP,
+    )
+}
+
+pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp(
+    source_frame: &VvcSampledFrame,
+    frame_recon: &mut VvcReconstructionFrame,
+    region: VvcCtuRegion,
+    residual_mode: VvcResidualCodingMode,
+    luma_qp: i32,
+    chroma_qp: i32,
+) -> VvcQuantizedColor {
     let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
@@ -71,6 +94,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     let mut cr_tu_ac_levels = [[0; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS];
     let mut cb_tu_has_ac = [false; MAX_VVC_CHROMA_TUS];
     let mut cr_tu_has_ac = [false; MAX_VVC_CHROMA_TUS];
+    let mut chroma_tu_intra_modes = [VvcChromaIntraPredictionMode::Derived; MAX_VVC_CHROMA_TUS];
     let mut prediction_scratch = VvcDcPredictionScratch::default();
     let mut predicted_luma = Vec::new();
     let mut predicted_cb = Vec::new();
@@ -82,6 +106,10 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     let mut candidate_luma_residuals = Vec::new();
     let mut cb_residuals = Vec::new();
     let mut cr_residuals = Vec::new();
+    let mut candidate_cb_prediction = Vec::new();
+    let mut candidate_cr_prediction = Vec::new();
+    let mut candidate_cb_residuals = Vec::new();
+    let mut candidate_cr_residuals = Vec::new();
 
     let mode_context = VvcResidualModeDecisionContext::new(source_frame.format, residual_mode);
     let lossless_residual = residual_mode.is_lossless();
@@ -96,12 +124,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
     };
 
     let mut luma_tu_count = 0usize;
-    for local_node in vvc_luma_transform_nodes(ctu_shape, luma_max_leaf_size) {
+    let luma_nodes = vvc_luma_transform_nodes(ctu_shape, luma_max_leaf_size);
+    for local_node in luma_nodes.iter().copied() {
         if luma_tu_count >= MAX_VVC_LUMA_TUS {
             break;
         }
         let node = vvc_global_ctu_node(local_node, region);
-        predict_vvc_luma_intra_block_into(
+        predict_vvc_luma_intra_block_into_with_availability(
             &mut predicted_luma,
             &mut prediction_scratch,
             VvcIntraPredictionMode::Dc,
@@ -109,6 +138,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             source_frame.geometry,
             node,
             source_frame.format.bit_depth,
+            Some(frame_recon.luma_availability()),
         );
         residual_luma_tu_at_into(
             &mut luma_residuals,
@@ -120,8 +150,11 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             &predicted_luma,
         );
         let dc_sad = residual_sad(&luma_residuals);
-        let planar_sad = if vvc_residual_luma_planar_candidate_allowed(mode_context, node) {
-            predict_vvc_luma_intra_block_into(
+        let mut best_luma_mode = VvcIntraPredictionMode::Dc;
+        let mut best_luma_sad = dc_sad;
+        let mut luma_candidate_costs = VvcLumaIntraCandidateCosts::new(dc_sad);
+        if vvc_residual_luma_planar_candidate_allowed(mode_context, node) {
+            predict_vvc_luma_intra_block_into_with_availability(
                 &mut candidate_luma_prediction,
                 &mut prediction_scratch,
                 VvcIntraPredictionMode::Planar,
@@ -129,6 +162,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 source_frame.geometry,
                 node,
                 source_frame.format.bit_depth,
+                Some(frame_recon.luma_availability()),
             );
             residual_luma_tu_at_into(
                 &mut candidate_luma_residuals,
@@ -139,15 +173,52 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 usize::from(node.height),
                 &candidate_luma_prediction,
             );
-            Some(residual_sad(&candidate_luma_residuals))
-        } else {
-            None
-        };
-        let luma_mode = select_vvc_residual_luma_intra_mode(mode_context, node, dc_sad, planar_sad);
-        if luma_mode == VvcIntraPredictionMode::Planar {
-            std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
-            std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
+            let candidate_sad = residual_sad(&candidate_luma_residuals);
+            luma_candidate_costs = luma_candidate_costs
+                .with_candidate(VvcIntraPredictionMode::Planar, Some(candidate_sad));
+            if candidate_sad < best_luma_sad {
+                best_luma_sad = candidate_sad;
+                best_luma_mode = VvcIntraPredictionMode::Planar;
+                std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
+                std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
+            }
         }
+        if vvc_residual_luma_directional_candidate_allowed(mode_context, node) {
+            for mode in VVC_LOSSY_LUMA_ANGULAR_CANDIDATES {
+                predict_vvc_luma_intra_block_into_with_availability(
+                    &mut candidate_luma_prediction,
+                    &mut prediction_scratch,
+                    mode,
+                    &frame_recon.luma,
+                    source_frame.geometry,
+                    node,
+                    source_frame.format.bit_depth,
+                    Some(frame_recon.luma_availability()),
+                );
+                residual_luma_tu_at_into(
+                    &mut candidate_luma_residuals,
+                    source_frame,
+                    usize::from(node.x),
+                    usize::from(node.y),
+                    usize::from(node.width),
+                    usize::from(node.height),
+                    &candidate_luma_prediction,
+                );
+                let candidate_sad = residual_sad(&candidate_luma_residuals);
+                luma_candidate_costs =
+                    luma_candidate_costs.with_candidate(mode, Some(candidate_sad));
+                if candidate_sad < best_luma_sad {
+                    best_luma_sad = candidate_sad;
+                    best_luma_mode = mode;
+                    std::mem::swap(&mut predicted_luma, &mut candidate_luma_prediction);
+                    std::mem::swap(&mut luma_residuals, &mut candidate_luma_residuals);
+                }
+            }
+        }
+        let luma_mode =
+            select_vvc_residual_luma_intra_mode(mode_context, node, luma_candidate_costs);
+        debug_assert_eq!(luma_mode, best_luma_mode);
+        let _best_luma_sad = best_luma_sad;
         luma_tu_intra_modes[luma_tu_count] = luma_mode;
         if lossless_residual {
             let dc_level = luma_residuals.first().copied().unwrap_or(0);
@@ -166,12 +237,14 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 &luma_residuals,
                 source_frame.format.bit_depth,
             );
+            frame_recon.mark_luma_node_available(node);
         } else {
-            let quantized = quantize_vvc_luma_residual_greedy(
+            let quantized = quantize_vvc_luma_residual_greedy_with_qp(
                 &luma_residuals,
                 node.width,
                 node.height,
                 source_frame.format.bit_depth,
+                luma_qp,
             );
             luma_tu_remainders[luma_tu_count] = quantized.abs_remainder;
             luma_tu_negative[luma_tu_count] =
@@ -179,7 +252,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             luma_tu_dc_levels[luma_tu_count] = quantized.reconstructed_dc_coeff;
             luma_tu_ac_levels[luma_tu_count] = quantized.reconstructed_ac_coeffs;
             luma_tu_has_ac[luma_tu_count] = quantized.has_ac;
-            inverse_transform_vvc_luma_quantized_block_into(
+            inverse_transform_vvc_luma_quantized_block_into_with_qp(
                 &mut reconstructed_residual,
                 &mut transform_scratch,
                 node.width,
@@ -187,6 +260,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 quantized.reconstructed_dc_coeff,
                 &quantized.reconstructed_ac_coeffs,
                 source_frame.format.bit_depth,
+                luma_qp,
             );
             fill_visible_luma_node(
                 &mut frame_recon.luma,
@@ -196,6 +270,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 &reconstructed_residual,
                 source_frame.format.bit_depth,
             );
+            frame_recon.mark_luma_node_available(node);
         }
         luma_tu_count += 1;
     }
@@ -212,31 +287,42 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        match select_vvc_residual_chroma_intra_mode(mode_context, node) {
-            VvcIntraPredictionMode::Dc => {
-                predict_vvc_chroma_dc_block_into(
-                    &mut predicted_cb,
-                    &mut prediction_scratch,
-                    &frame_recon.cb,
-                    source_frame.geometry,
-                    node,
-                    source_frame.format.chroma_sampling,
-                    source_frame.format.bit_depth,
-                );
-                predict_vvc_chroma_dc_block_into(
-                    &mut predicted_cr,
-                    &mut prediction_scratch,
-                    &frame_recon.cr,
-                    source_frame.geometry,
-                    node,
-                    source_frame.format.chroma_sampling,
-                    source_frame.format.bit_depth,
-                );
-            }
-            VvcIntraPredictionMode::Planar => {
-                unreachable!("VVC residual chroma Planar mode is not enabled by the selector yet")
-            }
-        }
+        let co_located_luma_mode = vvc_co_located_luma_mode_for_chroma_node(
+            &luma_nodes,
+            &luma_tu_intra_modes,
+            luma_tu_count,
+            node,
+            region,
+        );
+        let initial_chroma_mode =
+            if lossless_residual && co_located_luma_mode != VvcIntraPredictionMode::Dc {
+                VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Dc)
+            } else {
+                VvcChromaIntraPredictionMode::Derived
+            };
+        let initial_prediction_mode = initial_chroma_mode.prediction_mode(co_located_luma_mode);
+        predict_vvc_chroma_intra_block_into_with_availability(
+            &mut predicted_cb,
+            &mut prediction_scratch,
+            initial_prediction_mode,
+            &frame_recon.cb,
+            source_frame.geometry,
+            node,
+            source_frame.format.chroma_sampling,
+            source_frame.format.bit_depth,
+            Some(frame_recon.cb_availability()),
+        );
+        predict_vvc_chroma_intra_block_into_with_availability(
+            &mut predicted_cr,
+            &mut prediction_scratch,
+            initial_prediction_mode,
+            &frame_recon.cr,
+            source_frame.geometry,
+            node,
+            source_frame.format.chroma_sampling,
+            source_frame.format.bit_depth,
+            Some(frame_recon.cr_availability()),
+        );
         residual_chroma_tu_at_into(
             &mut cb_residuals,
             &source_frame.cb,
@@ -259,6 +345,86 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             chroma_height,
             &predicted_cr,
         );
+        let initial_sad = residual_sad(&cb_residuals) + residual_sad(&cr_residuals);
+        let mut best_chroma_mode = initial_chroma_mode;
+        let mut best_chroma_sad = initial_sad;
+        let mut chroma_candidate_costs = VvcChromaIntraCandidateCosts::new(initial_sad);
+        if !lossless_residual {
+            for explicit_mode in vvc_chroma_explicit_candidates(co_located_luma_mode) {
+                if !vvc_residual_chroma_explicit_candidate_allowed(explicit_mode) {
+                    continue;
+                }
+                let chroma_mode = VvcChromaIntraPredictionMode::Explicit(explicit_mode);
+                predict_vvc_chroma_intra_block_into_with_availability(
+                    &mut candidate_cb_prediction,
+                    &mut prediction_scratch,
+                    explicit_mode,
+                    &frame_recon.cb,
+                    source_frame.geometry,
+                    node,
+                    source_frame.format.chroma_sampling,
+                    source_frame.format.bit_depth,
+                    Some(frame_recon.cb_availability()),
+                );
+                predict_vvc_chroma_intra_block_into_with_availability(
+                    &mut candidate_cr_prediction,
+                    &mut prediction_scratch,
+                    explicit_mode,
+                    &frame_recon.cr,
+                    source_frame.geometry,
+                    node,
+                    source_frame.format.chroma_sampling,
+                    source_frame.format.bit_depth,
+                    Some(frame_recon.cr_availability()),
+                );
+                residual_chroma_tu_at_into(
+                    &mut candidate_cb_residuals,
+                    &source_frame.cb,
+                    source_frame.geometry,
+                    source_frame.format,
+                    chroma_x,
+                    chroma_y,
+                    chroma_width,
+                    chroma_height,
+                    &candidate_cb_prediction,
+                );
+                residual_chroma_tu_at_into(
+                    &mut candidate_cr_residuals,
+                    &source_frame.cr,
+                    source_frame.geometry,
+                    source_frame.format,
+                    chroma_x,
+                    chroma_y,
+                    chroma_width,
+                    chroma_height,
+                    &candidate_cr_prediction,
+                );
+                let candidate_sad =
+                    residual_sad(&candidate_cb_residuals) + residual_sad(&candidate_cr_residuals);
+                chroma_candidate_costs =
+                    chroma_candidate_costs.with_candidate(chroma_mode, Some(candidate_sad));
+                if candidate_sad < best_chroma_sad {
+                    best_chroma_sad = candidate_sad;
+                    best_chroma_mode = chroma_mode;
+                    std::mem::swap(&mut predicted_cb, &mut candidate_cb_prediction);
+                    std::mem::swap(&mut predicted_cr, &mut candidate_cr_prediction);
+                    std::mem::swap(&mut cb_residuals, &mut candidate_cb_residuals);
+                    std::mem::swap(&mut cr_residuals, &mut candidate_cr_residuals);
+                }
+            }
+        }
+        let chroma_mode = if lossless_residual {
+            best_chroma_mode
+        } else {
+            select_vvc_residual_chroma_intra_mode_from_costs(
+                mode_context,
+                node,
+                chroma_candidate_costs,
+            )
+        };
+        debug_assert_eq!(chroma_mode, best_chroma_mode);
+        let _best_chroma_sad = best_chroma_sad;
+        chroma_tu_intra_modes[chroma_tu_count] = chroma_mode;
         if lossless_residual {
             cb_tu_dc_levels[chroma_tu_count] = cb_residuals.first().copied().unwrap_or(0);
             cr_tu_dc_levels[chroma_tu_count] = cr_residuals.first().copied().unwrap_or(0);
@@ -288,18 +454,21 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 &cr_residuals,
                 source_frame.format.bit_depth,
             );
+            frame_recon.mark_chroma_node_available(node);
         } else {
-            let cb_quantized = quantize_vvc_chroma_residual_greedy(
+            let cb_quantized = quantize_vvc_chroma_residual_greedy_with_qp(
                 &cb_residuals,
                 chroma_width as u16,
                 chroma_height as u16,
                 source_frame.format.bit_depth,
+                chroma_qp,
             );
-            let cr_quantized = quantize_vvc_chroma_residual_greedy(
+            let cr_quantized = quantize_vvc_chroma_residual_greedy_with_qp(
                 &cr_residuals,
                 chroma_width as u16,
                 chroma_height as u16,
                 source_frame.format.bit_depth,
+                chroma_qp,
             );
             cb_tu_dc_levels[chroma_tu_count] = cb_quantized.reconstructed_dc_coeff;
             cr_tu_dc_levels[chroma_tu_count] = cr_quantized.reconstructed_dc_coeff;
@@ -307,7 +476,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
             cr_tu_ac_levels[chroma_tu_count] = cr_quantized.reconstructed_ac_coeffs;
             cb_tu_has_ac[chroma_tu_count] = cb_quantized.has_ac;
             cr_tu_has_ac[chroma_tu_count] = cr_quantized.has_ac;
-            inverse_transform_vvc_chroma_quantized_block_into(
+            inverse_transform_vvc_chroma_quantized_block_into_with_qp(
                 &mut reconstructed_residual,
                 &mut transform_scratch,
                 chroma_width as u16,
@@ -315,6 +484,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 cb_quantized.reconstructed_dc_coeff,
                 &cb_quantized.reconstructed_ac_coeffs,
                 source_frame.format.bit_depth,
+                chroma_qp,
             );
             fill_visible_chroma_node(
                 &mut frame_recon.cb,
@@ -325,7 +495,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 &reconstructed_residual,
                 source_frame.format.bit_depth,
             );
-            inverse_transform_vvc_chroma_quantized_block_into(
+            inverse_transform_vvc_chroma_quantized_block_into_with_qp(
                 &mut reconstructed_residual,
                 &mut transform_scratch,
                 chroma_width as u16,
@@ -333,6 +503,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 cr_quantized.reconstructed_dc_coeff,
                 &cr_quantized.reconstructed_ac_coeffs,
                 source_frame.format.bit_depth,
+                chroma_qp,
             );
             fill_visible_chroma_node(
                 &mut frame_recon.cr,
@@ -343,6 +514,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
                 &reconstructed_residual,
                 source_frame.format.bit_depth,
             );
+            frame_recon.mark_chroma_node_available(node);
         }
         chroma_tu_count += 1;
     }
@@ -376,6 +548,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction(
         luma_tu_has_ac,
         luma_tu_count,
         chroma_tu_count,
+        chroma_tu_intra_modes,
         cb_tu_dc_levels,
         cr_tu_dc_levels,
         cb_tu_ac_levels,
@@ -398,6 +571,39 @@ fn vvc_global_ctu_node(mut node: VvcCodingTreeNode, region: VvcCtuRegion) -> Vvc
     node.x += region.origin_x as u16;
     node.y += region.origin_y as u16;
     node
+}
+
+fn vvc_co_located_luma_mode_for_chroma_node(
+    local_luma_nodes: &[VvcCodingTreeNode],
+    luma_modes: &[VvcIntraPredictionMode; MAX_VVC_LUMA_TUS],
+    luma_tu_count: usize,
+    chroma_node: VvcCodingTreeNode,
+    region: VvcCtuRegion,
+) -> VvcIntraPredictionMode {
+    let ref_x = chroma_node
+        .x
+        .saturating_add(chroma_node.width >> 1)
+        .min((region.origin_x + region.geometry.coded_width()).saturating_sub(1) as u16);
+    let ref_y = chroma_node
+        .y
+        .saturating_add(chroma_node.height >> 1)
+        .min((region.origin_y + region.geometry.coded_height()).saturating_sub(1) as u16);
+    for (idx, local_luma_node) in local_luma_nodes
+        .iter()
+        .copied()
+        .take(luma_tu_count)
+        .enumerate()
+    {
+        let luma_node = vvc_global_ctu_node(local_luma_node, region);
+        if ref_x >= luma_node.x
+            && ref_x < luma_node.x.saturating_add(luma_node.width)
+            && ref_y >= luma_node.y
+            && ref_y < luma_node.y.saturating_add(luma_node.height)
+        {
+            return luma_modes[idx];
+        }
+    }
+    VvcIntraPredictionMode::Dc
 }
 
 pub(in crate::vvc) fn lossless_luma_ac_levels_and_flag(

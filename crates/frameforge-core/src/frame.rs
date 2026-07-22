@@ -311,6 +311,79 @@ pub fn convert_planar_frame_bit_depth(
     Ok(output)
 }
 
+pub fn convert_frame_format(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    source_format: PixelFormat,
+    target_format: PixelFormat,
+) -> Result<Vec<u8>> {
+    source_format.validate_geometry(width, height)?;
+    target_format.validate_geometry(width, height)?;
+    let expected = source_format
+        .frame_len(width, height)
+        .ok_or(MediaError::LengthOverflow)?;
+    if input.len() != expected {
+        return Err(MediaError::BufferLength {
+            expected,
+            actual: input.len(),
+        });
+    }
+    if source_format == target_format {
+        return Ok(input.to_vec());
+    }
+    match (source_format, target_format) {
+        (PixelFormat::Rgb24, PixelFormat::Gbrp8) => rgb24_to_gbrp8(input, width, height),
+        (PixelFormat::Gbrp8, PixelFormat::Rgb24) => gbrp8_to_rgb24(input, width, height),
+        _ => convert_planar_frame_bit_depth(input, width, height, source_format, target_format),
+    }
+}
+
+fn rgb24_to_gbrp8(input: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let pixels = width
+        .checked_mul(height)
+        .ok_or(MediaError::LengthOverflow)?;
+    let expected = pixels.checked_mul(3).ok_or(MediaError::LengthOverflow)?;
+    if input.len() != expected {
+        return Err(MediaError::BufferLength {
+            expected,
+            actual: input.len(),
+        });
+    }
+    let mut output = vec![0; expected];
+    let (g_plane, br_planes) = output.split_at_mut(pixels);
+    let (b_plane, r_plane) = br_planes.split_at_mut(pixels);
+    for (idx, pixel) in input.chunks_exact(3).enumerate() {
+        r_plane[idx] = pixel[0];
+        g_plane[idx] = pixel[1];
+        b_plane[idx] = pixel[2];
+    }
+    Ok(output)
+}
+
+fn gbrp8_to_rgb24(input: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let pixels = width
+        .checked_mul(height)
+        .ok_or(MediaError::LengthOverflow)?;
+    let expected = pixels.checked_mul(3).ok_or(MediaError::LengthOverflow)?;
+    if input.len() != expected {
+        return Err(MediaError::BufferLength {
+            expected,
+            actual: input.len(),
+        });
+    }
+    let (g_plane, br_planes) = input.split_at(pixels);
+    let (b_plane, r_plane) = br_planes.split_at(pixels);
+    let mut output = vec![0; expected];
+    for idx in 0..pixels {
+        let offset = idx * 3;
+        output[offset] = r_plane[idx];
+        output[offset + 1] = g_plane[idx];
+        output[offset + 2] = b_plane[idx];
+    }
+    Ok(output)
+}
+
 pub fn scale_sample_bit_depth(
     sample: u16,
     source_depth: SampleBitDepth,
@@ -727,6 +800,50 @@ mod tests {
         .collect::<Vec<_>>();
 
         let output = convert_planar_frame_bit_depth(
+            &input,
+            2,
+            2,
+            PixelFormat::yuv420(10).unwrap(),
+            PixelFormat::Yuv420p8,
+        )
+        .unwrap();
+
+        assert_eq!(output, vec![0, 255, 128, 64, 32, 191]);
+    }
+
+    #[test]
+    fn converts_packed_rgb24_to_planar_gbrp8_and_back() {
+        let rgb24 = vec![
+            10, 20, 30, //
+            40, 50, 60, //
+            70, 80, 90, //
+            100, 110, 120,
+        ];
+
+        let gbrp8 =
+            convert_frame_format(&rgb24, 2, 2, PixelFormat::Rgb24, PixelFormat::Gbrp8).unwrap();
+        assert_eq!(
+            gbrp8,
+            vec![20, 50, 80, 110, 30, 60, 90, 120, 10, 40, 70, 100]
+        );
+
+        let roundtrip =
+            convert_frame_format(&gbrp8, 2, 2, PixelFormat::Gbrp8, PixelFormat::Rgb24).unwrap();
+        assert_eq!(roundtrip, rgb24);
+    }
+
+    #[test]
+    fn convert_frame_format_preserves_existing_planar_bit_depth_path() {
+        let input = [
+            0u16, 1023, 512, 256, // Y
+            128, // U
+            768, // V
+        ]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+
+        let output = convert_frame_format(
             &input,
             2,
             2,

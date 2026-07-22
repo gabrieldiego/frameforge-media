@@ -71,15 +71,13 @@ Short aliases remain accepted:
 `gbrp8` is accepted as 8-bit planar RGB-family input for AV2 and VVC plumbing:
 the byte layout is one full-resolution green plane, then blue, then red. AV2
 signals sRGB identity color metadata for `gbrp8` and keeps the internal
-reconstruction in the same planar layout. VVC currently accepts the same planar
-bytes through its 4:4:4 component interface; VVC RGB bitstream color signaling
-is still a follow-up.
+reconstruction in the same planar layout. VVC accepts the same planar bytes
+through its 4:4:4 component interface and signals sRGB-compatible VUI metadata.
 
-`rgb24` remains accepted as packed 8-bit RGB for AV2 streams. The encoder
-re-packs RGB into codec-internal planar GBR identity planes and signals sRGB
-identity color metadata in the AV2 bitstream; it does not convert RGB to YUV.
-The internal reconstruction written with `--recon` is packed back to `rgb24` so
-validation compares the same byte layout as the source. Use `gbrp8` for VVC.
+`rgb24` is accepted as packed 8-bit RGB for AV2 and VVC streams through the
+shared driver conversion path. The driver repacks RGB into codec-native planar
+GBR identity planes before encoding and packs reconstruction bytes back to
+`rgb24` for `--recon`; it does not convert RGB to YUV.
 
 ## Rust API
 
@@ -104,15 +102,17 @@ Named 8-bit constants such as `PixelFormat::Yuv420p8` are compatibility shims
 and are marked in code with a TODO to deprecate them in favor of numeric
 constructors. Higher bit depths should use numeric constructors directly.
 
-The shared helper `convert_planar_frame_bit_depth` changes only sample depth. It
-does not change chroma sampling, color family, plane order, or packed layout.
-Scaling maps the full source range to the full target range, so 10-bit max maps
-to 8-bit max when current 8-bit codec paths are used.
+The shared helper `convert_frame_format` is the general raw-frame bridge used
+by CLI plumbing. It supports exact packed `rgb24` to planar `gbrp8` repacking,
+the reverse reconstruction repack, and planar bit-depth conversion. Bit-depth
+conversion still changes only sample depth: it does not change chroma sampling
+or convert RGB to YUV. Scaling maps the full source range to the full target
+range, so 10-bit max maps to 8-bit max when current 8-bit codec paths are used.
 
 ```rust
 let source = PixelFormat::yuv444(12).expect("valid bit depth");
 let target = PixelFormat::yuv444(8).expect("valid bit depth");
-let converted = convert_planar_frame_bit_depth(&frame, width, height, source, target)?;
+let converted = convert_frame_format(&frame, width, height, source, target)?;
 ```
 
 ## Codec Fallback
@@ -120,7 +120,9 @@ let converted = convert_planar_frame_bit_depth(&frame, width, height, source, ta
 The CLI keeps the declared source format separate from the format passed to the
 selected codec. If a codec does not yet accept the exact source bit depth but
 does accept the same planar layout at 8-bit, the CLI streams frames through the
-shared bit-depth converter before calling the codec.
+shared frame-format converter before calling the codec. The same converter also
+handles reversible packed `rgb24` to planar `gbrp8` repacking for codecs whose
+native RGB path is planar.
 
 Current behavior:
 
@@ -148,7 +150,8 @@ Current behavior:
 - VVC accepts `yuv422p8` through `yuv422p12le` natively for both stream-exact
   lossless 4:2:2 encoding and the current non-lossless residual path.
 - VVC accepts `gbrp8` through the same 8-bit 4:4:4 component pipeline used by
-  planar 4:4:4 input. Bitstream-level RGB color signaling is not wired yet.
+  planar 4:4:4 input and signals sRGB-compatible VUI metadata. VVC also
+  accepts legacy packed `rgb24` through the shared lossless repack to `gbrp8`.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 
@@ -160,7 +163,7 @@ fail before encoding. The current lossless stream paths are AV2 `yuv420p8` and
 `yuv420p10le`, AV2 `yuv422p8` and `yuv422p10le`, AV2 `yuv444p8` and
 `yuv444p10le`, AV2 `gbrp8` and `rgb24`, VVC `yuv420p8` through
 `yuv420p12le`, VVC `yuv422p8` through `yuv422p12le`, VVC `yuv444p8` through
-`yuv444p12le`, and VVC `gbrp8`.
+`yuv444p12le`, and VVC `gbrp8` and `rgb24`.
 
 When a codec grows true support for a higher bit depth, its accepted-format
 check should be updated so the exact source format is passed through without

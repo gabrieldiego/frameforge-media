@@ -73,6 +73,7 @@ ENCODE_MATRIX_BASELINE ?=
 ENCODE_MATRIX_LIMIT ?=
 ENCODE_MATRIX_FRAMES ?=
 ENCODE_MATRIX_AV2_LOSSY_QP ?= 24
+ENCODE_MATRIX_VVC_LOSSY_QP ?= 24
 ENCODE_MATRIX_AV2_PREDICTIVE ?= 1
 ENCODE_MATRIX_DIRECT_SOURCE_FILES ?= 1
 GEOMETRY_SWEEP_SETS ?= screenshot-sweep-444 screenshot-sweep-444-10bit screenshot-sweep-420-10bit-canary
@@ -80,6 +81,7 @@ GEOMETRY_SWEEP_CODECS ?= av2 vvc
 GEOMETRY_SWEEP_MODES ?= lossless lossy
 GEOMETRY_SWEEP_REFERENCE_MODE ?= off
 GEOMETRY_SWEEP_AV2_LOSSY_QP ?= 24
+GEOMETRY_SWEEP_VVC_LOSSY_QP ?= 24
 GEOMETRY_SWEEP_AV2_SETTINGS ?= predictive
 LIBAOM_SB_BITS ?= 0
 LIBAOM_SB_BITS_BUILD_DIR ?= verification/references/libaom/libaom/build-sb-bits
@@ -129,7 +131,7 @@ help:
 		'  make build            Build release CLI and copy it to ./ff' \
 		'                         Set AV2_SB_BITS=1 to compile AV2 per-superblock bit JSONL support' \
 		'                         Set AV2_LOSSY_STATS=1 to compile AV2 lossy mode/TXB stats' \
-		'                         Set VVC_STATS=1 to compile VVC stage timing JSONL support' \
+		'                         Set VVC_STATS=1 to compile VVC stage timing and CTU bit JSONL support' \
 		'  make build PROFILE=gprof' \
 		'                         Build gprof sampling-friendly ./ff-gprof under target/gprof' \
 		'  make profile-av2-i-lossless' \
@@ -217,7 +219,7 @@ compare-compression: build
 	$(REFERENCE_ENV) $(PYTHON) scripts/compare_reference_compression.py --ff "$(abspath $(BUILD_BINARY))" --codec "$(CODEC)" "$(COMPRESSION_SET)" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(COMPRESSION_OUT_DIR)" --log-dir "$(COMPRESSION_LOG_DIR)" $(COMPRESSION_LIMIT_FLAG) $(COMPRESSION_REFERENCE_BACKEND_FLAG) $(COMPRESSION_REFERENCE_PRESET_FLAG) $(COMPRESSION_REFERENCE_THREADS_FLAG) $(COMPRESSION_AVM_TILE_COLUMNS_FLAG) $(COMPRESSION_AVM_TILE_ROWS_FLAG) $(COMPRESSION_REFERENCE_ARGS_FLAG) $(COMPRESSION_SETTINGS_FLAG) $(COMPRESSION_QP_FLAG) $(COMPRESSION_REFRESH_REFERENCE_FLAG) $(COMPRESSION_DIRECT_SOURCE_FILES_FLAG)
 
 benchmark-encode-matrix: build
-	$(PYTHON) scripts/benchmark_encode_matrix.py "$(ENCODE_MATRIX_SET)" --ff "$(abspath $(BUILD_BINARY))" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(ENCODE_MATRIX_OUT_DIR)" --av2-lossy-qp "$(ENCODE_MATRIX_AV2_LOSSY_QP)" $(ENCODE_MATRIX_RUN_FLAG) $(ENCODE_MATRIX_CODECS_FLAG) $(ENCODE_MATRIX_MODES_FLAG) $(ENCODE_MATRIX_BASELINE_FLAG) $(ENCODE_MATRIX_LIMIT_FLAG) $(ENCODE_MATRIX_FRAMES_FLAG) $(ENCODE_MATRIX_AV2_PREDICTIVE_FLAG) $(ENCODE_MATRIX_DIRECT_SOURCE_FILES_FLAG)
+	$(PYTHON) scripts/benchmark_encode_matrix.py "$(ENCODE_MATRIX_SET)" --ff "$(abspath $(BUILD_BINARY))" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --out-dir "$(ENCODE_MATRIX_OUT_DIR)" --av2-lossy-qp "$(ENCODE_MATRIX_AV2_LOSSY_QP)" --vvc-lossy-qp "$(ENCODE_MATRIX_VVC_LOSSY_QP)" $(ENCODE_MATRIX_RUN_FLAG) $(ENCODE_MATRIX_CODECS_FLAG) $(ENCODE_MATRIX_MODES_FLAG) $(ENCODE_MATRIX_BASELINE_FLAG) $(ENCODE_MATRIX_LIMIT_FLAG) $(ENCODE_MATRIX_FRAMES_FLAG) $(ENCODE_MATRIX_AV2_PREDICTIVE_FLAG) $(ENCODE_MATRIX_DIRECT_SOURCE_FILES_FLAG)
 
 validate-geometry-sweep: build
 	for codec in $(GEOMETRY_SWEEP_CODECS); do \
@@ -228,6 +230,7 @@ validate-geometry-sweep: build
 				if [ "$$codec" = "av2" ]; then settings='$(GEOMETRY_SWEEP_AV2_SETTINGS_FLAG)'; fi; \
 				if [ "$$mode" = "lossy" ]; then extra="--force-lossy"; fi; \
 				if [ "$$codec" = "av2" ] && [ "$$mode" = "lossy" ]; then extra="$$extra --qp $(GEOMETRY_SWEEP_AV2_LOSSY_QP)"; fi; \
+				if [ "$$codec" = "vvc" ] && [ "$$mode" = "lossy" ]; then extra="$$extra --qp $(GEOMETRY_SWEEP_VVC_LOSSY_QP)"; fi; \
 				$(PYTHON) scripts/run_validation_set.py --ff "$(abspath $(BUILD_BINARY))" --codec "$$codec" "$$set" --set-dir "$(VALIDATION_SET_DIR)" --vector-dir "$(VALIDATION_OUT_DIR)" --encoded-dir "$(VALIDATION_ENCODED_DIR)" --log-dir "$(VALIDATION_LOG_DIR)" --reference-mode "$(GEOMETRY_SWEEP_REFERENCE_MODE)" --stop-on-fail $$settings $$extra; \
 			done; \
 		done; \

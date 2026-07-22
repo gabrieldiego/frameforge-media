@@ -70,13 +70,13 @@ they generate frames rather than ending at a file EOF.
 Raw planar YUV and gray inputs carry bit depth as checked numeric data rather
 than as one enum variant per depth. The public API shape is documented in
 [`raw-input-formats.md`](raw-input-formats.md): use constructors such as
-`PixelFormat::yuv420(10)` and `PixelFormat::gray(16)`. The CLI currently uses a
-shared bit-depth converter when an input is higher-bit-depth but the selected
-codec path only accepts the same planar layout at 8-bit; this converter does
-not change chroma sampling or color family. Codec paths that support an exact
-higher depth, such as AV2 4:2:0/4:2:2/4:4:4 at 10 bits and VVC
-4:2:0/4:2:2/4:4:4 through 12 bits, receive the original raw format without
-conversion.
+`PixelFormat::yuv420(10)` and `PixelFormat::gray(16)`. The CLI currently uses
+a shared frame-format converter for reversible packed RGB24 to planar GBR and
+for higher-bit-depth inputs where the selected codec path only accepts the same
+planar layout at 8-bit. The fallback converter does not change chroma sampling
+or convert RGB to YUV. Codec paths that support an exact higher depth, such as
+AV2 4:2:0/4:2:2/4:4:4 at 10 bits and VVC 4:2:0/4:2:2/4:4:4 through 12 bits,
+receive the original raw format without conversion.
 Lossless mode adds a stricter stream-exact requirement and never uses the
 8-bit fallback converter. Current lossless validation is enabled for AV2
 4:2:0/4:2:2/4:4:4 at 8/10 bits and VVC 4:2:0/4:2:2/4:4:4 at 8 through 12
@@ -87,8 +87,9 @@ Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.
 Bare keys imply `true`, for example `--set lossless`. Shared settings such as
 `lossless` are global and apply to any codec. `--qp <1..255>` is the top-level
-lossy alternative to `--set lossless`; it currently drives AV2's experimental
-planar residual quantizer and is rejected for codecs that do not consume it.
+lossy alternative to `--set lossless`; it currently drives AV2 and VVC
+experimental planar residual quantizers and is rejected for codecs that do not
+consume it.
 Codec-specific setting catalogs carry codec-local controls such as AV2's
 experimental `--set predictive` lossless mode. Unknown options should still
 fail early instead of silently becoming unused metadata.
@@ -100,3 +101,7 @@ qindex; for example, `--qp 24` signals `base_qindex=80`. Lossless mode remains
 coded-lossless with `base_qindex=0`. Delta-q syntax is wired into the header
 model but remains disabled until the encoder tracks and emits per-superblock
 qindex adjustments.
+
+VVC maps `--qp` into the slice luma QP used by the current residual path and
+derives chroma QP from the same offset as the default lossy configuration.
+Lossless VVC coding keeps its QP-independent exact paths.

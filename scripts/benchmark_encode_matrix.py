@@ -44,6 +44,7 @@ def main() -> int:
         help="override each vector's frame count, e.g. --frames 1 for I-frame checks",
     )
     parser.add_argument("--av2-lossy-qp", type=parse_qp, default=24)
+    parser.add_argument("--vvc-lossy-qp", type=parse_qp, default=24)
     parser.add_argument("--av2-predictive", dest="av2_predictive", action="store_true", default=True)
     parser.add_argument("--no-av2-predictive", dest="av2_predictive", action="store_false")
     parser.add_argument(
@@ -114,6 +115,7 @@ def main() -> int:
         "ff": str(args.ff),
         "av2_predictive": args.av2_predictive,
         "av2_lossy_qp": args.av2_lossy_qp,
+        "vvc_lossy_qp": args.vvc_lossy_qp,
         "results": results,
     }
     json_path = args.out_dir / f"{run_name}.json"
@@ -141,8 +143,6 @@ def vector_enabled_for_codec(vector: generate_test_vectors.TestVector, codec: st
 
 
 def mode_supported(vector: generate_test_vectors.TestVector, codec: str, mode: str) -> bool:
-    if codec == "vvc" and vector.fmt == "rgb24":
-        return False
     if codec == "vvc" and mode == "lossy" and vector.fmt == "yuv422p10le":
         return True
     return True
@@ -209,6 +209,8 @@ def run_case(
         command.extend(["--set", setting])
     if codec == "av2" and mode == "lossy":
         command.extend(["--qp", str(args.av2_lossy_qp)])
+    if codec == "vvc" and mode == "lossy":
+        command.extend(["--qp", str(args.vvc_lossy_qp)])
 
     start = time.perf_counter()
     process = subprocess.run(

@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use frameforge_core::{
-    convert_planar_frame_bit_depth, planar_sample_sse, ChromaSampling, PixelFormat, SampleBitDepth,
-    VERSION,
+    convert_frame_format, planar_sample_sse, ChromaSampling, PixelFormat, SampleBitDepth, VERSION,
 };
 
 use crate::args::{self, Command, EncodeArgs};
@@ -612,7 +611,7 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
             if job.source_format == job.format {
                 Ok(reader)
             } else {
-                Ok(Box::new(BitDepthConvertingReader::new(reader, job)?))
+                Ok(Box::new(FrameFormatConvertingReader::new(reader, job)?))
             }
         }
         EncodeInput::Pattern(source) => {
@@ -637,7 +636,7 @@ fn selected_input_byte_len(job: &EncodeJob) -> Result<u64, String> {
     u64::try_from(byte_len).map_err(|_| "selected input byte length overflows u64".to_string())
 }
 
-struct BitDepthConvertingReader<R> {
+struct FrameFormatConvertingReader<R> {
     inner: R,
     width: usize,
     height: usize,
@@ -649,7 +648,7 @@ struct BitDepthConvertingReader<R> {
     frames_remaining: usize,
 }
 
-impl<R: Read> BitDepthConvertingReader<R> {
+impl<R: Read> FrameFormatConvertingReader<R> {
     fn new(inner: R, job: &EncodeJob) -> Result<Self, String> {
         let source_frame_len = job
             .source_format
@@ -678,7 +677,7 @@ impl<R: Read> BitDepthConvertingReader<R> {
             return Ok(false);
         }
         self.inner.read_exact(&mut self.source_frame)?;
-        self.converted_frame = convert_planar_frame_bit_depth(
+        self.converted_frame = convert_frame_format(
             &self.source_frame,
             self.width,
             self.height,
@@ -692,7 +691,7 @@ impl<R: Read> BitDepthConvertingReader<R> {
     }
 }
 
-impl<R: Read> Read for BitDepthConvertingReader<R> {
+impl<R: Read> Read for FrameFormatConvertingReader<R> {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         if output.is_empty() {
             return Ok(0);
@@ -706,6 +705,82 @@ impl<R: Read> Read for BitDepthConvertingReader<R> {
         output[..count].copy_from_slice(&remaining[..count]);
         self.converted_offset += count;
         Ok(count)
+    }
+}
+
+struct FrameFormatConvertingWriter<'a, W: Write + ?Sized> {
+    inner: &'a mut W,
+    width: usize,
+    height: usize,
+    source_format: PixelFormat,
+    target_format: PixelFormat,
+    source_frame: Vec<u8>,
+    source_offset: usize,
+}
+
+impl<'a, W: Write + ?Sized> FrameFormatConvertingWriter<'a, W> {
+    fn new(inner: &'a mut W, job: &EncodeJob) -> Result<Self, String> {
+        let source_frame_len = job.format.frame_len(job.width, job.height).ok_or_else(|| {
+            format!(
+                "frame length overflow for {}x{}:{}",
+                job.width, job.height, job.format
+            )
+        })?;
+        Ok(Self {
+            inner,
+            width: job.width,
+            height: job.height,
+            source_format: job.format,
+            target_format: job.source_format,
+            source_frame: vec![0; source_frame_len],
+            source_offset: 0,
+        })
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        if self.source_offset != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "partial reconstruction frame left in format converter",
+            ));
+        }
+        self.inner.flush()
+    }
+
+    fn convert_and_write_frame(&mut self) -> std::io::Result<()> {
+        let converted = convert_frame_format(
+            &self.source_frame,
+            self.width,
+            self.height,
+            self.source_format,
+            self.target_format,
+        )
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+        self.inner.write_all(&converted)?;
+        self.source_offset = 0;
+        Ok(())
+    }
+}
+
+impl<W: Write + ?Sized> Write for FrameFormatConvertingWriter<'_, W> {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let mut consumed = 0usize;
+        while consumed < input.len() {
+            let available = self.source_frame.len() - self.source_offset;
+            let count = available.min(input.len() - consumed);
+            self.source_frame[self.source_offset..self.source_offset + count]
+                .copy_from_slice(&input[consumed..consumed + count]);
+            self.source_offset += count;
+            consumed += count;
+            if self.source_offset == self.source_frame.len() {
+                self.convert_and_write_frame()?;
+            }
+        }
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.finish()
     }
 }
 
@@ -951,10 +1026,7 @@ fn print_encode_config(codec_name: &str, args: &EncodeArgs, job: &EncodeJob) {
         job.fps.as_deref().unwrap_or("unspecified")
     );
     if job.source_format != job.format {
-        eprintln!(
-            "input-convert: bit_depth {} -> {}",
-            job.source_format, job.format
-        );
+        eprintln!("input-convert: {} -> {}", job.source_format, job.format);
     }
     for filter in &args.filters {
         eprintln!("filter: {filter}");
@@ -998,22 +1070,14 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
     if lossless && args.qp.is_some() {
         return Err("--qp is mutually exclusive with --set lossless".to_string());
     }
-    if args.qp.is_some() && codec != "av2" {
-        return Err("--qp is currently implemented for AV2 encode only".to_string());
+    if args.qp.is_some() && !matches!(codec, "av2" | "vvc") {
+        return Err("--qp is currently implemented for AV2 and VVC encode only".to_string());
     }
     #[cfg(feature = "codec-av2")]
     let av2_predictive = boolean_setting_enabled(&args.settings, "predictive")?;
     #[cfg(not(feature = "codec-av2"))]
     let _ = boolean_setting_enabled(&args.settings, "predictive")?;
-    if source_format == PixelFormat::Rgb24 {
-        if codec != "av2" {
-            return Err(
-                "packed rgb24 encode is currently implemented for AV2 only; use planar gbrp8 for VVC"
-                    .to_string(),
-            );
-        }
-    }
-    let format = if lossless {
+    let format = if lossless && source_format != PixelFormat::Rgb24 {
         source_format
     } else {
         codec_input_format(codec, source_format)
@@ -1103,6 +1167,9 @@ fn boolean_setting_enabled(settings: &[String], setting_name: &str) -> Result<bo
 fn codec_input_format(codec: &str, source_format: PixelFormat) -> PixelFormat {
     if codec_accepts_format(codec, source_format) {
         return source_format;
+    }
+    if source_format == PixelFormat::Rgb24 && codec_accepts_format(codec, PixelFormat::Gbrp8) {
+        return PixelFormat::Gbrp8;
     }
     let Some(target_depth) = SampleBitDepth::new(8) else {
         return source_format;
@@ -1341,14 +1408,30 @@ fn encode_av2(job: EncodeJob) -> Result<(), String> {
             metrics.reconstruction,
         );
     };
-    frameforge_codecs::av2::av2_encode_fixed_black_444_with_options_and_frame_metrics(
-        &mut input,
-        &mut output,
-        recon.as_mut().map(|writer| writer as &mut dyn Write),
-        request,
-        options,
-        Some(&mut frame_metrics),
-    )?;
+    if job.source_format != job.format && recon.is_some() {
+        let mut recon_converter =
+            FrameFormatConvertingWriter::new(recon.as_mut().expect("checked Some"), &job)?;
+        frameforge_codecs::av2::av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut input,
+            &mut output,
+            Some(&mut recon_converter as &mut dyn Write),
+            request,
+            options,
+            Some(&mut frame_metrics),
+        )?;
+        recon_converter
+            .finish()
+            .map_err(|err| format!("failed to finish reconstruction conversion: {err}"))?;
+    } else {
+        frameforge_codecs::av2::av2_encode_fixed_black_444_with_options_and_frame_metrics(
+            &mut input,
+            &mut output,
+            recon.as_mut().map(|writer| writer as &mut dyn Write),
+            request,
+            options,
+            Some(&mut frame_metrics),
+        )?;
+    }
     if let (Some(path), Some(writer)) = (job.recon.as_deref(), recon.as_mut()) {
         flush_writer(path, writer)?;
     }
@@ -1390,19 +1473,42 @@ fn encode_vvc(job: EncodeJob) -> Result<(), String> {
             metrics.reconstruction,
         );
     };
-    frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
-        &mut input,
-        &mut output,
-        recon.as_mut().map(|writer| writer as &mut dyn Write),
-        params,
-        geometry,
-        limits,
-        job.format,
-        frameforge_codecs::vvc::VvcEncodeOptions {
-            lossless: job.lossless,
-        },
-        Some(&mut frame_metrics),
-    )?;
+    if job.source_format != job.format && recon.is_some() {
+        let mut recon_converter =
+            FrameFormatConvertingWriter::new(recon.as_mut().expect("checked Some"), &job)?;
+        frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+            &mut input,
+            &mut output,
+            Some(&mut recon_converter as &mut dyn Write),
+            params,
+            geometry,
+            limits,
+            job.format,
+            frameforge_codecs::vvc::VvcEncodeOptions {
+                lossless: job.lossless,
+                qp: job.qp,
+            },
+            Some(&mut frame_metrics),
+        )?;
+        recon_converter
+            .finish()
+            .map_err(|err| format!("failed to finish reconstruction conversion: {err}"))?;
+    } else {
+        frameforge_codecs::vvc::vvc_yuv_encode_stream_with_limits_and_options_and_frame_metrics(
+            &mut input,
+            &mut output,
+            recon.as_mut().map(|writer| writer as &mut dyn Write),
+            params,
+            geometry,
+            limits,
+            job.format,
+            frameforge_codecs::vvc::VvcEncodeOptions {
+                lossless: job.lossless,
+                qp: job.qp,
+            },
+            Some(&mut frame_metrics),
+        )?;
+    }
     if let (Some(path), Some(writer)) = (job.recon.as_deref(), recon.as_mut()) {
         flush_writer(path, writer)?;
     }
@@ -2121,11 +2227,13 @@ mod tests {
     }
 
     #[test]
-    fn encode_job_rejects_rgb24_for_vvc_path() {
+    fn encode_job_accepts_rgb24_for_vvc_path_via_common_repack() {
         let path = temp_input_path("one_frame_8x8_rgb24_vvc", "rgb");
+        let input = (0..PixelFormat::Rgb24.frame_len(8, 8).unwrap())
+            .map(|index| ((index * 13 + 5) & 0xff) as u8)
+            .collect::<Vec<_>>();
         let mut file = File::create(&path).expect("create temp rgb");
-        file.write_all(&vec![0; PixelFormat::Rgb24.frame_len(8, 8).unwrap()])
-            .expect("write temp rgb");
+        file.write_all(&input).expect("write temp rgb");
         drop(file);
 
         let args = EncodeArgs {
@@ -2142,10 +2250,18 @@ mod tests {
             ..EncodeArgs::default()
         };
 
-        let err = encode_job(&args).expect_err("VVC rgb24 path should be rejected");
-        assert!(
-            err.contains("packed rgb24 encode is currently implemented for AV2 only"),
-            "{err}"
+        let job = encode_job(&args).expect("VVC rgb24 is repacked into native gbrp8");
+        assert!(job.lossless);
+        assert_eq!(job.source_format, PixelFormat::Rgb24);
+        assert_eq!(job.format, PixelFormat::Gbrp8);
+        let mut reader = open_job_reader(&job).expect("open rgb reader");
+        let mut forwarded = Vec::new();
+        reader
+            .read_to_end(&mut forwarded)
+            .expect("read forwarded gbrp8 frame");
+        assert_eq!(
+            forwarded,
+            convert_frame_format(&input, 8, 8, PixelFormat::Rgb24, PixelFormat::Gbrp8).unwrap()
         );
         let _ = fs::remove_file(path);
     }

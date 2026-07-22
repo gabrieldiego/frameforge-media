@@ -58,7 +58,7 @@ def main() -> int:
     parser.add_argument(
         "--qp",
         type=parse_qp,
-        help="pass a lossy AV2 --qp value and treat manifest lossless rows as lossy",
+        help="pass a lossy AV2/VVC --qp value and treat manifest lossless rows as lossy",
     )
     parser.add_argument(
         "--force-lossy",
@@ -72,8 +72,8 @@ def main() -> int:
     )
     parser.add_argument("--stop-on-fail", action="store_true")
     args = parser.parse_args()
-    if args.qp is not None and args.codec.lower() != "av2":
-        parser.error("--qp is currently supported for AV2 validation only")
+    if args.qp is not None and args.codec.lower() not in ("av2", "vvc"):
+        parser.error("--qp is currently supported for AV2 and VVC validation only")
 
     if not args.ff.exists():
         print(f"error: missing CLI binary: {args.ff}; run 'make build' first", file=sys.stderr)

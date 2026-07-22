@@ -5,32 +5,39 @@ mod recon;
 mod syntax;
 pub(super) mod transform;
 
-use super::VvcIntraPredictionMode;
 use super::VvcSample;
+use super::{VvcChromaIntraPredictionMode, VvcIntraPredictionMode};
 
 #[cfg(test)]
 mod tests;
 
-pub(super) use transform::{
-    inverse_transform_vvc_chroma_quantized_block_into,
-    inverse_transform_vvc_luma_quantized_block_into, quantize_vvc_chroma_residual_greedy,
-    quantize_vvc_chroma_sample, quantize_vvc_luma_residual_greedy, reconstruct_vvc_chroma,
-    VvcInverseTransformScratch,
-};
 #[cfg(test)]
 pub(super) use transform::{
-    inverse_transform_vvc_luma_residual_levels, quantize_vvc_chroma, transform_vvc_tu,
-    VVC_CHROMA_DC_BASE, VVC_LUMA_DC_BASE,
+    inverse_transform_vvc_chroma_quantized_block_into,
+    inverse_transform_vvc_luma_quantized_block_into, inverse_transform_vvc_luma_residual_levels,
+    quantize_vvc_chroma, quantize_vvc_luma_residual_greedy, transform_vvc_tu, VVC_CHROMA_DC_BASE,
+    VVC_LUMA_DC_BASE,
+};
+pub(super) use transform::{
+    inverse_transform_vvc_chroma_quantized_block_into_with_qp,
+    inverse_transform_vvc_luma_quantized_block_into_with_qp,
+    quantize_vvc_chroma_residual_greedy_with_qp, quantize_vvc_chroma_sample,
+    quantize_vvc_luma_residual_greedy_with_qp, reconstruct_vvc_chroma, VvcInverseTransformScratch,
+    VVC_DEFAULT_LOSSY_CHROMA_QP, VVC_DEFAULT_LOSSY_LUMA_QP,
 };
 
 pub(super) use prediction::{
-    fill_visible_chroma_node, fill_visible_luma_node, predict_vvc_chroma_dc_block_into,
-    predict_vvc_luma_intra_block_into, VvcDcPredictionScratch,
+    fill_visible_chroma_node, fill_visible_luma_node,
+    predict_vvc_chroma_intra_block_into_with_availability,
+    predict_vvc_luma_intra_block_into_with_availability, VvcDcPredictionScratch,
+    VvcPlaneAvailability,
 };
 pub use quant::quantize_vvc_color;
 #[cfg(test)]
 pub(super) use quant::quantize_vvc_frame_with_reconstruction;
-pub(super) use quant::{quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction};
+pub(super) use quant::{
+    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp,
+};
 #[cfg(test)]
 pub(super) use recon::reconstruct_vvc_residual_frame;
 pub(super) use syntax::{
@@ -54,6 +61,7 @@ pub struct VvcQuantizedColor {
     pub(super) luma_tu_has_ac: [bool; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_count: usize,
     pub(super) chroma_tu_count: usize,
+    pub(super) chroma_tu_intra_modes: [VvcChromaIntraPredictionMode; MAX_VVC_CHROMA_TUS],
     pub(super) cb_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
     pub(super) cr_tu_dc_levels: [i16; MAX_VVC_CHROMA_TUS],
     pub(super) cb_tu_ac_levels: [[i16; VVC_CHROMA_AC_COEFFS_PER_TU]; MAX_VVC_CHROMA_TUS],

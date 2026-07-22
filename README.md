@@ -164,8 +164,8 @@ failing. Source filters require explicit `--frames` because they do not have a
 file EOF. Filter options come next. Output/encoder options, such as
 `--recon output.yuv`, `--set lossless`, `--qp <1..255>`, `--preset`, and
 repeated `--set key[=value]`, belong after `--encode codec:output`. Bare
-`--set` keys imply `true`. `--qp` requests lossy AV2 quantization and is
-mutually exclusive with `--set lossless`; lower values preserve more detail.
+`--set` keys imply `true`. `--qp` requests lossy AV2 or VVC quantization and
+is mutually exclusive with `--set lossless`; lower values preserve more detail.
 Global accepted settings are listed by `ff codecs`; codec-specific settings
 are listed with the codec that owns them. The current AV2-specific
 `--set predictive` mode is experimental and lossless-only. It starts a

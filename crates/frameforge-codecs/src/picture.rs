@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "av2"), allow(dead_code))]
+
 use std::io::{ErrorKind, Read};
 
 pub(crate) use frameforge_core::{ChromaSampling, PixelFormat, SampleBitDepth};

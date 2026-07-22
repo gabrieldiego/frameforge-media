@@ -57,8 +57,8 @@ When `VALIDATION_REFERENCE_MODE` is `auto` or `required` and a reference decoder
 is used, the reference reconstruction must also match the internal
 reconstruction. A lossless stream should only be enabled for a codec when both
 checks are expected to pass.
-For AV2 `rgb24` lossless vectors, FrameForge writes packed RGB reconstruction
-bytes while AVM's raw decoder output is planar identity GBR. The validation
+For `rgb24` lossless vectors, FrameForge writes packed RGB reconstruction bytes
+while reference raw decoder output may be planar identity GBR. The validation
 runner normalizes that reference output back to packed `rgb24` before comparing
 checksums. For `gbrp8` vectors, the source and internal reconstruction are
 already planar GBR, so validation compares the bytes directly.
@@ -75,10 +75,11 @@ make validate-set CODEC=av2 \
   VALIDATION_REFERENCE_MODE=required
 ```
 
-Explicit lossy AV2 smoke checks can invoke `./ff encode ... --qp N` directly.
-`--qp` is mutually exclusive with `--set lossless`; lossy checks should compare
-bitstream size, reconstruction PSNR, and reference-decoder agreement with the
-encoder reconstruction rather than source-byte equality.
+Explicit lossy AV2 and VVC smoke checks can invoke
+`./ff encode ... --qp N` directly. `--qp` is mutually exclusive with
+`--set lossless`; lossy checks should compare bitstream size, reconstruction
+PSNR, and reference-decoder agreement with the encoder reconstruction rather
+than source-byte equality.
 
 `scripts/generate_predictive_sweep.py` creates that local ignored manifest and
 384 local Y4M crops: six AOM CTC B2 screen-content variants, 64 geometries from
@@ -228,6 +229,19 @@ scripts/summarize_encoder_instrumentation.py --help
 
 The comparative workflow and source-code audit pointers are documented in
 [`av2-comparative-instrumentation.md`](av2-comparative-instrumentation.md).
+
+For VVC frame-stage and per-CTU accounting, compile the gated `vvc-stats`
+feature through `VVC_STATS=1`. `FRAMEFORGE_VVC_STATS` writes per-frame timing
+and mode counts as JSONL, while `FRAMEFORGE_VVC_CTU_BITS` writes per-CTU CABAC
+symbol estimates. The normal build does not compile these counters.
+
+```sh
+make build VVC_STATS=1
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_stats.jsonl \
+FRAMEFORGE_VVC_CTU_BITS=verification/generated/profiling/vvc_ctu_bits.jsonl \
+  ./ff encode input.yuv --video 1920x1080:yuv420p8 --frames 1 \
+  --encode vvc:verification/generated/profiling/frameforge_vvc.obu --qp 24
+```
 
 For local source-file manifests backed by large Y4M inputs, set
 `COMPRESSION_DIRECT_SOURCE_FILES=1` to feed the source path directly and use
