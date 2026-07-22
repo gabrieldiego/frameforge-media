@@ -1761,6 +1761,77 @@ make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE
 make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
 ```
 
+## VVC Base CCLM Chroma Mode
+
+Checkpoint: `vvc-cclm-base-1f`.
+
+Changes retained:
+
+- VVC chroma intra mode selection can now choose the base CCLM/LM chroma mode
+  where the current dual-tree CTU syntax allows `cclm_mode_flag`.
+- The predictor derives LM parameters from reconstructed luma and neighboring
+  chroma templates, and is shared by quantization and reconstruction so the
+  internal encoder reconstruction stays aligned with reference decode.
+- CCLM usage is counted by the compile-gated `vvc-stats` CTU and frame
+  counters as `chroma_mode_cclm`.
+- No mode-selection constants were tuned. The checkpoint wires a codec feature
+  only: MDLM_L/MDLM_T and 4:2:2 CCLM remain TODO feature work.
+
+First-frame six-vector matrix versus `vvc-unified-lossless-intra-1f`:
+
+| Codec | Mode | Total bytes | FPS | Notes |
+|---|---|---:|---:|---|
+| AV2 | lossless | 6,586,445 | 2.64 | unchanged reference context |
+| AV2 | qp=24 | 2,400,148 | 1.14 | unchanged reference context |
+| VVC | lossless | 6,436,959 | 0.94 | -343,296 bytes versus prior VVC checkpoint |
+| VVC | qp=24 | 8,828,183 | 0.37 | -1,557,214 bytes versus prior VVC checkpoint |
+
+Most of the immediate win came from RGB and 4:4:4 chroma correlation. The
+4:2:2 rows are byte-identical because this checkpoint keeps CCLM disabled for
+that sampling mode until the compatible syntax/prediction path is completed.
+
+High-depth smoke lossless size spot-check after the change:
+
+| Vector | Previous | After | Delta |
+|---|---:|---:|---:|
+| canary_420_10 | 321 | 321 | 0 |
+| canary_422_10 | 408 | 408 | 0 |
+| canary_444_10 | 580 | 580 | 0 |
+| canary_420_12 | 465 | 465 | 0 |
+| canary_422_12 | 594 | 594 | 0 |
+| canary_444_12 | 843 | 765 | -78 |
+
+Matrix command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-cclm-base-1f \
+  ENCODE_MATRIX_CODECS="av2 vvc" \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-unified-lossless-intra-1f.json
+```
+
+Generated report:
+
+```text
+verification/generated/encode_matrix/vvc-cclm-base-1f.md
+```
+
+Validation:
+
+```sh
+cargo check -p frameforge-codecs --features "vvc"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+cargo test -p frameforge-codecs vvc --features "vvc"
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make build
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+make validate-geometry-sweep GEOMETRY_SWEEP_REFERENCE_MODE=off
+```
+
 ## References
 
 - Cargo profile settings:

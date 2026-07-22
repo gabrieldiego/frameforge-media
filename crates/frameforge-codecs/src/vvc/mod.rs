@@ -32,7 +32,7 @@ use cabac::{
     initial_vvc_cabac_contexts, vvc_chroma_transform_nodes, vvc_luma_transform_nodes,
     VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
     VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
-    VvcLastSigCoeffPrefixCtxInput,
+    VvcLastSigCoeffPrefixCtxInput, VvcPartSplit,
 };
 #[cfg(test)]
 use cabac::{VvcCtuCabacGenerator, VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};
@@ -361,7 +361,7 @@ impl VvcCtuBitSink {
         let luma_modes = vvc_luma_mode_counts(quantized);
         let chroma_modes = vvc_chroma_mode_counts(quantized);
         let line = format!(
-            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
+            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
             frame_idx,
             region.slice_address,
             region.origin_x / VVC_CTU_SIZE,
@@ -389,6 +389,7 @@ impl VvcCtuBitSink {
             chroma_modes.horizontal,
             chroma_modes.vertical,
             chroma_modes.angular,
+            chroma_modes.cclm,
             dump.context_bin_count,
             dump.semantic_symbols.len(),
             dump.bin_engine_events.len(),
@@ -580,6 +581,7 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
     stats.add_counter("chroma_mode_horizontal", chroma_modes.horizontal as u64);
     stats.add_counter("chroma_mode_vertical", chroma_modes.vertical as u64);
     stats.add_counter("chroma_mode_angular", chroma_modes.angular as u64);
+    stats.add_counter("chroma_mode_cclm", chroma_modes.cclm as u64);
     for idx in 0..quantized.luma_tu_count {
         let dc_nonzero = quantized.luma_tu_dc_levels[idx] != 0;
         let ac_nonzero = quantized.luma_tu_ac_levels[idx]
@@ -656,6 +658,7 @@ struct VvcChromaModeCounts {
     horizontal: usize,
     vertical: usize,
     angular: usize,
+    cclm: usize,
 }
 
 #[cfg(feature = "vvc-stats")]
@@ -677,6 +680,7 @@ fn vvc_chroma_mode_counts(quantized: &VvcQuantizedColor) -> VvcChromaModeCounts 
             VvcChromaIntraPredictionMode::Explicit(VvcIntraPredictionMode::Angular(_)) => {
                 counts.angular += 1
             }
+            VvcChromaIntraPredictionMode::Cclm => counts.cclm += 1,
         }
     }
     counts
@@ -988,18 +992,7 @@ impl VvcIntraPredictionMode {
 pub(in crate::vvc) enum VvcChromaIntraPredictionMode {
     Derived,
     Explicit(VvcIntraPredictionMode),
-}
-
-impl VvcChromaIntraPredictionMode {
-    pub(in crate::vvc) const fn prediction_mode(
-        self,
-        co_located_luma_mode: VvcIntraPredictionMode,
-    ) -> VvcIntraPredictionMode {
-        match self {
-            Self::Derived => co_located_luma_mode,
-            Self::Explicit(mode) => mode,
-        }
-    }
+    Cclm,
 }
 
 // Non-cardinal `Angular(index)` prediction and syntax are wired, but those
@@ -1060,8 +1053,38 @@ pub(in crate::vvc) fn vvc_residual_chroma_explicit_candidate_allowed(
     }
 }
 
+pub(in crate::vvc) fn vvc_chroma_cclm_node_allowed(node: VvcCodingTreeNode) -> bool {
+    // H.266 CodingUnit::checkCCLMAllowed allows CCLM on this dual-tree,
+    // CTU-size subset for unsplit 64x64 chroma nodes, nodes below a root QT
+    // split, root HBT 64x32 nodes, and root HBT followed by VBT.
+    (node.width == 64 && node.height == 64 && node.cqt_depth == 0 && node.mtt_depth == 0)
+        || node.cqt_depth > 0
+        || (node.split_history[0] == VvcPartSplit::HorizontalBinary
+            && node.width == 64
+            && node.height == 32)
+        || (node.split_history[0] == VvcPartSplit::HorizontalBinary
+            && node.split_history[1] == VvcPartSplit::VerticalBinary)
+}
+
+pub(in crate::vvc) fn vvc_residual_chroma_cclm_candidate_allowed(
+    context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    geometry: VvcVideoGeometry,
+) -> bool {
+    if matches!(context.chroma_sampling(), ChromaSampling::Cs422) {
+        return false;
+    }
+    if !vvc_chroma_cclm_node_allowed(node) {
+        return false;
+    }
+    node.fits_visible(
+        geometry.coded_width() as u16,
+        geometry.coded_height() as u16,
+    )
+}
+
 const VVC_LUMA_INTRA_CANDIDATE_CAPACITY: usize = 8;
-const VVC_CHROMA_INTRA_CANDIDATE_CAPACITY: usize = 5;
+const VVC_CHROMA_INTRA_CANDIDATE_CAPACITY: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::vvc) struct VvcLumaIntraCandidateCost {

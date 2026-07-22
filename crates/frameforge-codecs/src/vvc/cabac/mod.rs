@@ -12,7 +12,7 @@ pub(super) use ctu_body::{
 };
 pub(super) use ctu_split::{
     vvc_chroma_transform_nodes, vvc_luma_transform_nodes, VvcCodingTreeNode, VvcCtuCabacOp,
-    VvcCtuPartitionParams, VvcCtuPartitionShape,
+    VvcCtuPartitionParams, VvcCtuPartitionShape, VvcPartSplit,
 };
 #[cfg(test)]
 pub(super) use ctu_split::{VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType};

@@ -28,6 +28,7 @@ pub(super) use transform::{
 
 pub(super) use prediction::{
     fill_visible_chroma_node, fill_visible_luma_node,
+    predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
     predict_vvc_luma_intra_block_into_with_availability, VvcDcPredictionScratch,
     VvcPlaneAvailability,

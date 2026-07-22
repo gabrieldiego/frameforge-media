@@ -7,10 +7,10 @@ use super::{VvcCabacContext, VvcCabacContexts, VvcCabacEncoder};
 use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
-    chroma_subsample_x, chroma_subsample_y, vvc_chroma_explicit_candidate_index,
-    VvcChromaIntraPredictionMode, VvcIntraPredictionMode, VvcResidualComponent,
-    VvcSliceSyntaxConfig, VvcVideoGeometry, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE,
-    VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
+    chroma_subsample_x, chroma_subsample_y, vvc_chroma_cclm_node_allowed,
+    vvc_chroma_explicit_candidate_index, VvcChromaIntraPredictionMode, VvcIntraPredictionMode,
+    VvcResidualComponent, VvcSliceSyntaxConfig, VvcVideoGeometry, VVC_CHROMA_AC_COEFFS_PER_TU,
+    VVC_CTU_SIZE, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
 const VVC_LUMA_ANGULAR_BASE: i16 = 2;
@@ -1079,11 +1079,17 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         tu_idx: usize,
         luma_mode_neighbours: &VvcLumaModeNeighbourState,
     ) {
-        if self.chroma_cclm_enabled(node) {
-            self.contexts
-                .encode(cabac, VvcCabacContext::CclmModeFlag, false);
-        }
         let mode = self.params.chroma_tu_intra_modes[tu_idx];
+        if self.chroma_cclm_enabled(node) {
+            let is_cclm = mode == VvcChromaIntraPredictionMode::Cclm;
+            self.contexts
+                .encode(cabac, VvcCabacContext::CclmModeFlag, is_cclm);
+            if is_cclm {
+                self.contexts
+                    .encode(cabac, VvcCabacContext::CclmModeIdx, false);
+                return;
+            }
+        }
         match mode {
             VvcChromaIntraPredictionMode::Derived => {
                 self.contexts
@@ -1099,6 +1105,9 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                     vvc_chroma_explicit_candidate_index(mode, co_located_luma_mode)
                         .expect("selected VVC chroma explicit mode must be in the candidate table");
                 cabac.encode_bins_ep(u32::from(candidate_index), 2);
+            }
+            VvcChromaIntraPredictionMode::Cclm => {
+                panic!("selected VVC CCLM mode for a node where CCLM is not signaled");
             }
         }
     }
@@ -1119,23 +1128,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         if !self.slice_config.tools.cclm_enabled {
             return false;
         }
-        // H.266 8.4.4 derives CclmEnabled from the dual-tree chroma partition
-        // state for 64x64 CTUs. In the current CTU-local all-intra subset,
-        // CtbLog2SizeY is 6 and sps_qtbtt_dual_tree_intra_flag is enabled, so
-        // the relevant enabled cases are:
-        // - an unsplit 64x64 chroma CTU,
-        // - any chroma CU below a QT split of the root CTU,
-        // - a 64x32 CU produced by root BT_HOR,
-        // - future children below root BT_HOR followed by BT_VER.
-        // The encoder still selects cclm_mode_flag = 0 whenever the flag is
-        // present.
-        (node.width == 64 && node.height == 64 && node.cqt_depth == 0 && node.mtt_depth == 0)
-            || node.cqt_depth > 0
-            || (node.split_history[0] == VvcPartSplit::HorizontalBinary
-                && node.width == 64
-                && node.height == 32)
-            || (node.split_history[0] == VvcPartSplit::HorizontalBinary
-                && node.split_history[1] == VvcPartSplit::VerticalBinary)
+        vvc_chroma_cclm_node_allowed(node)
     }
 
     fn chroma_split_ctx(

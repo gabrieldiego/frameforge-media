@@ -48,6 +48,7 @@ pub(in crate::vvc) enum VvcCabacContext {
     IntraLumaMpmFlag,
     IntraLumaPlanarFlag(u8),
     CclmModeFlag,
+    CclmModeIdx,
     IntraChromaPredMode(u8),
     QtCbfY(u8),
     QtCbfCb(u8),
@@ -284,6 +285,7 @@ impl VvcCabacContext {
                 I_SLICE_INIT[ctx as usize]
             }
             VvcCabacContext::CclmModeFlag => 59,
+            VvcCabacContext::CclmModeIdx => 27,
             VvcCabacContext::IntraChromaPredMode(ctx) => {
                 const I_SLICE_INIT: [u8; 2] = [34, 34];
                 I_SLICE_INIT[ctx as usize]
@@ -427,6 +429,7 @@ impl VvcCabacContext {
                 LOG2_WINDOW[ctx as usize]
             }
             VvcCabacContext::CclmModeFlag => 4,
+            VvcCabacContext::CclmModeIdx => 9,
             VvcCabacContext::IntraChromaPredMode(ctx) => {
                 const LOG2_WINDOW: [u8; 2] = [5, 5];
                 LOG2_WINDOW[ctx as usize]
@@ -545,6 +548,7 @@ pub(in crate::vvc) struct VvcCabacContexts {
     pub(in crate::vvc) intra_luma_mpm_flag: VvcCabacProbModel,
     pub(in crate::vvc) intra_luma_planar_flag: [VvcCabacProbModel; 2],
     pub(in crate::vvc) cclm_mode_flag: VvcCabacProbModel,
+    pub(in crate::vvc) cclm_mode_idx: VvcCabacProbModel,
     pub(in crate::vvc) intra_chroma_pred_mode: [VvcCabacProbModel; 2],
     pub(in crate::vvc) qt_cbf_y: [VvcCabacProbModel; 4],
     pub(in crate::vvc) qt_cbf_cb: [VvcCabacProbModel; 2],
@@ -631,6 +635,11 @@ impl VvcCabacContexts {
                 VvcCabacContext::CclmModeFlag.init_value(),
                 slice_qp,
                 VvcCabacContext::CclmModeFlag.log2_window_size(),
+            ),
+            cclm_mode_idx: VvcCabacProbModel::from_init_value(
+                VvcCabacContext::CclmModeIdx.init_value(),
+                slice_qp,
+                VvcCabacContext::CclmModeIdx.log2_window_size(),
             ),
             intra_chroma_pred_mode: std::array::from_fn(|idx| {
                 VvcCabacProbModel::from_init_value(
@@ -824,6 +833,7 @@ impl VvcCabacContexts {
                     &self.intra_luma_planar_flag[idx as usize]
                 }
                 VvcCabacContext::CclmModeFlag => &self.cclm_mode_flag,
+                VvcCabacContext::CclmModeIdx => &self.cclm_mode_idx,
                 VvcCabacContext::IntraChromaPredMode(idx) => {
                     &self.intra_chroma_pred_mode[idx as usize]
                 }
@@ -905,6 +915,7 @@ impl VvcCabacContexts {
                 self.intra_luma_planar_flag[idx as usize].encode(cabac, bin)
             }
             VvcCabacContext::CclmModeFlag => self.cclm_mode_flag.encode(cabac, bin),
+            VvcCabacContext::CclmModeIdx => self.cclm_mode_idx.encode(cabac, bin),
             VvcCabacContext::IntraChromaPredMode(idx) => {
                 self.intra_chroma_pred_mode[idx as usize].encode(cabac, bin)
             }
