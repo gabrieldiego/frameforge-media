@@ -3092,6 +3092,45 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-cu-mts-hook-1f.json
 ```
 
+## VVC Luma Mode Cell Map
+
+Checkpoint: `vvc-luma-mode-cell-map-1f`.
+
+This checkpoint replaces per-sample luma intra-mode neighbour maps with 4x4
+cell maps in both the quantization search state and CABAC MPM state. Current
+VVC luma leaves are aligned to at least 4x4, so left/above and chroma
+co-located mode queries see the same selected modes while mark operations write
+up to 16x fewer entries.
+
+The first-frame six-vector matrix is byte-neutral against
+`vvc-integer-directional-seed-1f` and shows small fps improvements on several
+rows:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| VVC | lossless | 5,884,724 | 0 |
+| VVC | qp=24 | 5,714,171 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-mode-cell-map-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-integer-directional-seed-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

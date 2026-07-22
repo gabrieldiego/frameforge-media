@@ -679,6 +679,8 @@ fn finalized_vvc_chroma_sample(
 const VVC_LUMA_DIRECTIONAL_SEARCH_CANDIDATE_CAPACITY: usize = 65;
 const VVC_LUMA_DEFAULT_DIRECTIONAL_SEEDS: [u8; 9] = [18, 50, 34, 10, 26, 42, 58, 2, 66];
 const VVC_LUMA_NEARBY_DIRECTIONAL_OFFSETS: [i16; 7] = [0, -1, 1, -2, 2, -4, 4];
+const VVC_LUMA_MODE_CELL_SIZE: usize = 4;
+const VVC_LUMA_MODE_CTU_CELLS: usize = VVC_CTU_SIZE / VVC_LUMA_MODE_CELL_SIZE;
 
 #[derive(Debug, Clone, Copy)]
 struct VvcLumaDirectionalSearchCandidates {
@@ -749,15 +751,16 @@ impl VvcLumaDirectionalSearchCandidates {
 
 #[derive(Debug, Clone)]
 struct VvcLumaModeSearchState {
-    valid: [bool; VVC_CTU_SIZE * VVC_CTU_SIZE],
-    modes: [VvcIntraPredictionMode; VVC_CTU_SIZE * VVC_CTU_SIZE],
+    valid: [bool; VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
+    modes: [VvcIntraPredictionMode; VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
 }
 
 impl VvcLumaModeSearchState {
     fn new() -> Self {
         Self {
-            valid: [false; VVC_CTU_SIZE * VVC_CTU_SIZE],
-            modes: [VvcIntraPredictionMode::Planar; VVC_CTU_SIZE * VVC_CTU_SIZE],
+            valid: [false; VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
+            modes: [VvcIntraPredictionMode::Planar;
+                VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
         }
     }
 
@@ -777,16 +780,22 @@ impl VvcLumaModeSearchState {
         if usize::from(x) >= VVC_CTU_SIZE || usize::from(y) >= VVC_CTU_SIZE {
             return None;
         }
-        let idx = usize::from(y) * VVC_CTU_SIZE + usize::from(x);
+        let cell_x = usize::from(x) / VVC_LUMA_MODE_CELL_SIZE;
+        let cell_y = usize::from(y) / VVC_LUMA_MODE_CELL_SIZE;
+        let idx = cell_y * VVC_LUMA_MODE_CTU_CELLS + cell_x;
         self.valid[idx].then_some(self.modes[idx])
     }
 
     fn mark_node(&mut self, node: VvcCodingTreeNode, mode: VvcIntraPredictionMode) {
         let end_x = node.x.saturating_add(node.width).min(VVC_CTU_SIZE as u16);
         let end_y = node.y.saturating_add(node.height).min(VVC_CTU_SIZE as u16);
-        for y in node.y..end_y {
-            for x in node.x..end_x {
-                let idx = usize::from(y) * VVC_CTU_SIZE + usize::from(x);
+        let start_cell_x = usize::from(node.x) / VVC_LUMA_MODE_CELL_SIZE;
+        let start_cell_y = usize::from(node.y) / VVC_LUMA_MODE_CELL_SIZE;
+        let end_cell_x = usize::from(end_x).div_ceil(VVC_LUMA_MODE_CELL_SIZE);
+        let end_cell_y = usize::from(end_y).div_ceil(VVC_LUMA_MODE_CELL_SIZE);
+        for cell_y in start_cell_y..end_cell_y {
+            for cell_x in start_cell_x..end_cell_x {
+                let idx = cell_y * VVC_LUMA_MODE_CTU_CELLS + cell_x;
                 self.valid[idx] = true;
                 self.modes[idx] = mode;
             }

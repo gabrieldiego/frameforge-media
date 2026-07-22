@@ -15,6 +15,7 @@ use crate::vvc::{
 };
 
 const VVC_LUMA_ANGULAR_BASE: i16 = 2;
+const VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE: u16 = 4;
 const VVC_NUM_LUMA_MODES: u32 = 67;
 const VVC_NUM_MOST_PROBABLE_LUMA_MODES: usize = 6;
 const VVC_REMAINING_LUMA_MODE_COUNT: u32 =
@@ -261,16 +262,20 @@ struct VvcChromaNeighbourInfo {
 struct VvcLumaModeNeighbourState {
     width: u16,
     height: u16,
+    cell_width: usize,
     valid: Vec<bool>,
     modes: Vec<VvcIntraPredictionMode>,
 }
 
 impl VvcLumaModeNeighbourState {
     fn new(width: u16, height: u16) -> Self {
-        let samples = usize::from(width) * usize::from(height);
+        let cell_width = usize::from(width.div_ceil(VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE));
+        let cell_height = usize::from(height.div_ceil(VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE));
+        let samples = cell_width * cell_height;
         Self {
             width,
             height,
+            cell_width,
             valid: vec![false; samples],
             modes: vec![VvcIntraPredictionMode::Planar; samples],
         }
@@ -280,7 +285,9 @@ impl VvcLumaModeNeighbourState {
         if x >= self.width || y >= self.height {
             return None;
         }
-        Some(usize::from(y) * usize::from(self.width) + usize::from(x))
+        let cell_x = usize::from(x / VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE);
+        let cell_y = usize::from(y / VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE);
+        Some(cell_y * self.cell_width + cell_x)
     }
 
     fn mode_at(&self, x: u16, y: u16) -> Option<VvcIntraPredictionMode> {
@@ -325,9 +332,13 @@ impl VvcLumaModeNeighbourState {
     fn mark_leaf(&mut self, node: VvcCodingTreeNode, mode: VvcIntraPredictionMode) {
         let end_x = (node.x + node.width).min(self.width);
         let end_y = (node.y + node.height).min(self.height);
-        for y in node.y..end_y {
-            for x in node.x..end_x {
-                let index = self.index(x, y).expect("leaf coordinates are in range");
+        let start_cell_x = node.x / VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE;
+        let start_cell_y = node.y / VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE;
+        let end_cell_x = end_x.div_ceil(VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE);
+        let end_cell_y = end_y.div_ceil(VVC_LUMA_MODE_NEIGHBOUR_CELL_SIZE);
+        for cell_y in start_cell_y..end_cell_y {
+            for cell_x in start_cell_x..end_cell_x {
+                let index = usize::from(cell_y) * self.cell_width + usize::from(cell_x);
                 self.valid[index] = true;
                 self.modes[index] = mode;
             }
