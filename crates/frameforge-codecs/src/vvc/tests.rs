@@ -1232,6 +1232,17 @@ fn vvc_ctu_body_routes_ac_coefficients_without_a_feature_gate() {
     let with_ac = vvc_ctu_partition_cabac_bits(&params, vvc_test_slice_config());
 
     assert_ne!(with_ac, without_ac);
+
+    let mut lossless_config = vvc_test_slice_config();
+    lossless_config.tools.transform_skip_enabled = true;
+    params.luma_tu_transform_skip[0] = true;
+    params.luma_tu_mts_index[0] = 0;
+    let transform_skip_with_ac = vvc_ctu_partition_cabac_bits(&params, lossless_config);
+    params.luma_tu_has_ac[0] = false;
+    params.luma_tu_ac_levels[0][0] = 0;
+    let transform_skip_without_ac = vvc_ctu_partition_cabac_bits(&params, lossless_config);
+
+    assert_ne!(transform_skip_with_ac, transform_skip_without_ac);
 }
 
 #[test]

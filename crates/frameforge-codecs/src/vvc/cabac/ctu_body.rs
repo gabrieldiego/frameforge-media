@@ -698,29 +698,17 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         let mts_index = self.params.luma_tu_mts_index[tu_idx];
         let mut residual =
             VvcResidualCabacEncoder::new(&mut *self.contexts, self.slice_config.residual_options());
-        if transform_skip {
-            debug_assert_eq!(mts_index, 0);
-            VvcResidualCabacSymbolStream::emit_luma_transform_skip_coefficients_from_levels(
-                log2_width,
-                log2_height,
-                dc_level,
-                ac_levels,
-                has_ac,
-                &mut residual,
-                cabac,
-            );
-        } else {
-            VvcResidualCabacSymbolStream::emit_luma_coefficients(
-                log2_width,
-                log2_height,
-                dc_level,
-                ac_levels,
-                has_ac,
-                mts_index,
-                &mut residual,
-                cabac,
-            );
-        }
+        VvcResidualCabacSymbolStream::emit_luma_stored_coefficients(
+            log2_width,
+            log2_height,
+            dc_level,
+            ac_levels,
+            has_ac,
+            transform_skip,
+            mts_index,
+            &mut residual,
+            cabac,
+        );
     }
 
     fn emit_chroma_tree(
@@ -1047,29 +1035,17 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         let log2_width = (width as u16).ilog2() as u8;
         let log2_height = (height as u16).ilog2() as u8;
         let mut residual = VvcResidualCabacEncoder::new(contexts, slice_config.residual_options());
-        if transform_skip {
-            VvcResidualCabacSymbolStream::emit_chroma_transform_skip_first4x4_coefficients(
-                component,
-                log2_width,
-                log2_height,
-                dc_level,
-                ac_levels,
-                has_ac,
-                &mut residual,
-                cabac,
-            );
-        } else {
-            VvcResidualCabacSymbolStream::emit_chroma_first4x4_coefficients(
-                component,
-                log2_width,
-                log2_height,
-                dc_level,
-                ac_levels,
-                has_ac,
-                &mut residual,
-                cabac,
-            );
-        }
+        VvcResidualCabacSymbolStream::emit_chroma_stored_coefficients(
+            component,
+            log2_width,
+            log2_height,
+            dc_level,
+            ac_levels,
+            has_ac,
+            transform_skip,
+            &mut residual,
+            cabac,
+        );
     }
 
     fn emit_chroma_transform_only_leaf(

@@ -2980,6 +2980,44 @@ make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=requi
 make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
 ```
 
+## VVC Stored Residual Emitter Unification
+
+Checkpoint: `vvc-stored-residual-unified-1f`.
+
+This checkpoint removes the last production CTU-body branch that chose separate
+stored-coefficient emitter wrappers for transformed and transform-skipped VVC
+TUs. The luma and chroma CTU emitters now pass the selected TU residual coding
+mode as data into one stored-coefficient entry point per component family. This
+keeps lossy/lossless behavior gated at block-mode selection while sharing the
+same residual syntax implementation.
+
+The change is intentionally byte-neutral against
+`vvc-luma-dct-selector-gated-1f`:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| VVC | lossless | 5,884,724 | 0 |
+| VVC | qp=24 | 5,714,171 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-stored-residual-unified-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-dct-selector-gated-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

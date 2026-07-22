@@ -1033,16 +1033,20 @@ impl VvcResidualCabacSymbolStream {
         );
     }
 
-    pub(in crate::vvc) fn emit_luma_coefficients(
+    pub(in crate::vvc) fn emit_luma_stored_coefficients(
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
         ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
         has_ac: bool,
+        transform_skip: bool,
         mts_index: u8,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
+        if transform_skip {
+            debug_assert_eq!(mts_index, 0);
+        }
         Self::emit_stored_coefficients_with_tool_flags(
             VvcResidualComponent::Luma,
             log2_tb_width,
@@ -1051,34 +1055,9 @@ impl VvcResidualCabacSymbolStream {
             ac_levels,
             has_ac,
             luma_stored_coeff_stride(log2_tb_width, log2_tb_height),
+            transform_skip,
             false,
-            false,
-            mts_index,
-            encoder,
-            cabac,
-        );
-    }
-
-    pub(in crate::vvc) fn emit_luma_transform_skip_coefficients_from_levels(
-        log2_tb_width: u8,
-        log2_tb_height: u8,
-        dc_level: i16,
-        ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
-        has_ac: bool,
-        encoder: &mut VvcResidualCabacEncoder<'_>,
-        cabac: &mut VvcCabacEncoder,
-    ) {
-        Self::emit_stored_coefficients_with_tool_flags(
-            VvcResidualComponent::Luma,
-            log2_tb_width,
-            log2_tb_height,
-            dc_level,
-            ac_levels,
-            has_ac,
-            luma_stored_coeff_stride(log2_tb_width, log2_tb_height),
-            true,
-            false,
-            0,
+            if transform_skip { 0 } else { mts_index },
             encoder,
             cabac,
         );
@@ -1126,13 +1105,14 @@ impl VvcResidualCabacSymbolStream {
         );
     }
 
-    pub(in crate::vvc) fn emit_chroma_first4x4_coefficients(
+    pub(in crate::vvc) fn emit_chroma_stored_coefficients(
         component: VvcResidualComponent,
         log2_tb_width: u8,
         log2_tb_height: u8,
         dc_level: i16,
         ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
         has_ac: bool,
+        transform_skip: bool,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
@@ -1148,37 +1128,7 @@ impl VvcResidualCabacSymbolStream {
             ac_levels,
             has_ac,
             4,
-            false,
-            false,
-            0,
-            encoder,
-            cabac,
-        );
-    }
-
-    pub(in crate::vvc) fn emit_chroma_transform_skip_first4x4_coefficients(
-        component: VvcResidualComponent,
-        log2_tb_width: u8,
-        log2_tb_height: u8,
-        dc_level: i16,
-        ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
-        has_ac: bool,
-        encoder: &mut VvcResidualCabacEncoder<'_>,
-        cabac: &mut VvcCabacEncoder,
-    ) {
-        debug_assert!(matches!(
-            component,
-            VvcResidualComponent::ChromaCb | VvcResidualComponent::ChromaCr
-        ));
-        Self::emit_stored_coefficients_with_tool_flags(
-            component,
-            log2_tb_width,
-            log2_tb_height,
-            dc_level,
-            ac_levels,
-            has_ac,
-            4,
-            true,
+            transform_skip,
             false,
             0,
             encoder,
