@@ -3429,6 +3429,58 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mts-syntax-1f.json
 ```
 
+## VVC Luma DCT Selector Enabled
+
+Checkpoint: `vvc-luma-dct-selector-enabled-1f`.
+
+This checkpoint promotes the luma 8x8 DCT coefficient candidate from a disabled
+implementation hook to the default lossy selector candidate. Earlier trials
+failed VTM validation, but the later residual suffix-order and grouped-syntax
+fixes made the wider luma coefficient payload reference-compatible. The
+selector remains a compile-time constant so it can be bisected quickly, but the
+normal build now evaluates the legacy first-subblock payload against the DCT
+payload and chooses the better reconstructed-residual score.
+
+Lossless remains byte-neutral because the block-mode selector still chooses
+transform skip there. Lossy first-frame output trades more bytes and a small
+speed hit for PSNR gains on every row:
+
+| Vector | Format | Bytes delta | FPS delta | PSNR delta |
+|---|---|---:|---:|---:|
+| Scene 420 | yuv420p8 | +52,942 | -0.04 | +1.263 |
+| Scene 422 | yuv422p8 | +53,012 | -0.02 | +0.936 |
+| Wayland RGB | gbrp8 | +89,544 | -0.00 | +0.700 |
+| Mission 420 | yuv420p10le | +55,876 | -0.08 | +0.469 |
+| Mission 422 | yuv422p10le | +18,301 | -0.03 | +0.418 |
+| Mission 444 | yuv444p10le | +13,202 | -0.02 | +0.249 |
+
+First-frame six-vector totals against
+`vvc-chroma-sample-from-tu-decision-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,997,048 | 0.36 | +282,877 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-dct-selector-enabled-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-chroma-sample-from-tu-decision-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

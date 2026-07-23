@@ -23,7 +23,7 @@ const VVC_CHROMA_DC_LEVEL_LIMIT: i16 = 255;
 const VVC_CHROMA_AC_LEVEL_LIMIT: i16 = 2;
 const VVC_MAX_TRANSFORM_EDGE: usize = 32;
 const VVC_MAX_TRANSFORM_COEFFS: usize = VVC_MAX_TRANSFORM_EDGE * VVC_MAX_TRANSFORM_EDGE;
-const VVC_ENABLE_EXPERIMENTAL_LUMA_DCT_COEFF_SELECTION: bool = false;
+const VVC_ENABLE_LUMA_DCT_COEFF_SELECTION: bool = true;
 const VVC_DCT2_4: [[i32; 4]; 4] = [
     [64, 64, 64, 64],
     [83, 36, -36, -83],
@@ -802,7 +802,7 @@ fn quantize_direct_luma_ac_coeffs(
     dc_level: i16,
 ) -> ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool) {
     let legacy = quantize_legacy_luma_ac_coeffs(residuals, width, height, qp);
-    if !VVC_ENABLE_EXPERIMENTAL_LUMA_DCT_COEFF_SELECTION
+    if !VVC_ENABLE_LUMA_DCT_COEFF_SELECTION
         || width != 8
         || height != 8
         || !residuals_have_ac_energy(residuals)
