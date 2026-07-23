@@ -8,7 +8,9 @@ use super::super::{
 const VVC_LUMA_MODE_DIAGONAL: u8 = 34;
 const VVC_LUMA_MODE_VERTICAL: u8 = 50;
 const VVC_LUMA_MODE_HORIZONTAL: u8 = 18;
-const VVC_ANGULAR_REFERENCE_CAPACITY: usize = VVC_CTU_SIZE * 2 + 4;
+const VVC_MAX_MULTI_REF_LINE_IDX: usize = 2;
+const VVC_ANGULAR_REFERENCE_CAPACITY: usize =
+    VVC_CTU_SIZE * 2 + 4 + 33 * VVC_MAX_MULTI_REF_LINE_IDX;
 const VVC_INTRA_ANG_TABLE: [i32; 32] = [
     0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23, 26, 29, 32, 35, 39, 45, 51, 57, 64, 73, 86,
     102, 128, 171, 256, 341, 512, 1024,
@@ -68,6 +70,31 @@ pub(in crate::vvc) fn predict_vvc_luma_intra_block_into_with_availability(
     bit_depth: SampleBitDepth,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
+    predict_vvc_luma_intra_block_into_with_mrl_and_availability(
+        prediction,
+        scratch,
+        mode,
+        luma,
+        geometry,
+        node,
+        bit_depth,
+        0,
+        availability,
+    );
+}
+
+pub(in crate::vvc) fn predict_vvc_luma_intra_block_into_with_mrl_and_availability(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    mode: VvcIntraPredictionMode,
+    luma: &[VvcSample],
+    geometry: VvcVideoGeometry,
+    node: VvcCodingTreeNode,
+    bit_depth: SampleBitDepth,
+    mrl_index: u8,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) {
+    let reference_line = usize::from(mrl_index.min(VVC_MAX_MULTI_REF_LINE_IDX as u8));
     match mode {
         VvcIntraPredictionMode::Planar => predict_vvc_luma_planar_block_into(
             prediction,
@@ -76,6 +103,7 @@ pub(in crate::vvc) fn predict_vvc_luma_intra_block_into_with_availability(
             geometry,
             node,
             bit_depth,
+            reference_line,
             availability,
         ),
         VvcIntraPredictionMode::Dc => predict_vvc_luma_dc_block_into(
@@ -85,6 +113,7 @@ pub(in crate::vvc) fn predict_vvc_luma_intra_block_into_with_availability(
             geometry,
             node,
             bit_depth,
+            reference_line,
             availability,
         ),
         VvcIntraPredictionMode::Horizontal
@@ -97,6 +126,7 @@ pub(in crate::vvc) fn predict_vvc_luma_intra_block_into_with_availability(
             geometry,
             node,
             bit_depth,
+            reference_line,
             availability,
         ),
     }
@@ -109,6 +139,7 @@ pub(in crate::vvc) fn predict_vvc_luma_dc_block_into(
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     predict_vvc_dc_block_into(
@@ -122,6 +153,7 @@ pub(in crate::vvc) fn predict_vvc_luma_dc_block_into(
         usize::from(node.width),
         usize::from(node.height),
         bit_depth,
+        reference_line,
         availability,
     );
 }
@@ -133,6 +165,7 @@ pub(in crate::vvc) fn predict_vvc_luma_planar_block_into(
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     predict_vvc_planar_block_into(
@@ -147,6 +180,7 @@ pub(in crate::vvc) fn predict_vvc_luma_planar_block_into(
         usize::from(node.height),
         bit_depth,
         true,
+        reference_line,
         availability,
     );
 }
@@ -159,6 +193,7 @@ fn predict_vvc_luma_angular_block_into(
     geometry: VvcVideoGeometry,
     node: VvcCodingTreeNode,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     let mode_index = mode.luma_mode_index();
@@ -175,6 +210,7 @@ fn predict_vvc_luma_angular_block_into(
         mode_index,
         bit_depth,
         true,
+        reference_line,
         availability,
     );
 }
@@ -202,6 +238,7 @@ fn predict_vvc_chroma_dc_block_into_with_availability(
         usize::from(node.width) / subsample_x,
         usize::from(node.height) / subsample_y,
         bit_depth,
+        0,
         availability,
     );
 }
@@ -946,6 +983,7 @@ fn predict_vvc_chroma_planar_block_into(
         usize::from(node.height) / subsample_y,
         bit_depth,
         false,
+        0,
         availability,
     );
 }
@@ -977,6 +1015,7 @@ fn predict_vvc_chroma_angular_block_into(
         mode_index,
         bit_depth,
         false,
+        0,
         availability,
     );
 }
@@ -1015,6 +1054,7 @@ fn predict_vvc_dc_block_into(
     width: usize,
     height: usize,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     debug_assert!(width <= VVC_CTU_SIZE);
@@ -1028,6 +1068,7 @@ fn predict_vvc_dc_block_into(
         start_y,
         width,
         bit_depth,
+        reference_line,
         availability,
     );
     left_references_into(
@@ -1039,6 +1080,7 @@ fn predict_vvc_dc_block_into(
         start_y,
         height,
         bit_depth,
+        reference_line,
         availability,
     );
     let top = &scratch.top[..width];
@@ -1049,8 +1091,8 @@ fn predict_vvc_dc_block_into(
 
     // VTM IntraPrediction::predIntraAng applies PDPC to DC mode when the
     // luma TU is at least MIN_TB_SIZEY in both dimensions and multiRefIdx is
-    // zero. FrameForge currently always signals multiRefIdx = 0.
-    if width >= 4 && height >= 4 {
+    // zero.
+    if reference_line == 0 && width >= 4 && height >= 4 {
         let scale = ((width.ilog2() as i32 - 2 + height.ilog2() as i32 - 2 + 2) >> 2) as u32;
         let max_sample = i32::from(bit_depth.max_sample());
         for y in 0..height {
@@ -1080,6 +1122,7 @@ fn predict_vvc_planar_block_into(
     height: usize,
     bit_depth: SampleBitDepth,
     filter_luma_references: bool,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     debug_assert!(width <= VVC_CTU_SIZE);
@@ -1093,6 +1136,7 @@ fn predict_vvc_planar_block_into(
         start_y,
         width + 2,
         bit_depth,
+        reference_line,
         availability,
     );
     left_references_into(
@@ -1104,9 +1148,10 @@ fn predict_vvc_planar_block_into(
         start_y,
         height + 2,
         bit_depth,
+        reference_line,
         availability,
     );
-    if filter_luma_references && width * height > 32 {
+    if reference_line == 0 && filter_luma_references && width * height > 32 {
         let top_left = top_left_reference(
             plane,
             plane_width,
@@ -1114,6 +1159,7 @@ fn predict_vvc_planar_block_into(
             start_x,
             start_y,
             bit_depth,
+            0,
             availability,
         );
         filter_vvc_planar_references_in_place(
@@ -1153,7 +1199,7 @@ fn predict_vvc_planar_block_into(
         }
     }
 
-    if width >= 4 && height >= 4 {
+    if reference_line == 0 && width >= 4 && height >= 4 {
         apply_vvc_planar_dc_pdpc(
             prediction,
             &scratch.top[..width],
@@ -1178,6 +1224,7 @@ fn predict_vvc_angular_block_into(
     mode_index: u8,
     bit_depth: SampleBitDepth,
     is_luma: bool,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     debug_assert!(width <= VVC_CTU_SIZE);
@@ -1193,6 +1240,7 @@ fn predict_vvc_angular_block_into(
         start_y,
         reference_len,
         bit_depth,
+        reference_line,
         availability,
     );
     left_references_into(
@@ -1204,19 +1252,34 @@ fn predict_vvc_angular_block_into(
         start_y,
         reference_len,
         bit_depth,
+        reference_line,
         availability,
     );
-    let mut top_left = top_left_reference(
+    let params = vvc_angular_prediction_params(width, height, mode_index, is_luma);
+    let mut top_left = angular_main_zero_reference(
         plane,
         plane_width,
         plane_height,
         start_x,
         start_y,
         bit_depth,
+        reference_line,
+        params.is_vertical,
         availability,
     );
-    let params = vvc_angular_prediction_params(width, height, mode_index, is_luma);
-    if params.filter_luma_references {
+    let mut angular_refs = angular_shifted_reference_samples(
+        plane,
+        plane_width,
+        plane_height,
+        start_x,
+        start_y,
+        bit_depth,
+        reference_line,
+        params.is_vertical,
+        top_left,
+        availability,
+    );
+    if reference_line == 0 && params.filter_luma_references {
         top_left = filter_vvc_angular_references_in_place(
             &mut scratch.top,
             &mut scratch.left,
@@ -1224,6 +1287,15 @@ fn predict_vvc_angular_block_into(
             width << 1,
             height << 1,
         );
+        angular_refs.main_zero = top_left;
+        angular_refs.side_zero = top_left;
+    }
+    if params.angle >= 0 {
+        if params.is_vertical {
+            replicate_vvc_positive_angular_main_extension(&mut scratch.top, width << 1);
+        } else {
+            replicate_vvc_positive_angular_main_extension(&mut scratch.left, height << 1);
+        }
     }
 
     prediction.clear();
@@ -1239,7 +1311,9 @@ fn predict_vvc_angular_block_into(
             params.angle,
             params.abs_inv_angle,
             params.interpolation,
-            params.pdpc_scale,
+            reference_line,
+            angular_refs,
+            (reference_line == 0).then_some(params.pdpc_scale).flatten(),
             bit_depth,
         );
     } else {
@@ -1253,7 +1327,9 @@ fn predict_vvc_angular_block_into(
             params.angle,
             params.abs_inv_angle,
             params.interpolation,
-            params.pdpc_scale,
+            reference_line,
+            angular_refs,
+            (reference_line == 0).then_some(params.pdpc_scale).flatten(),
             bit_depth,
         );
     }
@@ -1264,6 +1340,14 @@ enum VvcAngularInterpolation {
     Linear,
     FourTapDct,
     FourTapSmoothing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcShiftedAngularReferences {
+    main_zero: VvcSample,
+    side_zero: VvcSample,
+    main_prefix: [VvcSample; VVC_MAX_MULTI_REF_LINE_IDX],
+    main_prefix_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1363,11 +1447,13 @@ fn predict_vvc_vertical_oriented_angular_block(
     angle: i32,
     abs_inv_angle: i32,
     interpolation: VvcAngularInterpolation,
+    reference_line: usize,
+    shifted_refs: VvcShiftedAngularReferences,
     pdpc_scale: Option<u32>,
     bit_depth: SampleBitDepth,
 ) {
     for y in 0..height {
-        let delta_pos = angle * (y as i32 + 1);
+        let delta_pos = angle * (y as i32 + 1 + reference_line as i32);
         let delta_int = delta_pos >> 5;
         let delta_fract = delta_pos & 31;
         for x in 0..width {
@@ -1379,6 +1465,8 @@ fn predict_vvc_vertical_oriented_angular_block(
                 delta_fract,
                 abs_inv_angle,
                 height,
+                reference_line,
+                shifted_refs,
                 interpolation,
                 bit_depth,
             );
@@ -1407,11 +1495,13 @@ fn predict_vvc_horizontal_oriented_angular_block(
     angle: i32,
     abs_inv_angle: i32,
     interpolation: VvcAngularInterpolation,
+    reference_line: usize,
+    shifted_refs: VvcShiftedAngularReferences,
     pdpc_scale: Option<u32>,
     bit_depth: SampleBitDepth,
 ) {
     for x in 0..width {
-        let delta_pos = angle * (x as i32 + 1);
+        let delta_pos = angle * (x as i32 + 1 + reference_line as i32);
         let delta_int = delta_pos >> 5;
         let delta_fract = delta_pos & 31;
         for y in 0..height {
@@ -1423,6 +1513,8 @@ fn predict_vvc_horizontal_oriented_angular_block(
                 delta_fract,
                 abs_inv_angle,
                 width,
+                reference_line,
+                shifted_refs,
                 interpolation,
                 bit_depth,
             );
@@ -1450,6 +1542,8 @@ fn angular_reference_prediction(
     fract: i32,
     abs_inv_angle: i32,
     side_size: usize,
+    reference_line: usize,
+    shifted_refs: VvcShiftedAngularReferences,
     interpolation: VvcAngularInterpolation,
     bit_depth: SampleBitDepth,
 ) -> VvcSample {
@@ -1461,6 +1555,8 @@ fn angular_reference_prediction(
             reference_index,
             abs_inv_angle,
             side_size,
+            reference_line,
+            shifted_refs,
         );
     }
     match interpolation {
@@ -1472,6 +1568,8 @@ fn angular_reference_prediction(
                 reference_index,
                 abs_inv_angle,
                 side_size,
+                reference_line,
+                shifted_refs,
             ));
             let b = i32::from(angular_reference_sample(
                 main,
@@ -1480,6 +1578,8 @@ fn angular_reference_prediction(
                 reference_index + 1,
                 abs_inv_angle,
                 side_size,
+                reference_line,
+                shifted_refs,
             ));
             (a + ((fract * (b - a) + 16) >> 5)) as VvcSample
         }
@@ -1503,6 +1603,8 @@ fn angular_reference_prediction(
                 reference_index - 1,
                 abs_inv_angle,
                 side_size,
+                reference_line,
+                shifted_refs,
             ));
             let p1 = i32::from(angular_reference_sample(
                 main,
@@ -1511,6 +1613,8 @@ fn angular_reference_prediction(
                 reference_index,
                 abs_inv_angle,
                 side_size,
+                reference_line,
+                shifted_refs,
             ));
             let p2 = i32::from(angular_reference_sample(
                 main,
@@ -1519,6 +1623,8 @@ fn angular_reference_prediction(
                 reference_index + 1,
                 abs_inv_angle,
                 side_size,
+                reference_line,
+                shifted_refs,
             ));
             let p3 = i32::from(angular_reference_sample(
                 main,
@@ -1527,6 +1633,8 @@ fn angular_reference_prediction(
                 reference_index + 2,
                 abs_inv_angle,
                 side_size,
+                reference_line,
+                shifted_refs,
             ));
             ((filter[0] * p0 + filter[1] * p1 + filter[2] * p2 + filter[3] * p3 + 32) >> 6)
                 .clamp(0, i32::from(bit_depth.max_sample())) as VvcSample
@@ -1537,22 +1645,31 @@ fn angular_reference_prediction(
 fn angular_reference_sample(
     main: &[VvcSample],
     side: &[VvcSample],
-    top_left: VvcSample,
+    _top_left: VvcSample,
     index: i32,
     abs_inv_angle: i32,
     side_size: usize,
+    reference_line: usize,
+    shifted_refs: VvcShiftedAngularReferences,
 ) -> VvcSample {
     if index == 0 {
-        return top_left;
+        return shifted_refs.main_zero;
     }
     if index > 0 {
         return main[(index as usize - 1).min(main.len().saturating_sub(1))];
     }
-    let side_index = (((-index * abs_inv_angle + 256) >> 9).max(0) as usize).min(side_size);
-    if side_index == 0 {
-        top_left
-    } else {
-        side[(side_index - 1).min(side.len().saturating_sub(1))]
+    if index >= -(shifted_refs.main_prefix_len as i32) {
+        let prefix_idx = (index + shifted_refs.main_prefix_len as i32) as usize;
+        return shifted_refs.main_prefix[prefix_idx];
+    }
+
+    let old_main_index = index + reference_line as i32;
+    let old_side_index =
+        (((-old_main_index * abs_inv_angle + 256) >> 9).max(0) as usize).min(side_size);
+    match old_side_index.checked_sub(reference_line) {
+        Some(0) => shifted_refs.side_zero,
+        Some(new_side_index) => side[(new_side_index - 1).min(side.len().saturating_sub(1))],
+        None => shifted_refs.side_zero,
     }
 }
 
@@ -1679,6 +1796,16 @@ fn angular_side_reference_sample(side: &[VvcSample], index: usize) -> VvcSample 
     side[(index - 1).min(side.len().saturating_sub(1))]
 }
 
+fn replicate_vvc_positive_angular_main_extension(main: &mut [VvcSample], reference_len: usize) {
+    if reference_len == 0 || reference_len > main.len() {
+        return;
+    }
+    let edge = main[reference_len - 1];
+    for sample in &mut main[reference_len..] {
+        *sample = edge;
+    }
+}
+
 pub(in crate::vvc) fn fill_visible_luma_node(
     luma: &mut [VvcSample],
     geometry: VvcVideoGeometry,
@@ -1746,23 +1873,24 @@ fn top_references_into(
     start_y: usize,
     width: usize,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     debug_assert!(out.len() >= width);
-    let fallback = if start_x > 0
+    let fallback = if start_x > reference_line
         && start_y < plane_height
-        && reference_sample_available(availability, start_x - 1, start_y)
+        && reference_sample_available(availability, start_x - 1 - reference_line, start_y)
     {
-        plane[start_y * plane_width + start_x - 1]
+        plane[start_y * plane_width + start_x - 1 - reference_line]
     } else {
         vvc_neutral_sample(bit_depth)
     };
-    if start_y == 0 {
+    if start_y <= reference_line {
         out[..width].fill(fallback);
         return;
     }
 
-    let row_y = start_y - 1;
+    let row_y = start_y - 1 - reference_line;
     let mut first_available = None;
     let mut last_sample = fallback;
     for (x, dst) in out.iter_mut().take(width).enumerate() {
@@ -1789,23 +1917,24 @@ fn left_references_into(
     start_y: usize,
     height: usize,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) {
     debug_assert!(out.len() >= height);
-    let fallback = if start_y > 0
+    let fallback = if start_y > reference_line
         && start_x < plane_width
-        && reference_sample_available(availability, start_x, start_y - 1)
+        && reference_sample_available(availability, start_x, start_y - 1 - reference_line)
     {
-        plane[(start_y - 1) * plane_width + start_x]
+        plane[(start_y - 1 - reference_line) * plane_width + start_x]
     } else {
         vvc_neutral_sample(bit_depth)
     };
-    if start_x == 0 {
+    if start_x <= reference_line {
         out[..height].fill(fallback);
         return;
     }
 
-    let col_x = start_x - 1;
+    let col_x = start_x - 1 - reference_line;
     let mut first_available = None;
     let mut last_sample = fallback;
     for (y, dst) in out.iter_mut().take(height).enumerate() {
@@ -1823,6 +1952,137 @@ fn left_references_into(
     }
 }
 
+fn angular_main_zero_reference(
+    plane: &[VvcSample],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    bit_depth: SampleBitDepth,
+    reference_line: usize,
+    is_vertical: bool,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) -> VvcSample {
+    let coordinate = if is_vertical {
+        start_x
+            .checked_sub(1)
+            .zip(start_y.checked_sub(1 + reference_line))
+    } else {
+        start_x
+            .checked_sub(1 + reference_line)
+            .zip(start_y.checked_sub(1))
+    };
+    if let Some((x, y)) = coordinate {
+        if x < plane_width && y < plane_height && reference_sample_available(availability, x, y) {
+            return plane[y * plane_width + x];
+        }
+    }
+    top_left_reference(
+        plane,
+        plane_width,
+        plane_height,
+        start_x,
+        start_y,
+        bit_depth,
+        reference_line,
+        availability,
+    )
+}
+
+fn angular_shifted_reference_samples(
+    plane: &[VvcSample],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    _bit_depth: SampleBitDepth,
+    reference_line: usize,
+    is_vertical: bool,
+    main_zero: VvcSample,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) -> VvcShiftedAngularReferences {
+    let reference_line = reference_line.min(VVC_MAX_MULTI_REF_LINE_IDX);
+    let mut main_prefix = [main_zero; VVC_MAX_MULTI_REF_LINE_IDX];
+    if is_vertical {
+        let row_y = start_y.checked_sub(1 + reference_line);
+        for (idx, dst) in main_prefix.iter_mut().take(reference_line).enumerate() {
+            let x = start_x.checked_sub(reference_line - idx + 1);
+            *dst = reference_sample_or(
+                plane,
+                plane_width,
+                plane_height,
+                x,
+                row_y,
+                main_zero,
+                availability,
+            );
+        }
+        let side_zero = reference_sample_or(
+            plane,
+            plane_width,
+            plane_height,
+            start_x.checked_sub(1 + reference_line),
+            start_y.checked_sub(1),
+            main_zero,
+            availability,
+        );
+        VvcShiftedAngularReferences {
+            main_zero,
+            side_zero,
+            main_prefix,
+            main_prefix_len: reference_line,
+        }
+    } else {
+        let col_x = start_x.checked_sub(1 + reference_line);
+        for (idx, dst) in main_prefix.iter_mut().take(reference_line).enumerate() {
+            let y = start_y.checked_sub(reference_line - idx + 1);
+            *dst = reference_sample_or(
+                plane,
+                plane_width,
+                plane_height,
+                col_x,
+                y,
+                main_zero,
+                availability,
+            );
+        }
+        let side_zero = reference_sample_or(
+            plane,
+            plane_width,
+            plane_height,
+            start_x.checked_sub(1),
+            start_y.checked_sub(1 + reference_line),
+            main_zero,
+            availability,
+        );
+        VvcShiftedAngularReferences {
+            main_zero,
+            side_zero,
+            main_prefix,
+            main_prefix_len: reference_line,
+        }
+    }
+}
+
+fn reference_sample_or(
+    plane: &[VvcSample],
+    plane_width: usize,
+    plane_height: usize,
+    x: Option<usize>,
+    y: Option<usize>,
+    fallback: VvcSample,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) -> VvcSample {
+    let Some((x, y)) = x.zip(y) else {
+        return fallback;
+    };
+    if x < plane_width && y < plane_height && reference_sample_available(availability, x, y) {
+        plane[y * plane_width + x]
+    } else {
+        fallback
+    }
+}
+
 fn top_left_reference(
     plane: &[VvcSample],
     plane_width: usize,
@@ -1830,25 +2090,30 @@ fn top_left_reference(
     start_x: usize,
     start_y: usize,
     bit_depth: SampleBitDepth,
+    reference_line: usize,
     availability: Option<VvcPlaneAvailability<'_>>,
 ) -> VvcSample {
-    if start_x > 0
-        && start_y > 0
-        && reference_sample_available(availability, start_x - 1, start_y - 1)
+    if start_x > reference_line
+        && start_y > reference_line
+        && reference_sample_available(
+            availability,
+            start_x - 1 - reference_line,
+            start_y - 1 - reference_line,
+        )
     {
-        return plane[(start_y - 1) * plane_width + start_x - 1];
+        return plane[(start_y - 1 - reference_line) * plane_width + start_x - 1 - reference_line];
     }
-    if start_y > 0
+    if start_y > reference_line
         && start_x < plane_width
-        && reference_sample_available(availability, start_x, start_y - 1)
+        && reference_sample_available(availability, start_x, start_y - 1 - reference_line)
     {
-        return plane[(start_y - 1) * plane_width + start_x];
+        return plane[(start_y - 1 - reference_line) * plane_width + start_x];
     }
-    if start_x > 0
+    if start_x > reference_line
         && start_y < plane_height
-        && reference_sample_available(availability, start_x - 1, start_y)
+        && reference_sample_available(availability, start_x - 1 - reference_line, start_y)
     {
-        return plane[start_y * plane_width + start_x - 1];
+        return plane[start_y * plane_width + start_x - 1 - reference_line];
     }
     vvc_neutral_sample(bit_depth)
 }

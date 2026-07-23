@@ -13,8 +13,7 @@ mod tests;
 
 #[cfg(test)]
 pub(super) use transform::{
-    inverse_transform_vvc_chroma_quantized_block_into,
-    inverse_transform_vvc_luma_quantized_block_into, inverse_transform_vvc_luma_residual_levels,
+    inverse_transform_vvc_chroma_quantized_block_into, inverse_transform_vvc_luma_residual_levels,
     quantize_vvc_chroma, quantize_vvc_luma_residual_greedy, transform_vvc_tu, VVC_CHROMA_DC_BASE,
     VVC_LUMA_DC_BASE,
 };
@@ -30,7 +29,8 @@ pub(super) use prediction::{
     fill_visible_chroma_node, fill_visible_luma_node,
     predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
-    predict_vvc_luma_intra_block_into_with_availability, VvcDcPredictionScratch,
+    predict_vvc_luma_intra_block_into_with_availability,
+    predict_vvc_luma_intra_block_into_with_mrl_and_availability, VvcDcPredictionScratch,
     VvcPlaneAvailability,
 };
 pub use quant::quantize_vvc_color;
@@ -39,7 +39,8 @@ pub(super) use quant::quantize_vvc_frame_with_reconstruction;
 #[cfg(test)]
 pub(super) use quant::quantize_vvc_residual_ctu_into_frame_reconstruction;
 pub(super) use quant::{
-    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp,
+    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp_and_luma_modes,
+    VvcLumaModeSearchState,
 };
 #[cfg(test)]
 pub(super) use recon::reconstruct_vvc_residual_frame;

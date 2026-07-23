@@ -72,7 +72,10 @@ Short aliases remain accepted:
 the byte layout is one full-resolution green plane, then blue, then red. AV2
 signals sRGB identity color metadata for `gbrp8` and keeps the internal
 reconstruction in the same planar layout. VVC accepts the same planar bytes
-through its 4:4:4 component interface and signals sRGB-compatible VUI metadata.
+through its 4:4:4 component interface and signals sRGB-compatible full-range
+VUI metadata. VVC/VTM forbid identity matrix coefficient `0` when
+`sps_chroma_format_idc=3`, so the VVC stream preserves GBR component order
+while leaving the VUI matrix coefficient unspecified.
 
 `rgb24` is accepted as packed 8-bit RGB for AV2 and VVC streams through the
 shared driver conversion path. The driver repacks RGB into codec-native planar
@@ -150,8 +153,9 @@ Current behavior:
 - VVC accepts `yuv422p8` through `yuv422p12le` natively for both stream-exact
   lossless 4:2:2 encoding and the current non-lossless residual path.
 - VVC accepts `gbrp8` through the same 8-bit 4:4:4 component pipeline used by
-  planar 4:4:4 input and signals sRGB-compatible VUI metadata. VVC also
-  accepts legacy packed `rgb24` through the shared lossless repack to `gbrp8`.
+  planar 4:4:4 input and signals sRGB-compatible full-range VUI metadata with
+  the VVC-safe unspecified matrix coefficient. VVC also accepts legacy packed
+  `rgb24` through the shared lossless repack to `gbrp8`.
 - Unsupported chroma or color-family conversions still fail visibly. The
   fallback does not turn 4:2:2 into 4:2:0, RGB into YUV, or gray into YUV.
 

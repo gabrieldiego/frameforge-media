@@ -6,13 +6,16 @@ use super::super::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_cclm_node_allowed,
     vvc_chroma_explicit_candidates, vvc_chroma_intra_mode_syntax_bin_count,
     vvc_chroma_transform_nodes, vvc_downshift_sample_to_u8, vvc_luma_intra_mode_from_index,
-    vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes, vvc_neutral_sample,
-    vvc_residual_chroma_explicit_candidate_allowed, VvcChromaCclmMode,
+    vvc_luma_intra_mode_is_mpm, vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes,
+    vvc_neutral_sample, vvc_residual_chroma_explicit_candidate_allowed, VvcChromaCclmMode,
     VvcChromaIntraCandidateCosts, VvcChromaIntraPredictionMode, VvcChromaTuCodingDecision,
     VvcCodingTreeNode, VvcCtuPartitionShape, VvcCtuRegion, VvcIntraPredictionMode,
     VvcLumaIntraCandidateCosts, VvcLumaTuCodingDecision, VvcPictureFormat, VvcReconstructionFrame,
     VvcResidualCodingMode, VvcResidualCodingPolicy, VvcResidualScoreMetric, VvcSample,
     VvcSampledColor, VvcSampledFrame, VvcTuResidualCodingMode, VvcVideoGeometry, VVC_CTU_SIZE,
+};
+use super::transform::{
+    luma_ac_syntax_cost_estimate, luma_coeff_rd_lambda, luma_reconstructed_residual_sse_with_mts,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
@@ -21,6 +24,7 @@ use super::{
     predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
     predict_vvc_luma_intra_block_into_with_availability,
+    predict_vvc_luma_intra_block_into_with_mrl_and_availability,
     quantize_vvc_chroma_residual_greedy_with_qp, quantize_vvc_chroma_sample,
     quantize_vvc_luma_residual_greedy_with_qp_and_mts, reconstruct_vvc_chroma,
     VvcDcPredictionScratch, VvcInverseTransformScratch, VvcQuantizedColor,
@@ -29,6 +33,13 @@ use super::{
 };
 #[cfg(feature = "vvc-stats")]
 use super::{VvcIntraSearchStats, VvcResidualEnergyStats};
+#[cfg(feature = "vvc-stats")]
+use crate::instrumentation::JsonlInstrumentationSink;
+
+#[cfg(feature = "vvc-stats")]
+const VVC_TU_TRACE_ENV: &str = "FRAMEFORGE_VVC_TU_TRACE";
+const VVC_ENABLE_LUMA_MRL_SELECTION: bool = true;
+const VVC_ENABLE_LUMA_MTS_SELECTION: bool = false;
 
 pub fn quantize_vvc_color(color: VvcSampledColor) -> VvcQuantizedColor {
     quantize_vvc_frame(&VvcSampledFrame::solid(color))
@@ -90,6 +101,28 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     luma_qp: i32,
     chroma_qp: i32,
 ) -> VvcQuantizedColor {
+    let mut luma_mode_search_state =
+        VvcLumaModeSearchState::new_for_geometry(source_frame.geometry);
+    quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp_and_luma_modes(
+        source_frame,
+        frame_recon,
+        region,
+        policy,
+        luma_qp,
+        chroma_qp,
+        &mut luma_mode_search_state,
+    )
+}
+
+pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp_and_luma_modes(
+    source_frame: &VvcSampledFrame,
+    frame_recon: &mut VvcReconstructionFrame,
+    region: VvcCtuRegion,
+    policy: VvcResidualCodingPolicy,
+    luma_qp: i32,
+    chroma_qp: i32,
+    luma_mode_search_state: &mut VvcLumaModeSearchState,
+) -> VvcQuantizedColor {
     let mut luma_tu_remainders = [0; MAX_VVC_LUMA_TUS];
     let mut luma_tu_negative = [false; MAX_VVC_LUMA_TUS];
     let mut luma_tu_dc_levels = [0; MAX_VVC_LUMA_TUS];
@@ -127,6 +160,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     let mut intra_search_stats = VvcIntraSearchStats::default();
     #[cfg(feature = "vvc-stats")]
     let mut residual_energy_stats = VvcResidualEnergyStats::default();
+    #[cfg(feature = "vvc-stats")]
+    let mut tu_trace_sink = vvc_tu_trace_sink();
 
     let score_metric = policy.score_metric();
     let chroma_syntax_tie_breaker = policy.chroma_syntax_tie_breaker();
@@ -142,14 +177,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
 
     let mut luma_tu_count = 0usize;
     let luma_nodes = vvc_luma_transform_nodes(ctu_shape, luma_max_leaf_size);
-    let mut luma_mode_search_state = VvcLumaModeSearchState::new();
     for local_node in luma_nodes.iter().copied() {
         if luma_tu_count >= MAX_VVC_LUMA_TUS {
             break;
         }
         let node = vvc_global_ctu_node(local_node, region);
-        let left_luma_mode = luma_mode_search_state.left_of(local_node);
-        let above_luma_mode = luma_mode_search_state.above_of(local_node);
+        let left_luma_mode = luma_mode_search_state.left_of(node);
+        let above_luma_mode = luma_mode_search_state.above_of(node);
         predict_vvc_luma_intra_block_into_with_availability(
             &mut predicted_luma,
             &mut prediction_scratch,
@@ -220,12 +254,8 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
             }
         }
         if policy.luma_directional_candidate_allowed(node) {
-            let mut luma_directional_candidates = vvc_luma_directional_search_candidates(
-                source_frame,
-                &luma_mode_search_state,
-                local_node,
-                node,
-            );
+            let mut luma_directional_candidates =
+                vvc_luma_directional_search_candidates(source_frame, &luma_mode_search_state, node);
             for mode in luma_directional_candidates.iter() {
                 predict_vvc_luma_intra_block_into_with_availability(
                     &mut candidate_luma_prediction,
@@ -310,9 +340,25 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let luma_mode = policy.select_luma_intra_mode(node, luma_candidate_costs);
         debug_assert_eq!(luma_mode, best_luma_mode);
         let _best_luma_score = best_luma_score;
+        let mut luma_coding_decision = policy.select_luma_tu_coding_decision(node, luma_mode);
+        luma_coding_decision.mrl_index = select_vvc_luma_mrl_prediction(
+            policy,
+            luma_coding_decision.residual_coding,
+            node,
+            luma_mode,
+            left_luma_mode,
+            above_luma_mode,
+            luma_qp,
+            frame_recon,
+            source_frame,
+            &mut prediction_scratch,
+            &mut predicted_luma,
+            &mut luma_residuals,
+            &mut candidate_luma_prediction,
+            &mut candidate_luma_residuals,
+        );
         luma_tu_intra_modes[luma_tu_count] = luma_mode;
-        luma_mode_search_state.mark_node(local_node, luma_mode);
-        let luma_coding_decision = policy.select_luma_tu_coding_decision(node, luma_mode);
+        luma_mode_search_state.mark_node(node, luma_mode);
         #[cfg(feature = "vvc-stats")]
         residual_energy_stats.add_luma_residuals(
             &luma_residuals,
@@ -338,6 +384,17 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         luma_tu_transform_skip[luma_tu_count] = luma_tu.transform_skip;
         luma_tu_mrl_index[luma_tu_count] = luma_tu.mrl_index;
         luma_tu_mts_index[luma_tu_count] = luma_tu.mts_index;
+        #[cfg(feature = "vvc-stats")]
+        write_vvc_luma_tu_trace(
+            tu_trace_sink.as_mut(),
+            region,
+            luma_tu_count,
+            node,
+            luma_mode,
+            luma_tu,
+            &predicted_luma,
+            &luma_residuals,
+        );
         luma_tu_count += 1;
     }
 
@@ -353,8 +410,7 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         let chroma_y = usize::from(node.y) / subsample_y;
         let chroma_width = usize::from(node.width) / subsample_x;
         let chroma_height = usize::from(node.height) / subsample_y;
-        let co_located_luma_mode =
-            luma_mode_search_state.co_located_mode_for_chroma_node(node, region);
+        let co_located_luma_mode = luma_mode_search_state.co_located_mode_for_chroma_node(node);
         let cclm_syntax_enabled = vvc_chroma_cclm_node_allowed(node);
         let initial_chroma_mode = VvcChromaIntraPredictionMode::Derived;
         predict_vvc_chroma_mode_block_into_with_availability(
@@ -608,6 +664,22 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
         cr_tu_has_ac[chroma_tu_count] = chroma_tu.cr_has_ac;
         cb_tu_transform_skip[chroma_tu_count] = chroma_tu.cb_transform_skip;
         cr_tu_transform_skip[chroma_tu_count] = chroma_tu.cr_transform_skip;
+        #[cfg(feature = "vvc-stats")]
+        write_vvc_chroma_tu_trace(
+            tu_trace_sink.as_mut(),
+            region,
+            chroma_tu_count,
+            node,
+            chroma_mode,
+            co_located_luma_mode,
+            chroma_tu,
+            chroma_width,
+            chroma_height,
+            &predicted_cb,
+            &predicted_cr,
+            &cb_residuals,
+            &cr_residuals,
+        );
         chroma_tu_count += 1;
     }
 
@@ -663,6 +735,267 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     }
 }
 
+#[cfg(feature = "vvc-stats")]
+fn vvc_tu_trace_sink() -> Option<JsonlInstrumentationSink> {
+    match JsonlInstrumentationSink::append_from_env(VVC_TU_TRACE_ENV) {
+        Ok(sink) => sink,
+        Err(err) => {
+            eprintln!("failed to open {VVC_TU_TRACE_ENV}: {err}");
+            None
+        }
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+fn write_vvc_luma_tu_trace(
+    sink: Option<&mut JsonlInstrumentationSink>,
+    region: VvcCtuRegion,
+    tu_index: usize,
+    node: VvcCodingTreeNode,
+    mode: VvcIntraPredictionMode,
+    tu: VvcFinalizedLumaTu,
+    predicted: &[VvcSample],
+    residuals: &[i16],
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let nonzero_ac = tu.ac_levels.iter().filter(|level| **level != 0).count();
+    let line = format!(
+        "{{\"event\":\"vvc_tu\",\"component\":\"luma\",\"slice\":{},\"tu\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"mode\":\"{:?}\",\"mode_index\":{},\"transform_skip\":{},\"mrl_index\":{},\"mts_index\":{},\"dc\":{},\"has_ac\":{},\"nonzero_ac\":{},\"predicted\":{},\"residuals\":{}}}",
+        region.slice_address,
+        tu_index,
+        node.x,
+        node.y,
+        node.width,
+        node.height,
+        mode,
+        mode.luma_mode_index(),
+        tu.transform_skip,
+        tu.mrl_index,
+        tu.mts_index,
+        tu.dc_level,
+        tu.has_ac,
+        nonzero_ac,
+        json_u16_slice(predicted),
+        json_i16_slice(residuals),
+    );
+    if let Err(err) = sink.write_json_line(&line).and_then(|()| sink.flush()) {
+        eprintln!("failed to write {VVC_TU_TRACE_ENV}: {err}");
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+fn write_vvc_chroma_tu_trace(
+    sink: Option<&mut JsonlInstrumentationSink>,
+    region: VvcCtuRegion,
+    tu_index: usize,
+    node: VvcCodingTreeNode,
+    mode: VvcChromaIntraPredictionMode,
+    co_located_luma_mode: VvcIntraPredictionMode,
+    tu: VvcFinalizedChromaTu,
+    chroma_width: usize,
+    chroma_height: usize,
+    predicted_cb: &[VvcSample],
+    predicted_cr: &[VvcSample],
+    cb_residuals: &[i16],
+    cr_residuals: &[i16],
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let cb_nonzero_ac = tu.cb_ac_levels.iter().filter(|level| **level != 0).count();
+    let cr_nonzero_ac = tu.cr_ac_levels.iter().filter(|level| **level != 0).count();
+    let chroma_x = usize::from(node.x);
+    let chroma_y = usize::from(node.y);
+    let line = format!(
+        "{{\"event\":\"vvc_tu\",\"component\":\"chroma\",\"slice\":{},\"tu\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"chroma_w\":{},\"chroma_h\":{},\"mode\":\"{:?}\",\"co_located_luma_mode\":\"{:?}\",\"co_located_luma_mode_index\":{},\"cb_transform_skip\":{},\"cr_transform_skip\":{},\"cb_dc\":{},\"cr_dc\":{},\"cb_has_ac\":{},\"cr_has_ac\":{},\"cb_nonzero_ac\":{},\"cr_nonzero_ac\":{},\"predicted_cb\":{},\"predicted_cr\":{},\"cb_residuals\":{},\"cr_residuals\":{}}}",
+        region.slice_address,
+        tu_index,
+        chroma_x,
+        chroma_y,
+        node.width,
+        node.height,
+        chroma_width,
+        chroma_height,
+        mode,
+        co_located_luma_mode,
+        co_located_luma_mode.luma_mode_index(),
+        tu.cb_transform_skip,
+        tu.cr_transform_skip,
+        tu.cb_dc_level,
+        tu.cr_dc_level,
+        tu.cb_has_ac,
+        tu.cr_has_ac,
+        cb_nonzero_ac,
+        cr_nonzero_ac,
+        json_u16_slice(predicted_cb),
+        json_u16_slice(predicted_cr),
+        json_i16_slice(cb_residuals),
+        json_i16_slice(cr_residuals),
+    );
+    if let Err(err) = sink.write_json_line(&line).and_then(|()| sink.flush()) {
+        eprintln!("failed to write {VVC_TU_TRACE_ENV}: {err}");
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+fn json_i16_slice(values: &[i16]) -> String {
+    let mut out = String::from("[");
+    for (idx, value) in values.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push_str(&value.to_string());
+    }
+    out.push(']');
+    out
+}
+
+#[cfg(feature = "vvc-stats")]
+fn json_u16_slice(values: &[VvcSample]) -> String {
+    let mut out = String::from("[");
+    for (idx, value) in values.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push_str(&value.to_string());
+    }
+    out.push(']');
+    out
+}
+
+fn select_vvc_luma_mrl_prediction(
+    policy: VvcResidualCodingPolicy,
+    residual_coding: VvcTuResidualCodingMode,
+    node: VvcCodingTreeNode,
+    mode: VvcIntraPredictionMode,
+    left: Option<VvcIntraPredictionMode>,
+    above: Option<VvcIntraPredictionMode>,
+    luma_qp: i32,
+    frame_recon: &VvcReconstructionFrame,
+    source_frame: &VvcSampledFrame,
+    prediction_scratch: &mut VvcDcPredictionScratch,
+    selected_prediction: &mut Vec<VvcSample>,
+    selected_residuals: &mut Vec<i16>,
+    candidate_prediction: &mut Vec<VvcSample>,
+    candidate_residuals: &mut Vec<i16>,
+) -> u8 {
+    if !VVC_ENABLE_LUMA_MRL_SELECTION
+        || !policy.luma_mrl_candidate_allowed(node, mode)
+        || !vvc_luma_intra_mode_is_mpm(mode, left, above)
+    {
+        return 0;
+    }
+
+    let score_metric = policy.score_metric();
+    let mut best_mrl_index = 0u8;
+    let mut best_score = luma_mrl_selection_score(
+        score_metric,
+        residual_coding,
+        node,
+        0,
+        selected_residuals,
+        source_frame.format.bit_depth,
+        luma_qp,
+    );
+    for mrl_index in 1..=2 {
+        predict_vvc_luma_intra_block_into_with_mrl_and_availability(
+            candidate_prediction,
+            prediction_scratch,
+            mode,
+            &frame_recon.luma,
+            source_frame.geometry,
+            node,
+            source_frame.format.bit_depth,
+            mrl_index,
+            Some(frame_recon.luma_availability()),
+        );
+        residual_luma_tu_at_into(
+            candidate_residuals,
+            source_frame,
+            usize::from(node.x),
+            usize::from(node.y),
+            usize::from(node.width),
+            usize::from(node.height),
+            candidate_prediction,
+        );
+        let candidate_score = luma_mrl_selection_score(
+            score_metric,
+            residual_coding,
+            node,
+            mrl_index,
+            candidate_residuals,
+            source_frame.format.bit_depth,
+            luma_qp,
+        );
+        if candidate_score < best_score {
+            best_score = candidate_score;
+            best_mrl_index = mrl_index;
+            std::mem::swap(selected_prediction, candidate_prediction);
+            std::mem::swap(selected_residuals, candidate_residuals);
+        }
+    }
+    best_mrl_index
+}
+
+fn luma_mrl_selection_score(
+    metric: VvcResidualScoreMetric,
+    residual_coding: VvcTuResidualCodingMode,
+    node: VvcCodingTreeNode,
+    mrl_index: u8,
+    residuals: &[i16],
+    bit_depth: SampleBitDepth,
+    luma_qp: i32,
+) -> u64 {
+    const SYNTAX_TIE_BREAKER_SCALE: u64 = 64;
+    if matches!(residual_coding, VvcTuResidualCodingMode::Transformed) {
+        let (residual, mts_index) = select_vvc_luma_residual_block_with_mts(
+            residual_coding,
+            0,
+            residuals,
+            node.width,
+            node.height,
+            bit_depth,
+            luma_qp,
+        );
+        let sse = luma_reconstructed_residual_sse_with_mts(
+            residuals,
+            node.width,
+            node.height,
+            bit_depth,
+            luma_qp,
+            residual.dc_level,
+            &residual.ac_levels,
+            mts_index,
+        );
+        let lambda = luma_coeff_rd_lambda(luma_qp, bit_depth);
+        let coefficient_cost = u64::from(residual.dc_level != 0)
+            .saturating_mul(8)
+            .saturating_add(luma_ac_syntax_cost_estimate(
+                node.width,
+                node.height,
+                &residual.ac_levels,
+            ));
+        let mrl_cost = u64::from(vvc_luma_mrl_syntax_bin_count(node, mrl_index));
+        return sse
+            .saturating_add(lambda.saturating_mul(coefficient_cost.saturating_add(mrl_cost)));
+    }
+    residual_mode_selection_score(metric, residuals)
+        .saturating_mul(SYNTAX_TIE_BREAKER_SCALE)
+        .saturating_add(u64::from(vvc_luma_mrl_syntax_bin_count(node, mrl_index)))
+}
+
+fn vvc_luma_mrl_syntax_bin_count(node: VvcCodingTreeNode, mrl_index: u8) -> u8 {
+    if node.y % VVC_CTU_SIZE as u16 == 0 {
+        0
+    } else if mrl_index == 0 {
+        1
+    } else {
+        2
+    }
+}
+
 fn finalized_vvc_chroma_sample(
     transform_skip: bool,
     source: VvcSample,
@@ -680,7 +1013,6 @@ const VVC_LUMA_DIRECTIONAL_SEARCH_CANDIDATE_CAPACITY: usize = 65;
 const VVC_LUMA_DEFAULT_DIRECTIONAL_SEEDS: [u8; 9] = [18, 50, 34, 10, 26, 42, 58, 2, 66];
 const VVC_LUMA_NEARBY_DIRECTIONAL_OFFSETS: [i16; 7] = [0, -1, 1, -2, 2, -4, 4];
 const VVC_LUMA_MODE_CELL_SIZE: usize = 4;
-const VVC_LUMA_MODE_CTU_CELLS: usize = VVC_CTU_SIZE / VVC_LUMA_MODE_CELL_SIZE;
 
 #[derive(Debug, Clone, Copy)]
 struct VvcLumaDirectionalSearchCandidates {
@@ -750,52 +1082,73 @@ impl VvcLumaDirectionalSearchCandidates {
 }
 
 #[derive(Debug, Clone)]
-struct VvcLumaModeSearchState {
-    valid: [bool; VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
-    modes: [VvcIntraPredictionMode; VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
+pub(in crate::vvc) struct VvcLumaModeSearchState {
+    width: usize,
+    height: usize,
+    cell_cols: usize,
+    valid: Vec<bool>,
+    modes: Vec<VvcIntraPredictionMode>,
 }
 
 impl VvcLumaModeSearchState {
-    fn new() -> Self {
+    pub(in crate::vvc) fn new_for_geometry(geometry: VvcVideoGeometry) -> Self {
+        let width = geometry.coded_width();
+        let height = geometry.coded_height();
+        let cell_cols = width.div_ceil(VVC_LUMA_MODE_CELL_SIZE);
+        let cell_rows = height.div_ceil(VVC_LUMA_MODE_CELL_SIZE);
+        let cell_count = cell_cols.saturating_mul(cell_rows);
         Self {
-            valid: [false; VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
-            modes: [VvcIntraPredictionMode::Planar;
-                VVC_LUMA_MODE_CTU_CELLS * VVC_LUMA_MODE_CTU_CELLS],
+            width,
+            height,
+            cell_cols,
+            valid: vec![false; cell_count],
+            modes: vec![VvcIntraPredictionMode::Planar; cell_count],
         }
     }
 
     fn left_of(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
         let x = node.x.checked_sub(1)?;
-        let y = node.y.saturating_add(node.height >> 1);
+        let y = node.y.saturating_add(node.height).saturating_sub(1);
         self.mode_at(x, y)
     }
 
     fn above_of(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
         let y = node.y.checked_sub(1)?;
-        let x = node.x.saturating_add(node.width >> 1);
+        let x = node.x.saturating_add(node.width).saturating_sub(1);
         self.mode_at(x, y)
     }
 
     fn mode_at(&self, x: u16, y: u16) -> Option<VvcIntraPredictionMode> {
-        if usize::from(x) >= VVC_CTU_SIZE || usize::from(y) >= VVC_CTU_SIZE {
+        let x = usize::from(x);
+        let y = usize::from(y);
+        if x >= self.width || y >= self.height {
             return None;
         }
-        let cell_x = usize::from(x) / VVC_LUMA_MODE_CELL_SIZE;
-        let cell_y = usize::from(y) / VVC_LUMA_MODE_CELL_SIZE;
-        let idx = cell_y * VVC_LUMA_MODE_CTU_CELLS + cell_x;
+        let cell_x = x / VVC_LUMA_MODE_CELL_SIZE;
+        let cell_y = y / VVC_LUMA_MODE_CELL_SIZE;
+        let idx = cell_y * self.cell_cols + cell_x;
         self.valid[idx].then_some(self.modes[idx])
     }
 
     fn mark_node(&mut self, node: VvcCodingTreeNode, mode: VvcIntraPredictionMode) {
-        let end_x = node.x.saturating_add(node.width).min(VVC_CTU_SIZE as u16);
-        let end_y = node.y.saturating_add(node.height).min(VVC_CTU_SIZE as u16);
+        let start_x = usize::from(node.x).min(self.width);
+        let start_y = usize::from(node.y).min(self.height);
+        let end_x = usize::from(node.x)
+            .saturating_add(usize::from(node.width))
+            .min(self.width);
+        let end_y = usize::from(node.y)
+            .saturating_add(usize::from(node.height))
+            .min(self.height);
+        if end_x <= start_x || end_y <= start_y {
+            return;
+        }
         let start_cell_x = usize::from(node.x) / VVC_LUMA_MODE_CELL_SIZE;
         let start_cell_y = usize::from(node.y) / VVC_LUMA_MODE_CELL_SIZE;
-        let end_cell_x = usize::from(end_x).div_ceil(VVC_LUMA_MODE_CELL_SIZE);
-        let end_cell_y = usize::from(end_y).div_ceil(VVC_LUMA_MODE_CELL_SIZE);
+        let end_cell_x = end_x.div_ceil(VVC_LUMA_MODE_CELL_SIZE);
+        let end_cell_y = end_y.div_ceil(VVC_LUMA_MODE_CELL_SIZE);
         for cell_y in start_cell_y..end_cell_y {
             for cell_x in start_cell_x..end_cell_x {
-                let idx = cell_y * VVC_LUMA_MODE_CTU_CELLS + cell_x;
+                let idx = cell_y * self.cell_cols + cell_x;
                 self.valid[idx] = true;
                 self.modes[idx] = mode;
             }
@@ -805,19 +1158,18 @@ impl VvcLumaModeSearchState {
     fn co_located_mode_for_chroma_node(
         &self,
         chroma_node: VvcCodingTreeNode,
-        region: VvcCtuRegion,
     ) -> VvcIntraPredictionMode {
+        let max_x = self.width.saturating_sub(1).min(usize::from(u16::MAX)) as u16;
+        let max_y = self.height.saturating_sub(1).min(usize::from(u16::MAX)) as u16;
         let ref_x = chroma_node
             .x
             .saturating_add(chroma_node.width >> 1)
-            .min((region.origin_x + region.geometry.coded_width()).saturating_sub(1) as u16);
+            .min(max_x);
         let ref_y = chroma_node
             .y
             .saturating_add(chroma_node.height >> 1)
-            .min((region.origin_y + region.geometry.coded_height()).saturating_sub(1) as u16);
-        let local_x = ref_x.saturating_sub(region.origin_x as u16);
-        let local_y = ref_y.saturating_sub(region.origin_y as u16);
-        self.mode_at(local_x, local_y)
+            .min(max_y);
+        self.mode_at(ref_x, ref_y)
             .unwrap_or(VvcIntraPredictionMode::Dc)
     }
 }
@@ -825,7 +1177,6 @@ impl VvcLumaModeSearchState {
 fn vvc_luma_directional_search_candidates(
     source_frame: &VvcSampledFrame,
     mode_state: &VvcLumaModeSearchState,
-    local_node: VvcCodingTreeNode,
     global_node: VvcCodingTreeNode,
 ) -> VvcLumaDirectionalSearchCandidates {
     let mut candidates = VvcLumaDirectionalSearchCandidates::new();
@@ -833,8 +1184,8 @@ fn vvc_luma_directional_search_candidates(
         candidates.add_index(index);
     }
     for mode in [
-        mode_state.left_of(local_node),
-        mode_state.above_of(local_node),
+        mode_state.left_of(global_node),
+        mode_state.above_of(global_node),
     ]
     .into_iter()
     .flatten()
@@ -1007,7 +1358,7 @@ fn finalize_vvc_luma_tu(
     transform_scratch: &mut VvcInverseTransformScratch,
     reconstructed_residual: &mut Vec<i16>,
 ) -> VvcFinalizedLumaTu {
-    let residual = finalize_vvc_luma_residual_block(
+    let (residual, mts_index) = select_vvc_luma_residual_block_with_mts(
         coding_decision.residual_coding,
         coding_decision.mts_index,
         residuals,
@@ -1018,7 +1369,7 @@ fn finalize_vvc_luma_tu(
     );
     reconstruct_vvc_luma_residual_block_into(
         residual,
-        coding_decision.mts_index,
+        mts_index,
         reconstructed_residual,
         transform_scratch,
         node.width,
@@ -1042,10 +1393,115 @@ fn finalize_vvc_luma_tu(
         has_ac: residual.has_ac,
         transform_skip: residual.transform_skip,
         mrl_index: coding_decision.mrl_index,
-        mts_index: coding_decision.mts_index,
+        mts_index,
     };
     frame_recon.mark_luma_node_available(node);
     finalized
+}
+
+fn select_vvc_luma_residual_block_with_mts(
+    residual_coding: VvcTuResidualCodingMode,
+    requested_mts_index: u8,
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    luma_qp: i32,
+) -> (VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU>, u8) {
+    let base = finalize_vvc_luma_residual_block(
+        residual_coding,
+        requested_mts_index,
+        residuals,
+        width,
+        height,
+        bit_depth,
+        luma_qp,
+    );
+    if !vvc_luma_mts_selection_allowed(residual_coding, requested_mts_index, width, height, base) {
+        return (base, requested_mts_index);
+    }
+
+    let mut best_residual = base;
+    let mut best_mts_index = 0u8;
+    let mut best_score =
+        luma_mts_candidate_score(residuals, width, height, bit_depth, luma_qp, base, 0);
+    for mts_index in 2..=5 {
+        let candidate = finalize_vvc_luma_residual_block(
+            residual_coding,
+            mts_index,
+            residuals,
+            width,
+            height,
+            bit_depth,
+            luma_qp,
+        );
+        if !candidate.has_ac {
+            continue;
+        }
+        let score = luma_mts_candidate_score(
+            residuals, width, height, bit_depth, luma_qp, candidate, mts_index,
+        );
+        if score < best_score {
+            best_score = score;
+            best_residual = candidate;
+            best_mts_index = mts_index;
+        }
+    }
+
+    (best_residual, best_mts_index)
+}
+
+fn vvc_luma_mts_selection_allowed(
+    residual_coding: VvcTuResidualCodingMode,
+    requested_mts_index: u8,
+    width: u16,
+    height: u16,
+    base: VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU>,
+) -> bool {
+    VVC_ENABLE_LUMA_MTS_SELECTION
+        && requested_mts_index == 0
+        && matches!(residual_coding, VvcTuResidualCodingMode::Transformed)
+        && width == 8
+        && height == 8
+        && base.has_ac
+}
+
+fn luma_mts_candidate_score(
+    source_residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    qp: i32,
+    residual: VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU>,
+    mts_index: u8,
+) -> u64 {
+    let sse = luma_reconstructed_residual_sse_with_mts(
+        source_residuals,
+        width,
+        height,
+        bit_depth,
+        qp,
+        residual.dc_level,
+        &residual.ac_levels,
+        mts_index,
+    );
+    let lambda = luma_coeff_rd_lambda(qp, bit_depth);
+    let coefficient_cost = luma_ac_syntax_cost_estimate(width, height, &residual.ac_levels);
+    let mts_cost = luma_mts_syntax_cost_estimate(residual.has_ac, mts_index);
+    sse.saturating_add(lambda.saturating_mul(coefficient_cost.saturating_add(mts_cost)))
+}
+
+fn luma_mts_syntax_cost_estimate(has_ac: bool, mts_index: u8) -> u64 {
+    if !has_ac {
+        return 0;
+    }
+    match mts_index {
+        0 => 1,
+        2 => 2,
+        3 => 3,
+        4 | 5 => 4,
+        _ => 8,
+    }
 }
 
 fn finalize_vvc_luma_residual_block(

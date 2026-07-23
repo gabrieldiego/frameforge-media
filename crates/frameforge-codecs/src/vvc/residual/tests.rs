@@ -67,34 +67,46 @@ fn vvc_transform_accepts_8x8_luma_and_4x4_chroma_tus() {
 }
 
 #[test]
-#[should_panic(expected = "non-DCT2 VVC luma MTS quantization is not implemented yet")]
-fn vvc_luma_mts_quantization_rejects_unimplemented_non_dct2() {
-    quantize_vvc_luma_residual_greedy_with_qp_and_mts(
-        &[0; 8 * 8],
+fn vvc_luma_mts_quantization_supports_non_dct2() {
+    let mut residuals = [0; 8 * 8];
+    for y in 0..8 {
+        for x in 0..8 {
+            residuals[y * 8 + x] = if x >= y { 32 } else { -24 };
+        }
+    }
+    let quantized = quantize_vvc_luma_residual_greedy_with_qp_and_mts(
+        &residuals,
         8,
         8,
         SampleBitDepth::new(8).expect("valid bit depth"),
         VVC_DEFAULT_LOSSY_LUMA_QP,
         2,
     );
+    assert!(
+        quantized.has_ac || quantized.reconstructed_dc_coeff != 0,
+        "non-DCT2 MTS quantization should preserve visible residual energy"
+    );
 }
 
 #[test]
-#[should_panic(expected = "non-DCT2 VVC luma MTS inverse transform is not implemented yet")]
-fn vvc_luma_mts_inverse_rejects_unimplemented_non_dct2() {
+fn vvc_luma_mts_inverse_supports_non_dct2() {
     let mut residuals = Vec::new();
     let mut scratch = VvcInverseTransformScratch::default();
+    let mut ac = [0; VVC_LUMA_AC_COEFFS_PER_TU];
+    ac[0] = 1;
     inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
         &mut residuals,
         &mut scratch,
         8,
         8,
         0,
-        &[0; VVC_LUMA_AC_COEFFS_PER_TU],
+        &ac,
         SampleBitDepth::new(8).expect("valid bit depth"),
         VVC_DEFAULT_LOSSY_LUMA_QP,
         2,
     );
+    assert_eq!(residuals.len(), 8 * 8);
+    assert!(residuals.iter().any(|sample| *sample != 0));
 }
 
 #[test]
@@ -138,6 +150,118 @@ fn vvc_color_quantization_uses_inverse_transform_reconstruction() {
     assert_eq!(color.luma_tu_count, 1);
     assert!(color.luma_tu_negative[0]);
     assert!(color.y.abs_diff(65) <= 2);
+}
+
+#[test]
+fn vvc_positive_angular_luma_prediction_replicates_formal_main_extension() {
+    let geometry = VvcVideoGeometry {
+        width: 64,
+        height: 64,
+    };
+    let node = VvcCodingTreeNode {
+        x: 36,
+        y: 40,
+        width: 4,
+        height: 4,
+        cqt_depth: 0,
+        mtt_depth: 0,
+        depth_offset: 0,
+        part_idx: 0,
+        parent_split: VvcPartSplit::None,
+        tree_type: VvcTreeType::SingleTree,
+        split_history: [VvcPartSplit::None; 2],
+    };
+    let mut luma = vec![0; geometry.width * geometry.height];
+    luma[39 * geometry.width + 35] = 19;
+    for (offset, sample) in [18, 18, 17, 16, 15, 33, 155, 197, 204, 205, 205, 205]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        luma[39 * geometry.width + 36 + offset] = sample;
+    }
+    for (offset, sample) in [18, 18, 18, 17, 17, 34, 156, 201]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        luma[(40 + offset) * geometry.width + 35] = sample;
+    }
+
+    let mut prediction = Vec::new();
+    let mut scratch = VvcDcPredictionScratch::default();
+    prediction::predict_vvc_luma_intra_block_into_with_availability(
+        &mut prediction,
+        &mut scratch,
+        VvcIntraPredictionMode::Angular(65),
+        &luma,
+        geometry,
+        node,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+        None,
+    );
+
+    assert_eq!(
+        prediction,
+        vec![18, 17, 16, 15, 18, 16, 14, 22, 17, 14, 19, 122, 16, 17, 108, 189]
+    );
+}
+
+#[test]
+fn vvc_luma_mrl_prediction_uses_shifted_reference_line() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
+    let node = VvcCodingTreeNode {
+        x: 4,
+        y: 4,
+        width: 4,
+        height: 4,
+        cqt_depth: 1,
+        mtt_depth: 0,
+        depth_offset: 0,
+        part_idx: 0,
+        parent_split: VvcPartSplit::Quad,
+        tree_type: VvcTreeType::DualTreeLuma,
+        split_history: [VvcPartSplit::Quad; 2],
+    };
+    let mut luma = vec![0; geometry.width * geometry.height];
+    for x in 0..4 {
+        luma[3 * geometry.width + 4 + x] = 10 + x as VvcSample;
+        luma[2 * geometry.width + 4 + x] = 20 + x as VvcSample;
+    }
+
+    let mut nearest = Vec::new();
+    let mut shifted = Vec::new();
+    let mut scratch = VvcDcPredictionScratch::default();
+    prediction::predict_vvc_luma_intra_block_into_with_availability(
+        &mut nearest,
+        &mut scratch,
+        VvcIntraPredictionMode::Vertical,
+        &luma,
+        geometry,
+        node,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+        None,
+    );
+    prediction::predict_vvc_luma_intra_block_into_with_mrl_and_availability(
+        &mut shifted,
+        &mut scratch,
+        VvcIntraPredictionMode::Vertical,
+        &luma,
+        geometry,
+        node,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+        1,
+        None,
+    );
+
+    assert_ne!(nearest, shifted);
+    assert_eq!(
+        shifted,
+        vec![20, 21, 22, 23, 20, 21, 22, 23, 20, 21, 22, 23, 20, 21, 22, 23]
+    );
 }
 
 #[test]

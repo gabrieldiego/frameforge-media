@@ -80,8 +80,10 @@ receive the original raw format without conversion.
 Lossless mode adds a stricter stream-exact requirement and never uses the
 8-bit fallback converter. Current lossless validation is enabled for AV2
 4:2:0/4:2:2/4:4:4 at 8/10 bits and VVC 4:2:0/4:2:2/4:4:4 at 8 through 12
-bits. AV2 12-bit inputs remain gated because the normal AVM reference profiles
-validate 8-bit and 10-bit streams.
+bits. Planar `gbrp8` and legacy packed `rgb24` are validated as RGB-family
+identity streams through the same shared repacking boundary; codec internals do
+not convert RGB to YUV. AV2 12-bit inputs remain gated because the normal AVM
+reference profiles validate 8-bit and 10-bit streams.
 
 Prefer adding new stage-specific options behind repeated `--set key[=value]`
 arguments until a setting is common enough to deserve a stable top-level flag.

@@ -70,6 +70,24 @@ const VVC_DCT2_32_AC_ROWS_1_TO_3: [[i32; 32]; 3] = [
     ],
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VvcLumaTransformType {
+    Dct2,
+    Dst7,
+    Dct8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VvcLumaTransformPair {
+    horizontal: VvcLumaTransformType,
+    vertical: VvcLumaTransformType,
+}
+
+const VVC_DCT8_4_BASE: [i32; 4] = [84, 74, 55, 29];
+const VVC_DCT8_8_BASE: [i32; 8] = [86, 85, 78, 71, 60, 46, 32, 17];
+const VVC_DST7_4_BASE: [i32; 4] = [29, 55, 74, 84];
+const VVC_DST7_8_BASE: [i32; 8] = [17, 32, 46, 60, 71, 78, 85, 86];
+
 #[cfg(test)]
 pub(in crate::vvc) fn transform_vvc_tu(
     component: VvcTransformComponent,
@@ -144,21 +162,92 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp_and_mts(
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
     debug_assert!((0..=63).contains(&qp));
-    assert_eq!(
-        mts_index, 0,
-        "non-DCT2 VVC luma MTS quantization is not implemented yet"
+    assert!(
+        vvc_luma_mts_index_supported(mts_index),
+        "unsupported VVC luma MTS index {mts_index}"
     );
 
-    let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth, qp);
+    let dc_level = quantize_vvc_luma_residual_dc_by_search_with_mts(
+        residuals, width, height, bit_depth, qp, mts_index,
+    );
 
-    let (ac_coeffs, has_ac) =
-        quantize_direct_luma_ac_coeffs(residuals, width, height, bit_depth, qp, dc_level);
+    let (ac_coeffs, has_ac) = quantize_direct_luma_ac_coeffs(
+        residuals, width, height, bit_depth, qp, dc_level, mts_index,
+    );
     VvcQuantizedLumaTransformBlock {
         reconstructed_dc_coeff: dc_level,
         reconstructed_ac_coeffs: ac_coeffs,
         has_ac,
         abs_remainder: dc_level.unsigned_abs().min(u8::MAX as u16) as u8,
     }
+}
+
+fn quantize_vvc_luma_residual_dc_by_search_with_mts(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    qp: i32,
+    mts_index: u8,
+) -> i16 {
+    if mts_index == 0 {
+        return quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth, qp);
+    }
+
+    let estimate = estimate_mts_luma_dc_level(residuals, width, height, qp, mts_index);
+    let mut best_level = 0i16;
+    let mut best_sse = residual_sum_and_sse(residuals).1 as u64;
+    for candidate in (i32::from(estimate) - 8)..=(i32::from(estimate) + 8) {
+        let level = candidate.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        let sse = luma_reconstructed_residual_sse_with_mts(
+            residuals,
+            width,
+            height,
+            bit_depth,
+            qp,
+            level,
+            &[0; VVC_LUMA_AC_COEFFS_PER_TU],
+            mts_index,
+        );
+        if sse < best_sse {
+            best_sse = sse;
+            best_level = level;
+        }
+    }
+    best_level
+}
+
+fn estimate_mts_luma_dc_level(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    qp: i32,
+    mts_index: u8,
+) -> i16 {
+    let width_usize = usize::from(width);
+    let height_usize = usize::from(height);
+    let transform_pair = vvc_luma_mts_transform_pair(mts_index);
+    let mut acc = 0i64;
+    for y in 0..height_usize {
+        let ver = i64::from(vvc_luma_transform_value(
+            transform_pair.vertical,
+            height,
+            0,
+            y,
+        ));
+        for x in 0..width_usize {
+            let hor = i64::from(vvc_luma_transform_value(
+                transform_pair.horizontal,
+                width,
+                0,
+                x,
+            ));
+            acc += i64::from(residuals[y * width_usize + x]) * ver * hor;
+        }
+    }
+    let quant_shift = luma_ac_quant_shift(width, height, qp);
+    div_round_nearest_i64(acc, 1i64 << quant_shift).clamp(i64::from(i16::MIN), i64::from(i16::MAX))
+        as i16
 }
 
 fn quantize_vvc_luma_residual_dc_by_search(
@@ -213,43 +302,6 @@ impl Default for VvcInverseTransformScratch {
     }
 }
 
-#[cfg(test)]
-pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into(
-    residuals: &mut Vec<i16>,
-    scratch: &mut VvcInverseTransformScratch,
-    width: u16,
-    height: u16,
-    dc_level: i16,
-    ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
-    bit_depth: SampleBitDepth,
-) {
-    inverse_transform_vvc_luma_quantized_block_into_with_qp(
-        residuals,
-        scratch,
-        width,
-        height,
-        dc_level,
-        ac_levels,
-        bit_depth,
-        VVC_DEFAULT_LOSSY_LUMA_QP,
-    );
-}
-
-pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp(
-    residuals: &mut Vec<i16>,
-    scratch: &mut VvcInverseTransformScratch,
-    width: u16,
-    height: u16,
-    dc_level: i16,
-    ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
-    bit_depth: SampleBitDepth,
-    qp: i32,
-) {
-    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
-        residuals, scratch, width, height, dc_level, ac_levels, bit_depth, qp, 0,
-    );
-}
-
 pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
     residuals: &mut Vec<i16>,
     scratch: &mut VvcInverseTransformScratch,
@@ -261,9 +313,9 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp_an
     qp: i32,
     mts_index: u8,
 ) {
-    assert_eq!(
-        mts_index, 0,
-        "non-DCT2 VVC luma MTS inverse transform is not implemented yet"
+    assert!(
+        vvc_luma_mts_index_supported(mts_index),
+        "unsupported VVC luma MTS index {mts_index}"
     );
     inverse_transform_vvc_quantized_block_into(
         residuals,
@@ -275,6 +327,7 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp_an
         luma_coded_coefficient_extent(width, height).0,
         qp,
         bit_depth,
+        mts_index,
     );
 }
 
@@ -311,7 +364,7 @@ pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into_with_qp(
     chroma_qp: i32,
 ) {
     inverse_transform_vvc_quantized_block_into(
-        residuals, scratch, width, height, dc_level, ac_levels, 4, chroma_qp, bit_depth,
+        residuals, scratch, width, height, dc_level, ac_levels, 4, chroma_qp, bit_depth, 0,
     );
 }
 
@@ -325,6 +378,7 @@ fn inverse_transform_vvc_quantized_block_into(
     coeff_stride: usize,
     qp: i32,
     bit_depth: SampleBitDepth,
+    mts_index: u8,
 ) {
     let width_usize = usize::from(width);
     let height_usize = usize::from(height);
@@ -366,6 +420,7 @@ fn inverse_transform_vvc_quantized_block_into(
         active_width,
         active_height,
         bit_depth,
+        mts_index,
     );
 }
 
@@ -418,6 +473,7 @@ fn inverse_transform_vvc_residual_levels_into(
         width_usize,
         height_usize,
         bit_depth,
+        0,
     );
 }
 
@@ -429,12 +485,14 @@ fn inverse_transform_vvc_dequantized_levels_into(
     active_width: usize,
     active_height: usize,
     bit_depth: SampleBitDepth,
+    mts_index: u8,
 ) {
     let width_usize = usize::from(width);
     let height_usize = usize::from(height);
     let coefficient_count = width_usize * height_usize;
     let dequantized = &scratch.dequantized[..coefficient_count];
     let vertical = &mut scratch.vertical[..coefficient_count];
+    let transform_pair = vvc_luma_mts_transform_pair(mts_index);
     debug_assert!(active_width <= width_usize);
     debug_assert!(active_height <= height_usize);
     for x in 0..active_width {
@@ -443,7 +501,7 @@ fn inverse_transform_vvc_dequantized_levels_into(
             for k in 0..active_height {
                 let coeff = dequantized[k * width_usize + x];
                 if coeff != 0 {
-                    sum += dct2_value(height, k, y) * coeff;
+                    sum += vvc_luma_transform_value(transform_pair.vertical, height, k, y) * coeff;
                 }
             }
             vertical[y * width_usize + x] = if height > 1 { (sum + 64) >> 7 } else { sum };
@@ -464,7 +522,7 @@ fn inverse_transform_vvc_dequantized_levels_into(
             for k in 0..active_width {
                 let coeff = vertical[y * width_usize + k];
                 if coeff != 0 {
-                    sum += dct2_value(width, k, x) * coeff;
+                    sum += vvc_luma_transform_value(transform_pair.horizontal, width, k, x) * coeff;
                 }
             }
             residuals[y * width_usize + x] = ((sum + residual_offset) >> residual_bd_shift) as i16;
@@ -836,20 +894,25 @@ fn quantize_direct_luma_ac_coeffs(
     bit_depth: SampleBitDepth,
     qp: i32,
     dc_level: i16,
+    mts_index: u8,
 ) -> ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool) {
     let legacy = quantize_legacy_luma_ac_coeffs(residuals, width, height, qp);
     if !VVC_ENABLE_LUMA_DCT_COEFF_SELECTION
+        || mts_index != 0
         || width != 8
         || height != 8
         || !residuals_have_ac_energy(residuals)
     {
-        let _selector_inputs = (bit_depth, dc_level);
-        return legacy;
+        if mts_index == 0 {
+            let _selector_inputs = (bit_depth, dc_level);
+            return legacy;
+        }
+        return quantize_transform_luma_ac_coeffs(residuals, width, height, qp, mts_index);
     }
 
-    let dct = quantize_dct_luma_ac_coeffs(residuals, width, height, qp);
+    let dct = quantize_transform_luma_ac_coeffs(residuals, width, height, qp, 0);
     select_luma_ac_coeff_candidate(
-        residuals, width, height, bit_depth, qp, dc_level, legacy, dct,
+        residuals, width, height, bit_depth, qp, dc_level, legacy, dct, 0,
     )
 }
 
@@ -888,16 +951,18 @@ fn quantize_legacy_luma_ac_coeffs(
     (ac_coeffs, has_ac)
 }
 
-fn quantize_dct_luma_ac_coeffs(
+fn quantize_transform_luma_ac_coeffs(
     residuals: &[i16],
     width: u16,
     height: u16,
     qp: i32,
+    mts_index: u8,
 ) -> ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool) {
     let width_usize = usize::from(width);
     let height_usize = usize::from(height);
     debug_assert_eq!(residuals.len(), width_usize * height_usize);
     let (active_width, active_height) = luma_coded_coefficient_extent(width, height);
+    let transform_pair = vvc_luma_mts_transform_pair(mts_index);
     let mut ac_coeffs = [0; VVC_LUMA_AC_COEFFS_PER_TU];
     let mut has_ac = false;
     let mut vertical = [0i64; 8 * VVC_MAX_TRANSFORM_EDGE];
@@ -908,7 +973,12 @@ fn quantize_dct_luma_ac_coeffs(
             let mut sum = 0i64;
             for y in 0..height_usize {
                 sum += i64::from(residuals[y * width_usize + x])
-                    * i64::from(dct2_value(height, ky, y));
+                    * i64::from(vvc_luma_transform_value(
+                        transform_pair.vertical,
+                        height,
+                        ky,
+                        y,
+                    ));
             }
             vertical[ky * VVC_MAX_TRANSFORM_EDGE + x] = sum;
         }
@@ -921,8 +991,13 @@ fn quantize_dct_luma_ac_coeffs(
             }
             let mut acc = 0i64;
             for x in 0..width_usize {
-                acc +=
-                    vertical[ky * VVC_MAX_TRANSFORM_EDGE + x] * i64::from(dct2_value(width, kx, x));
+                acc += vertical[ky * VVC_MAX_TRANSFORM_EDGE + x]
+                    * i64::from(vvc_luma_transform_value(
+                        transform_pair.horizontal,
+                        width,
+                        kx,
+                        x,
+                    ));
             }
             let level = div_round_nearest_i64(acc, 1i64 << quant_shift);
             ac_coeffs[ky * active_width + kx - 1] =
@@ -942,12 +1017,14 @@ fn select_luma_ac_coeff_candidate(
     dc_level: i16,
     legacy: ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool),
     dct: ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool),
+    mts_index: u8,
 ) -> ([i16; VVC_LUMA_AC_COEFFS_PER_TU], bool) {
-    let legacy_sse = luma_reconstructed_residual_sse(
-        residuals, width, height, bit_depth, qp, dc_level, &legacy.0,
+    let legacy_sse = luma_reconstructed_residual_sse_with_mts(
+        residuals, width, height, bit_depth, qp, dc_level, &legacy.0, mts_index,
     );
-    let dct_sse =
-        luma_reconstructed_residual_sse(residuals, width, height, bit_depth, qp, dc_level, &dct.0);
+    let dct_sse = luma_reconstructed_residual_sse_with_mts(
+        residuals, width, height, bit_depth, qp, dc_level, &dct.0, mts_index,
+    );
     if dct_sse >= legacy_sse {
         return legacy;
     }
@@ -965,7 +1042,7 @@ fn select_luma_ac_coeff_candidate(
     }
 }
 
-fn luma_reconstructed_residual_sse(
+pub(in crate::vvc::residual) fn luma_reconstructed_residual_sse_with_mts(
     source_residuals: &[i16],
     width: u16,
     height: u16,
@@ -973,10 +1050,11 @@ fn luma_reconstructed_residual_sse(
     qp: i32,
     dc_level: i16,
     ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
+    mts_index: u8,
 ) -> u64 {
     let mut scratch = VvcInverseTransformScratch::default();
     let mut reconstructed = Vec::new();
-    inverse_transform_vvc_luma_quantized_block_into_with_qp(
+    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
         &mut reconstructed,
         &mut scratch,
         width,
@@ -985,6 +1063,7 @@ fn luma_reconstructed_residual_sse(
         ac_levels,
         bit_depth,
         qp,
+        mts_index,
     );
     source_residuals
         .iter()
@@ -996,14 +1075,14 @@ fn luma_reconstructed_residual_sse(
         .sum()
 }
 
-fn luma_coeff_rd_lambda(qp: i32, bit_depth: SampleBitDepth) -> u64 {
+pub(in crate::vvc::residual) fn luma_coeff_rd_lambda(qp: i32, bit_depth: SampleBitDepth) -> u64 {
     let qp_scale = 1u64 << (qp.clamp(0, 63) / 6);
     let bit_depth_delta = bit_depth.bits().saturating_sub(8) as u32;
     let bit_depth_scale = 1u64 << (bit_depth_delta * 2);
     qp_scale.saturating_mul(bit_depth_scale)
 }
 
-fn luma_ac_syntax_cost_estimate(
+pub(in crate::vvc::residual) fn luma_ac_syntax_cost_estimate(
     width: u16,
     height: u16,
     ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
@@ -1235,6 +1314,106 @@ fn dct2_value(size: u16, k: usize, n: usize) -> i32 {
         }
         other => unimplemented!("DCT-II matrix size {other} is not wired yet"),
     }
+}
+
+fn vvc_luma_mts_transform_pair(mts_index: u8) -> VvcLumaTransformPair {
+    match mts_index {
+        0 => VvcLumaTransformPair {
+            horizontal: VvcLumaTransformType::Dct2,
+            vertical: VvcLumaTransformType::Dct2,
+        },
+        2 => VvcLumaTransformPair {
+            horizontal: VvcLumaTransformType::Dst7,
+            vertical: VvcLumaTransformType::Dst7,
+        },
+        3 => VvcLumaTransformPair {
+            horizontal: VvcLumaTransformType::Dct8,
+            vertical: VvcLumaTransformType::Dst7,
+        },
+        4 => VvcLumaTransformPair {
+            horizontal: VvcLumaTransformType::Dst7,
+            vertical: VvcLumaTransformType::Dct8,
+        },
+        5 => VvcLumaTransformPair {
+            horizontal: VvcLumaTransformType::Dct8,
+            vertical: VvcLumaTransformType::Dct8,
+        },
+        _ => panic!("unsupported VVC luma MTS index {mts_index}"),
+    }
+}
+
+fn vvc_luma_mts_index_supported(mts_index: u8) -> bool {
+    matches!(mts_index, 0 | 2..=5)
+}
+
+fn vvc_luma_transform_value(transform: VvcLumaTransformType, size: u16, k: usize, n: usize) -> i32 {
+    match transform {
+        VvcLumaTransformType::Dct2 => dct2_value(size, k, n),
+        VvcLumaTransformType::Dst7 => dst7_value(size, k, n),
+        VvcLumaTransformType::Dct8 => dct8_value(size, k, n),
+    }
+}
+
+fn dct8_value(size: u16, k: usize, n: usize) -> i32 {
+    match size {
+        4 => dct8_value_4(k, n),
+        8 => dct8_value_8(k, n),
+        other => unimplemented!("DCT-VIII matrix size {other} is not wired yet"),
+    }
+}
+
+fn dst7_value(size: u16, k: usize, n: usize) -> i32 {
+    match size {
+        4 => dst7_value_4(k, n),
+        8 => dst7_value_8(k, n),
+        other => unimplemented!("DST-VII matrix size {other} is not wired yet"),
+    }
+}
+
+fn signed_basis(base: &[i32], one_based_index: i8) -> i32 {
+    match one_based_index.cmp(&0) {
+        std::cmp::Ordering::Greater => base[one_based_index as usize - 1],
+        std::cmp::Ordering::Less => -base[(-one_based_index) as usize - 1],
+        std::cmp::Ordering::Equal => 0,
+    }
+}
+
+fn dct8_value_4(k: usize, n: usize) -> i32 {
+    const ROWS: [[i8; 4]; 4] = [[1, 2, 3, 4], [2, 0, -2, -2], [3, -2, -4, 1], [4, -2, 1, -3]];
+    signed_basis(&VVC_DCT8_4_BASE, ROWS[k][n])
+}
+
+fn dct8_value_8(k: usize, n: usize) -> i32 {
+    const ROWS: [[i8; 8]; 8] = [
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [2, 5, 8, -7, -4, -1, -3, -6],
+        [3, 8, -5, -1, -6, 7, 2, 4],
+        [4, -7, -1, -8, 3, 5, -6, -2],
+        [5, -4, -6, 3, 7, -2, -8, 1],
+        [6, -1, 7, 5, -2, 8, 4, -3],
+        [7, -3, 2, -6, -8, 4, -1, 5],
+        [8, -6, 4, -2, 1, -3, 5, -7],
+    ];
+    signed_basis(&VVC_DCT8_8_BASE, ROWS[k][n])
+}
+
+fn dst7_value_4(k: usize, n: usize) -> i32 {
+    const ROWS: [[i8; 4]; 4] = [[1, 2, 3, 4], [3, 3, 0, -3], [4, -1, -3, 2], [2, -4, 3, -1]];
+    signed_basis(&VVC_DST7_4_BASE, ROWS[k][n])
+}
+
+fn dst7_value_8(k: usize, n: usize) -> i32 {
+    const ROWS: [[i8; 8]; 8] = [
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [3, 6, 8, 5, 2, -1, -4, -7],
+        [5, 7, 2, -3, -8, -4, 1, 6],
+        [7, 3, -4, -6, 1, 8, 2, -5],
+        [8, -1, -7, 2, 6, -3, -5, 4],
+        [6, -5, -1, 7, -4, -2, 8, -3],
+        [4, -8, 5, -1, -3, 7, -6, 2],
+        [2, -4, 6, -8, 7, -5, 3, -1],
+    ];
+    signed_basis(&VVC_DST7_8_BASE, ROWS[k][n])
 }
 
 fn dc_only_residual_from_level(

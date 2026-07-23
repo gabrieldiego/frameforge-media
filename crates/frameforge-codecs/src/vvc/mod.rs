@@ -30,15 +30,15 @@ mod syntax;
 use cabac::{
     encode_ctu_partition_body, encode_frame_partition_body_with_contexts,
     initial_vvc_cabac_contexts, vvc_chroma_intra_mode_syntax_bin_count, vvc_chroma_transform_nodes,
-    vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes, VvcCabacContext,
-    VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol, VvcCabacEncoder,
-    VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
+    vvc_luma_intra_mode_is_mpm, vvc_luma_intra_mode_syntax_bin_count, vvc_luma_transform_nodes,
+    VvcCabacContext, VvcCabacContexts, VvcCabacDumpContextEvent, VvcCabacDumpSymbol,
+    VvcCabacEncoder, VvcCodingTreeNode, VvcCtuCabacOp, VvcCtuPartitionParams, VvcCtuPartitionShape,
     VvcLastSigCoeffPrefixCtxInput, VvcPartSplit,
 };
 #[cfg(test)]
 use cabac::{
-    encode_ctu_partition_body_with_contexts, VvcCtuCabacGenerator, VvcQtSplitCtxInput,
-    VvcSplitCtxInput, VvcTreeType,
+    encode_ctu_partition_body_with_contexts, vvc_luma_mpm_list_for_test, VvcCtuCabacGenerator,
+    VvcQtSplitCtxInput, VvcSplitCtxInput, VvcTreeType,
 };
 use header::{
     vvc_frame_slice_unit, vvc_picture_ctu_cols, vvc_picture_ctu_count, vvc_picture_ctu_rows,
@@ -71,10 +71,10 @@ pub use residual::quantize_vvc_color;
 #[cfg(test)]
 use residual::VVC_LUMA_DC_BASE;
 use residual::{
-    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp,
-    VvcPlaneAvailability, VvcQuantizedColor, VvcResidualCabacOptions, VvcResidualComponent,
-    MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_DEFAULT_LOSSY_CHROMA_QP,
-    VVC_DEFAULT_LOSSY_LUMA_QP, VVC_LUMA_AC_COEFFS_PER_TU,
+    quantize_vvc_frame, quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp_and_luma_modes,
+    VvcLumaModeSearchState, VvcPlaneAvailability, VvcQuantizedColor, VvcResidualCabacOptions,
+    VvcResidualComponent, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
+    VVC_DEFAULT_LOSSY_CHROMA_QP, VVC_DEFAULT_LOSSY_LUMA_QP, VVC_LUMA_AC_COEFFS_PER_TU,
 };
 #[cfg(test)]
 use residual::{VvcResidualCabacEncoder, VvcResidualCtxConfig, VvcResidualPass1State};
@@ -1135,7 +1135,7 @@ impl VvcSyntaxToolFlags {
             transform_skip_enabled: residual_mode.is_lossless(),
             bdpcm_enabled: false,
             mts_enabled: false,
-            explicit_mts_intra_enabled: false,
+            explicit_mts_intra_enabled: !residual_mode.is_lossless(),
             lfnst_enabled: false,
             joint_cbcr_enabled: false,
             mrl_enabled: true,
@@ -1647,6 +1647,14 @@ impl VvcResidualCodingPolicy {
         vvc_residual_luma_directional_candidate_allowed(self.context, node)
     }
 
+    pub(in crate::vvc) fn luma_mrl_candidate_allowed(
+        self,
+        node: VvcCodingTreeNode,
+        mode: VvcIntraPredictionMode,
+    ) -> bool {
+        vvc_residual_luma_mrl_candidate_allowed(self.context, node, mode)
+    }
+
     pub(in crate::vvc) fn chroma_cclm_candidate_allowed(
         self,
         node: VvcCodingTreeNode,
@@ -1789,6 +1797,19 @@ pub(in crate::vvc) fn vvc_residual_luma_directional_candidate_allowed(
     node: VvcCodingTreeNode,
 ) -> bool {
     node.width >= 4
+        && node.height >= 4
+        && node.width.is_power_of_two()
+        && node.height.is_power_of_two()
+}
+
+pub(in crate::vvc) fn vvc_residual_luma_mrl_candidate_allowed(
+    _context: VvcResidualModeDecisionContext,
+    node: VvcCodingTreeNode,
+    mode: VvcIntraPredictionMode,
+) -> bool {
+    node.y % VVC_CTU_SIZE as u16 != 0
+        && !matches!(mode, VvcIntraPredictionMode::Planar)
+        && node.width >= 4
         && node.height >= 4
         && node.width.is_power_of_two()
         && node.height.is_power_of_two()
@@ -2276,17 +2297,20 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 let mut frame_recon =
                     VvcReconstructionFrame::new_neutral(geometry, source_frame.format);
                 let mut frame_ctus = Vec::with_capacity(vvc_picture_ctu_count(geometry));
+                let mut luma_mode_search_state = VvcLumaModeSearchState::new_for_geometry(geometry);
                 for region in vvc_ctu_regions(geometry) {
                     #[cfg(feature = "vvc-stats")]
                     let stage_start = Instant::now();
-                    let quantized = quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp(
-                        &source_frame,
-                        &mut frame_recon,
-                        region,
-                        residual_policy,
-                        luma_qp,
-                        chroma_qp,
-                    );
+                    let quantized =
+                        quantize_vvc_residual_ctu_into_frame_reconstruction_with_qp_and_luma_modes(
+                            &source_frame,
+                            &mut frame_recon,
+                            region,
+                            residual_policy,
+                            luma_qp,
+                            chroma_qp,
+                            &mut luma_mode_search_state,
+                        );
                     #[cfg(feature = "vvc-stats")]
                     add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
                     #[cfg(feature = "vvc-stats")]

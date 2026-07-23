@@ -21,7 +21,8 @@ const VVC_NUM_LUMA_MODES: u32 = 67;
 const VVC_NUM_MOST_PROBABLE_LUMA_MODES: usize = 6;
 const VVC_REMAINING_LUMA_MODE_COUNT: u32 =
     VVC_NUM_LUMA_MODES - VVC_NUM_MOST_PROBABLE_LUMA_MODES as u32;
-const VVC_NUM_INTRA_ANGULAR_MODES_MINUS_ONE: i16 = 64;
+const VVC_NUM_INTRA_ANGULAR_MODES: i16 = 65;
+const VVC_NUM_INTRA_ANGULAR_MODE_WRAP: i16 = VVC_NUM_INTRA_ANGULAR_MODES - 1;
 
 pub(in crate::vvc) fn encode_ctu_partition_body(
     cabac: &mut VvcCabacEncoder,
@@ -74,7 +75,7 @@ fn vvc_luma_mpm_list(
         mpm[3] = vvc_wrap_luma_angular_mode(i16::from(min) - 1);
         mpm[4] = vvc_wrap_luma_angular_mode(i16::from(max) + 1);
         mpm[5] = vvc_wrap_luma_angular_mode(i16::from(min) - 2);
-    } else if diff >= VVC_NUM_INTRA_ANGULAR_MODES_MINUS_ONE as u8 - 3 {
+    } else if diff >= VVC_NUM_INTRA_ANGULAR_MODES as u8 - 3 {
         mpm[3] = vvc_wrap_luma_angular_mode(i16::from(min) + 1);
         mpm[4] = vvc_wrap_luma_angular_mode(i16::from(max) - 1);
         mpm[5] = vvc_wrap_luma_angular_mode(i16::from(min) + 2);
@@ -90,6 +91,14 @@ fn vvc_luma_mpm_list(
     mpm
 }
 
+#[cfg(test)]
+pub(in crate::vvc) fn vvc_luma_mpm_list_for_test(
+    left: Option<VvcIntraPredictionMode>,
+    above: Option<VvcIntraPredictionMode>,
+) -> [u8; VVC_NUM_MOST_PROBABLE_LUMA_MODES] {
+    vvc_luma_mpm_list(left, above)
+}
+
 pub(in crate::vvc) fn vvc_luma_intra_mode_syntax_bin_count(
     mode: VvcIntraPredictionMode,
     left: Option<VvcIntraPredictionMode>,
@@ -97,7 +106,7 @@ pub(in crate::vvc) fn vvc_luma_intra_mode_syntax_bin_count(
 ) -> u8 {
     let mode_index = mode.luma_mode_index();
     let mpm = vvc_luma_mpm_list(left, above);
-    if let Some(mpm_idx) = mpm.iter().position(|candidate| *candidate == mode_index) {
+    if let Some(mpm_idx) = vvc_luma_mpm_index_for_mode_index(mode_index, mpm) {
         let bypass_bins = if mpm_idx == 0 { 0 } else { mpm_idx.min(4) };
         return 2 + bypass_bins as u8;
     }
@@ -106,6 +115,22 @@ pub(in crate::vvc) fn vvc_luma_intra_mode_syntax_bin_count(
         vvc_luma_remaining_mode_index(mode_index, mpm),
         VVC_REMAINING_LUMA_MODE_COUNT,
     )
+}
+
+pub(in crate::vvc) fn vvc_luma_intra_mode_is_mpm(
+    mode: VvcIntraPredictionMode,
+    left: Option<VvcIntraPredictionMode>,
+    above: Option<VvcIntraPredictionMode>,
+) -> bool {
+    vvc_luma_mpm_index_for_mode_index(mode.luma_mode_index(), vvc_luma_mpm_list(left, above))
+        .is_some()
+}
+
+fn vvc_luma_mpm_index_for_mode_index(
+    mode_index: u8,
+    mpm: [u8; VVC_NUM_MOST_PROBABLE_LUMA_MODES],
+) -> Option<usize> {
+    mpm.iter().position(|candidate| *candidate == mode_index)
 }
 
 pub(in crate::vvc) fn vvc_chroma_intra_mode_syntax_bin_count(
@@ -129,7 +154,7 @@ pub(in crate::vvc) fn vvc_chroma_intra_mode_syntax_bin_count(
 }
 
 fn vvc_wrap_luma_angular_mode(mode: i16) -> u8 {
-    ((mode - VVC_LUMA_ANGULAR_BASE).rem_euclid(VVC_NUM_INTRA_ANGULAR_MODES_MINUS_ONE)
+    ((mode - VVC_LUMA_ANGULAR_BASE).rem_euclid(VVC_NUM_INTRA_ANGULAR_MODE_WRAP)
         + VVC_LUMA_ANGULAR_BASE) as u8
 }
 
@@ -643,13 +668,28 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeLuma);
         let mode = self.params.luma_tu_intra_modes[self.luma_tu_index];
         let mode_index = mode.luma_mode_index();
+        let mrl_index = self.params.luma_tu_mrl_index[self.luma_tu_index];
         let mpm = vvc_luma_mpm_list(neighbours.left_of(node), neighbours.above_of(node));
-        let mpm_idx = mpm.iter().position(|candidate| *candidate == mode_index);
-        self.contexts
-            .encode(cabac, VvcCabacContext::IntraLumaMpmFlag, mpm_idx.is_some());
-        if let Some(mpm_idx) = mpm_idx {
+        let mpm_idx = vvc_luma_mpm_index_for_mode_index(mode_index, mpm);
+        if mrl_index == 0 {
             self.contexts
-                .encode(cabac, VvcCabacContext::IntraLumaPlanarFlag(1), mpm_idx > 0);
+                .encode(cabac, VvcCabacContext::IntraLumaMpmFlag, mpm_idx.is_some());
+        } else {
+            assert!(
+                mpm_idx.is_some(),
+                "VVC nonzero MRL luma modes must be coded through MPM syntax"
+            );
+        }
+        if let Some(mpm_idx) = mpm_idx {
+            if mrl_index == 0 {
+                self.contexts
+                    .encode(cabac, VvcCabacContext::IntraLumaPlanarFlag(1), mpm_idx > 0);
+            } else {
+                assert_ne!(
+                    mpm_idx, 0,
+                    "VVC nonzero MRL cannot be combined with planar luma prediction"
+                );
+            }
             if mpm_idx > 0 {
                 cabac.encode_bin_ep(mpm_idx > 1);
             }
@@ -663,6 +703,10 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 cabac.encode_bin_ep(mpm_idx > 4);
             }
         } else {
+            assert_eq!(
+                mrl_index, 0,
+                "VVC remaining-mode syntax is not legal for nonzero MRL"
+            );
             encode_vvc_trunc_bin_code_ep(
                 cabac,
                 vvc_luma_remaining_mode_index(mode_index, mpm),

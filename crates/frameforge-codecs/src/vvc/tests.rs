@@ -152,11 +152,20 @@ fn vvc_sps_signals_srgb_gbr_vui_when_requested() {
 
 #[test]
 fn vvc_gbrp8_input_requests_srgb_vui_signal() {
+    let geometry = VvcVideoGeometry {
+        width: 16,
+        height: 16,
+    };
     let config = vvc_slice_config_for_input_format(
         VvcSliceSyntaxConfig::residual_lossy(ChromaSampling::Cs444),
         PixelFormat::Gbrp8,
     );
     assert_eq!(config.vui_signal, Some(VvcVuiSignal::srgb_gbr_compatible()));
+    let sps = vvc_sps_rbsp_8bit(geometry, config);
+    assert_eq!(vvc_u_value(&sps, "general_profile_idc"), 33);
+    assert_eq!(vvc_u_value(&sps, "sps_chroma_format_idc"), 3);
+    assert_eq!(vvc_u_value(&sps, "vui_matrix_coeffs"), 2);
+    assert_vvc_flag(&sps, "vui_full_range_flag", true);
 
     let yuv_config = vvc_slice_config_for_input_format(
         VvcSliceSyntaxConfig::residual_lossy(ChromaSampling::Cs444),
@@ -186,26 +195,35 @@ fn vvc_sps_signals_native_420_bit_depth_profiles() {
 }
 
 #[test]
-fn vvc_sps_signals_444_capable_profiles_for_422() {
+fn vvc_sps_signals_444_capable_profiles_for_422_and_444() {
     let geometry = VvcVideoGeometry {
         width: 16,
         height: 16,
     };
-    for (bits, expected_profile) in [(8, 33), (10, 33), (12, 34)] {
-        let rbsp = vvc_sps_rbsp(
-            geometry,
-            VvcSliceSyntaxConfig::residual_lossless(
-                ChromaSampling::Cs422,
+    for chroma_sampling in [ChromaSampling::Cs422, ChromaSampling::Cs444] {
+        for (bits, expected_profile) in [(8, 33), (10, 33), (12, 34)] {
+            let rbsp = vvc_sps_rbsp(
+                geometry,
+                VvcSliceSyntaxConfig::residual_lossless(
+                    chroma_sampling,
+                    SampleBitDepth::new(bits).expect("valid bit depth"),
+                ),
                 SampleBitDepth::new(bits).expect("valid bit depth"),
-            ),
-            SampleBitDepth::new(bits).expect("valid bit depth"),
-        );
-        assert_eq!(
-            vvc_ue_value(&rbsp, "sps_bitdepth_minus8"),
-            u32::from(bits - 8)
-        );
-        assert_eq!(vvc_u_value(&rbsp, "sps_chroma_format_idc"), 2);
-        assert_eq!(vvc_u_value(&rbsp, "general_profile_idc"), expected_profile);
+            );
+            assert_eq!(
+                vvc_ue_value(&rbsp, "sps_bitdepth_minus8"),
+                u32::from(bits - 8)
+            );
+            assert_eq!(
+                vvc_u_value(&rbsp, "sps_chroma_format_idc"),
+                match chroma_sampling {
+                    ChromaSampling::Cs422 => 2,
+                    ChromaSampling::Cs444 => 3,
+                    _ => unreachable!("test covers 4:2:2 and 4:4:4 only"),
+                }
+            );
+            assert_eq!(vvc_u_value(&rbsp, "general_profile_idc"), expected_profile);
+        }
     }
 
     let lossy = vvc_sps_rbsp(
@@ -216,6 +234,14 @@ fn vvc_sps_signals_444_capable_profiles_for_422() {
     assert_eq!(vvc_u_value(&lossy, "sps_chroma_format_idc"), 2);
     assert_eq!(vvc_u_value(&lossy, "general_profile_idc"), 33);
     assert_vvc_flag(&lossy, "sps_cclm_enabled_flag", true);
+
+    let palette = vvc_sps_rbsp(
+        geometry,
+        VvcSliceSyntaxConfig::palette_444(),
+        SampleBitDepth::new(8).expect("valid bit depth"),
+    );
+    assert_eq!(vvc_u_value(&palette, "sps_chroma_format_idc"), 3);
+    assert_eq!(vvc_u_value(&palette, "general_profile_idc"), 33);
 }
 
 fn assert_vvc_annex_b_has_min_picture_nals(bytes: &[u8], frames: usize) -> Vec<VvcNalInfo> {
@@ -584,9 +610,9 @@ fn vvc_sps_tool_flags_follow_the_active_slice_config() {
     assert_vvc_flag(&rbsp, "sps_transform_skip_enabled_flag", false);
     assert_vvc_field_absent(&rbsp, "sps_log2_transform_skip_max_size_minus2");
     assert_vvc_field_absent(&rbsp, "sps_bdpcm_enabled_flag");
-    assert_vvc_flag(&rbsp, "sps_mts_enabled_flag", false);
-    assert_vvc_field_absent(&rbsp, "sps_explicit_mts_intra_enabled_flag");
-    assert_vvc_field_absent(&rbsp, "sps_explicit_mts_inter_enabled_flag");
+    assert_vvc_flag(&rbsp, "sps_mts_enabled_flag", true);
+    assert_vvc_flag(&rbsp, "sps_explicit_mts_intra_enabled_flag", true);
+    assert_vvc_flag(&rbsp, "sps_explicit_mts_inter_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_lfnst_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_mrl_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_cclm_enabled_flag", true);
@@ -716,6 +742,7 @@ fn vvc_luma_mrl_syntax_supports_nonzero_reference_lines() {
         mrl_index: u8,
     ) -> Vec<bool> {
         let mut params = params.clone();
+        params.luma_tu_intra_modes[2] = VvcIntraPredictionMode::Dc;
         params.luma_tu_mrl_index[2] = mrl_index;
         vvc_ctu_partition_cabac_bits(&params, config)
     }
@@ -1066,6 +1093,17 @@ fn vvc_luma_mode_syntax_bin_count_matches_mpm_coding_shape() {
         ),
         3
     );
+}
+
+#[test]
+fn vvc_luma_mpm_list_handles_circular_angular_boundary() {
+    let mut mpm = vvc_luma_mpm_list_for_test(
+        Some(VvcIntraPredictionMode::Angular(2)),
+        Some(VvcIntraPredictionMode::Angular(63)),
+    );
+    assert_eq!(mpm, [0, 2, 63, 65, 3, 62]);
+    mpm.sort_unstable();
+    assert_eq!(mpm, [0, 2, 3, 62, 63, 65]);
 }
 
 #[test]
@@ -1715,6 +1753,39 @@ fn vvc_tu_coding_decision_selector_is_shared_across_formats() {
             }
         }
     }
+}
+
+#[test]
+fn vvc_luma_mrl_candidates_are_gated_by_ctu_line_and_mode() {
+    let format = VvcPictureFormat {
+        chroma_sampling: ChromaSampling::Cs444,
+        bit_depth: SampleBitDepth::new(8).expect("supported VVC bit depth"),
+    };
+    let context = VvcResidualModeDecisionContext::new(format, VvcResidualCodingMode::Lossy);
+    let top_line_node = VvcCodingTreeNode::root(8, 8, VvcTreeType::DualTreeLuma);
+    let mut below_top_node = top_line_node;
+    below_top_node.y = 8;
+
+    assert!(!vvc_residual_luma_mrl_candidate_allowed(
+        context,
+        top_line_node,
+        VvcIntraPredictionMode::Dc
+    ));
+    assert!(!vvc_residual_luma_mrl_candidate_allowed(
+        context,
+        below_top_node,
+        VvcIntraPredictionMode::Planar
+    ));
+    assert!(vvc_residual_luma_mrl_candidate_allowed(
+        context,
+        below_top_node,
+        VvcIntraPredictionMode::Dc
+    ));
+    assert!(vvc_residual_luma_mrl_candidate_allowed(
+        context,
+        below_top_node,
+        VvcIntraPredictionMode::Angular(34)
+    ));
 }
 
 #[test]

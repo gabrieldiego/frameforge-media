@@ -3487,10 +3487,8 @@ Checkpoint: `vvc-mts-transform-plumbing-1f`.
 
 This checkpoint passes the selected luma `mts_index` through transformed luma
 quantization and inverse reconstruction. The selector still returns
-`DCT2_DCT2=0`, and the new MTS-aware transform entry points assert on nonzero
-indices until DST7/DCT8 forward and inverse transforms are implemented. The
-important cleanup is that transform choice now reaches the transform boundary
-from the unified block-mode decision instead of staying as syntax-only
+`DCT2_DCT2=0`; this checkpoint made transform choice reach the transform
+boundary from the unified block-mode decision instead of staying as syntax-only
 metadata.
 
 The first-frame six-vector matrix is byte-neutral against
@@ -3518,6 +3516,148 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_MODES="lossless lossy" \
   ENCODE_MATRIX_FRAMES=1 \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-dct-selector-enabled-1f.json
+```
+
+## VVC RGB 4:4:4 Signaling And MRL Plumbing
+
+Checkpoint: `vvc-rgb444-mrl-plumbing`.
+
+This cleanup fixes the VVC 4:2:2/4:4:4 profile signaling and makes the RGB
+path explicit. Residual 4:2:2/4:4:4 streams now select VVC 4:4:4-capable
+profiles (`general_profile_idc` 33 through 10-bit, 34 above 10-bit), including
+planar `gbrp8` input. `gbrp8` still flows as full-resolution green, blue, red
+planes; VVC/VTM disallow identity matrix coefficient `0` when
+`sps_chroma_format_idc=3`, so the VUI signals full-range sRGB-compatible
+primaries/transfer with matrix coefficient `2` left unspecified.
+
+The validation/test plumbing stays byte-oriented:
+
+- Native `gbrp8` compares source, internal reconstruction, and reference
+  reconstruction directly as planar GBR.
+- Legacy packed `rgb24` remains a shared driver conversion boundary and is
+  only normalized in validation when a reference decoder emits planar GBR.
+- The VVC reference-comparison script repacks legacy packed `rgb24` to planar
+  GBR before invoking VTM; native `gbrp8` is passed through unchanged.
+
+Two reference-compatibility bugs were fixed while validating the planar RGB
+path:
+
+- Positive VVC angular prediction now replicates the formal main-reference
+  extension instead of reading real pixels beyond the VTM reference span.
+- Luma MPM remaining-mode coding now uses the correct circular angular
+  threshold at the 2/63 boundary.
+- Nonzero-MRL luma mode syntax now follows VTM's rule: MRL modes must be
+  MPM-coded, skip `IntraLumaMpmFlag`, and cannot use planar prediction.
+
+MRL is now syntax-enabled and selected conservatively. The luma prediction,
+final reconstruction, and CABAC syntax plumbing accept an explicit MRL index.
+The predictor now builds shifted reference lines for angular/H/V nonzero-MRL
+trials, and the quantizer can score DC and angular/H/V nonzero-MRL candidates
+when they are eligible for MPM-coded MRL syntax. The block-mode search now keeps
+frame-wide luma mode neighbours, matching the CABAC neighbour shape across CTU
+boundaries. MRL remains gated on the CTU top line, where higher reference lines
+are unavailable.
+
+Validation:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+python3 -m py_compile \
+  scripts/compare_reference_compression.py \
+  scripts/run_validation_set.py \
+  scripts/benchmark_encode_matrix.py \
+  scripts/generate_test_vectors.py \
+  scripts/convert_rgb24_to_gbrp8.py \
+  scripts/capture_wayland_portal_rgb.py
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+./ff encode verification/generated/rgb_signalling_check/wayland_crop64_gbrp8.rgb \
+  --video 64x64:gbrp8 --frames 1 --fps 30 \
+  --encode vvc:verification/generated/rgb_signalling_check/wayland_crop64_gbrp8_check.vvc \
+  --recon verification/generated/rgb_signalling_check/wayland_crop64_gbrp8_check.recon.rgb \
+  --set lossless
+python3 scripts/reference_tools.py decode --codec vvc \
+  --bitstream verification/generated/rgb_signalling_check/wayland_crop64_gbrp8_check.vvc \
+  --output verification/generated/rgb_signalling_check/wayland_crop64_gbrp8_check.reference.rgb \
+  --no-build
+cmp -s \
+  verification/generated/rgb_signalling_check/wayland_crop64_gbrp8_check.recon.rgb \
+  verification/generated/rgb_signalling_check/wayland_crop64_gbrp8_check.reference.rgb
+```
+
+## VVC Angular MRL, Frame-Wide Modes, And Guarded MTS
+
+Checkpoint: `vvc-mrl-rd-score-1f`.
+
+This checkpoint finishes the first validated slice of the remaining VVC intra
+tool gaps:
+
+- Angular/H/V MRL prediction uses shifted reference-line sampling instead of
+  reusing the base reference line.
+- MRL selection is active below the CTU top line and is gated by the same MPM
+  eligibility required by VTM syntax.
+- Luma mode neighbours are tracked in a frame-wide 4x4-cell map and reused
+  across CTUs, so the selector can make the same left/top MPM decision as the
+  CABAC writer.
+- Lossy MRL selection scores the quantized candidate it will actually emit:
+  reconstructed residual SSE plus coefficient and MRL syntax cost. Lossless
+  keeps the cheaper raw residual score.
+- Explicit intra MTS signaling is enabled for lossy residual streams, and
+  luma MTS indices `2..=5` are carried through quantization, inverse transform,
+  reconstruction, and syntax tests.
+- Non-DCT2 MTS production selection remains disabled. A checker-smoke probe
+  with active non-DCT2 MTS produced a VTM reconstruction checksum mismatch even
+  though VTM accepted the bitstream. Keep the gate closed until the transform
+  and coefficient constraints are proven VTM-exact.
+
+Validation:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_luma_mrl --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Strict VTM validation passed for all smoke rows and all high-depth smoke rows.
+The high-depth lossless byte counts were unchanged from the previous validated
+checkpoint: 322, 409, 555, 475, 594, and 768 bytes.
+
+First-frame six-vector matrix versus `vvc-mts-transform-plumbing-1f`:
+
+| Mode | Previous bytes | Current bytes | Byte delta | Previous FPS | Current FPS |
+|---|---:|---:|---:|---:|---:|
+| lossless | 5,884,724 | 5,856,819 | -27,905 | 0.36 | 0.33 |
+| qp=24 | 5,997,048 | 5,541,589 | -455,459 | 0.36 | 0.29 |
+
+The RD-aware MRL scoring step by itself was byte-neutral for lossless and
+reduced every lossy row versus `vvc-frame-luma-mode-state-1f`:
+
+| Mode | Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---|---:|---:|---:|---:|
+| qp=24 | SceneComposition_1_420 | 233,302 | 0.49 | 26.131 | -570 |
+| qp=24 | SceneComposition_1_422 | 311,833 | 0.41 | 26.170 | -2,434 |
+| qp=24 | screen_wayland_activity_rgb | 809,785 | 0.20 | 25.393 | -11,496 |
+| qp=24 | MissionControlClip1_420 | 823,645 | 0.32 | 16.850 | -9,961 |
+| qp=24 | MissionControlClip1_422 | 1,271,391 | 0.28 | 16.074 | -22,444 |
+| qp=24 | MissionControlClip1_444 | 2,091,633 | 0.23 | 15.619 | -35,493 |
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mrl-rd-score-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-frame-luma-mode-state-1f.json
 ```
 
 ## References

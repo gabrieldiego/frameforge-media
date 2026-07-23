@@ -524,12 +524,11 @@ fn vvc_general_profile_idc(
     const VVC_PROFILE_MAIN_10_444: u32 = 33;
     const VVC_PROFILE_MAIN_12_444: u32 = 34;
 
-    if config.chroma_sampling == ChromaSampling::Cs444 || palette_enabled {
-        // TODO(vvc): Signal a concrete 4:4:4-capable profile once the full
-        // PTL/GCI constraint set is generated. Profile NONE avoids the Main 10
-        // palette-off constraint while this clean-room subset is still forming.
-        0
-    } else if config.chroma_sampling == ChromaSampling::Cs422 {
+    if matches!(
+        config.chroma_sampling,
+        ChromaSampling::Cs422 | ChromaSampling::Cs444
+    ) || palette_enabled
+    {
         if bit_depth.bits() > 10 {
             VVC_PROFILE_MAIN_12_444
         } else {

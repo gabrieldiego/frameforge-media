@@ -1098,6 +1098,7 @@ def vvc_reference_encode_command(
     encoder: str,
     args: argparse.Namespace,
 ) -> list[str]:
+    reference_input = vector_path
     bit_depth = generate_test_vectors.yuv420_bit_depth(vector.fmt)
     if bit_depth is not None:
         chroma_format = "420"
@@ -1118,6 +1119,9 @@ def vvc_reference_encode_command(
         bit_depth = generate_test_vectors.yuv444_bit_depth(vector.fmt)
         if bit_depth is None and vector.fmt == "gbrp8":
             bit_depth = 8
+        if bit_depth is None and vector.fmt == "rgb24":
+            bit_depth = 8
+            reference_input = vvc_gbrp8_reference_input(vector, vector_path, output)
         if bit_depth is None:
             raise SystemExit(f"unsupported VVC reference encode pixel format: {vector.fmt}")
         chroma_format = "444"
@@ -1139,7 +1143,7 @@ def vvc_reference_encode_command(
     command.extend(
         [
             "-i",
-            str(vector_path),
+            str(reference_input),
             "-b",
             str(output),
             "-o",
@@ -1163,6 +1167,42 @@ def vvc_reference_encode_command(
     if args.reference_args:
         command.extend(shlex.split(args.reference_args))
     return command
+
+
+def vvc_gbrp8_reference_input(
+    vector: generate_test_vectors.TestVector,
+    vector_path: Path,
+    output: Path,
+) -> Path:
+    if vector.fmt != "rgb24":
+        return vector_path
+    if vector_path.suffix.lower() == ".y4m":
+        raise SystemExit("VVC rgb24 reference comparison expects raw packed RGB input")
+
+    gbr_path = output.with_name(f"{output.stem}_input_gbrp8.rgb")
+    expected_size = vector.width * vector.height * 3 * vector.frames
+    if (
+        gbr_path.exists()
+        and gbr_path.stat().st_size == expected_size
+        and gbr_path.stat().st_mtime_ns >= vector_path.stat().st_mtime_ns
+    ):
+        return gbr_path
+
+    pixels = vector.width * vector.height
+    frame_len = pixels * 3
+    gbr_path.parent.mkdir(parents=True, exist_ok=True)
+    with vector_path.open("rb") as source, gbr_path.open("wb") as output_file:
+        for frame_index in range(vector.frames):
+            frame = source.read(frame_len)
+            if len(frame) != frame_len:
+                raise SystemExit(
+                    f"{vector_path} is too short for VVC rgb24 reference repack: "
+                    f"missing frame {frame_index + 1}"
+                )
+            output_file.write(frame[1::3])
+            output_file.write(frame[2::3])
+            output_file.write(frame[0::3])
+    return gbr_path
 
 
 def vvc_bit_depth_is_supported(bit_depth: int) -> bool:

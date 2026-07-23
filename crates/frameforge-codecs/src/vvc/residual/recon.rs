@@ -12,11 +12,12 @@ use super::quant::{
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into,
-    inverse_transform_vvc_luma_quantized_block_into,
+    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts,
     predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
-    predict_vvc_luma_intra_block_into_with_availability, VvcDcPredictionScratch,
+    predict_vvc_luma_intra_block_into_with_mrl_and_availability, VvcDcPredictionScratch,
     VvcInverseTransformScratch, VvcPlaneAvailability, VvcQuantizedColor, MAX_VVC_LUMA_TUS,
+    VVC_DEFAULT_LOSSY_LUMA_QP,
 };
 
 pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
@@ -56,7 +57,7 @@ fn reconstruct_vvc_residual_frame_planar(
     let shape = partition_params.shape();
     let luma_nodes = vvc_luma_transform_nodes(shape, partition_params.luma_max_leaf_size);
     for node in luma_nodes.iter().copied() {
-        predict_vvc_luma_intra_block_into_with_availability(
+        predict_vvc_luma_intra_block_into_with_mrl_and_availability(
             &mut predicted_luma,
             &mut prediction_scratch,
             quantized.luma_tu_intra_modes[tu_idx],
@@ -64,6 +65,7 @@ fn reconstruct_vvc_residual_frame_planar(
             frame.geometry,
             node,
             frame.format.bit_depth,
+            quantized.luma_tu_mrl_index[tu_idx],
             Some(VvcPlaneAvailability::new(
                 &luma_available,
                 frame.geometry.width,
@@ -78,7 +80,7 @@ fn reconstruct_vvc_residual_frame_planar(
                 usize::from(node.height),
             );
         } else {
-            inverse_transform_vvc_luma_quantized_block_into(
+            inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
                 &mut residuals,
                 &mut transform_scratch,
                 node.width,
@@ -86,6 +88,8 @@ fn reconstruct_vvc_residual_frame_planar(
                 quantized.luma_tu_dc_levels[tu_idx],
                 &quantized.luma_tu_ac_levels[tu_idx],
                 frame.format.bit_depth,
+                VVC_DEFAULT_LOSSY_LUMA_QP,
+                quantized.luma_tu_mts_index[tu_idx],
             );
         }
         fill_visible_luma_node(
