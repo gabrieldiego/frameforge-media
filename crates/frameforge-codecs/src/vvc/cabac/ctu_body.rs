@@ -752,16 +752,26 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         {
             return;
         }
-        assert_eq!(
-            mts_index, 0,
-            "nonzero VVC MTS index is not wired into transform/reconstruction yet"
+        assert!(
+            matches!(mts_index, 0 | 2..=5),
+            "VVC MTS index must be DCT2_DCT2 or one of the explicit MTS transform types"
         );
 
-        // H.266 cu_residual() writes mts_idx after the transform tree. With
-        // the current selector fixed to DCT2_DCT2, truncated Rice coding emits
-        // only the first zero context bin.
+        // H.266 cu_residual() writes mts_idx after the transform tree. The
+        // current selector still chooses DCT2_DCT2, but keep the VTM-shaped
+        // syntax ready for later non-default transform candidates.
         self.contexts
-            .encode(cabac, VvcCabacContext::MtsIdx(0), false);
+            .encode(cabac, VvcCabacContext::MtsIdx(0), mts_index != 0);
+        if mts_index != 0 {
+            for offset in 0..3 {
+                let bin = mts_index > 2 + offset;
+                self.contexts
+                    .encode(cabac, VvcCabacContext::MtsIdx(1 + offset), bin);
+                if !bin {
+                    break;
+                }
+            }
+        }
     }
 
     fn emit_chroma_tree(

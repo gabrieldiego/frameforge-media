@@ -1267,6 +1267,49 @@ fn vvc_ctu_body_emits_mts_idx_after_luma_residual_when_enabled() {
 }
 
 #[test]
+fn vvc_luma_mts_syntax_supports_non_default_transform_indices() {
+    let neutral = quantize_vvc_color(VvcSampledColor {
+        y: 128,
+        u: 128,
+        v: 128,
+    });
+    let mut params = vvc_ctu_partition_params(
+        VvcVideoGeometry {
+            width: 16,
+            height: 16,
+        },
+        neutral,
+    )
+    .expect("16x16 partition parameters");
+    params.luma_tu_ac_levels[0][0] = 1;
+    params.luma_tu_has_ac[0] = true;
+
+    let mut config = vvc_test_slice_config();
+    config.tools.explicit_mts_intra_enabled = true;
+
+    fn bits_for_mts(
+        params: &VvcCtuPartitionParams,
+        config: VvcSliceSyntaxConfig,
+        mts_index: u8,
+    ) -> Vec<bool> {
+        let mut params = params.clone();
+        params.luma_tu_mts_index[0] = mts_index;
+        vvc_ctu_partition_cabac_bits(&params, config)
+    }
+
+    let dct2 = bits_for_mts(&params, config, 0);
+    let dst7_dst7 = bits_for_mts(&params, config, 2);
+    let dct8_dst7 = bits_for_mts(&params, config, 3);
+    let dst7_dct8 = bits_for_mts(&params, config, 4);
+    let dct8_dct8 = bits_for_mts(&params, config, 5);
+
+    assert_ne!(dct2, dst7_dst7);
+    assert_ne!(dst7_dst7, dct8_dst7);
+    assert_ne!(dct8_dst7, dst7_dct8);
+    assert_ne!(dst7_dct8, dct8_dct8);
+}
+
+#[test]
 fn vvc_residual_cabac_encoder_emits_named_4x4_coefficient_bins() {
     let mut contexts = VvcCabacContexts::new();
     let initial_last_x0 = contexts.last_sig_coeff_x_prefix[0].state();

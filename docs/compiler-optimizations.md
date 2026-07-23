@@ -3348,6 +3348,50 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-last-sig-suffix-order-1f.json
 ```
 
+## VVC MTS Syntax Capability
+
+Checkpoint: `vvc-mts-syntax-1f`.
+
+This checkpoint wires the CABAC emission shape for VVC explicit intra MTS
+indices. The CTU body now accepts VTM's non-transform-skip MTS types:
+`DCT2_DCT2=0`, `DST7_DST7=2`, `DCT8_DST7=3`, `DST7_DCT8=4`, and
+`DCT8_DCT8=5`. `SKIP=1` remains represented by the existing transform-skip
+flag instead of the post-residual `mts_idx` syntax.
+
+The production selector still returns `DCT2_DCT2` until matching forward and
+inverse non-DCT transforms are available, so normal encoding should remain
+byte-neutral against `vvc-mrl-syntax-1f`. The added unit coverage forces each
+non-default MTS index through a 16x16 luma TU with AC coefficients and checks
+that the CABAC bitstreams differ.
+
+The first-frame six-vector matrix is byte-neutral against `vvc-mrl-syntax-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_luma_mts_syntax_supports_non_default_transform_indices --features vvc
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mts-syntax-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mrl-syntax-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
