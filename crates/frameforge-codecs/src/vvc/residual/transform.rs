@@ -120,6 +120,7 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy(
     )
 }
 
+#[cfg(test)]
 pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp(
     residuals: &[i16],
     width: u16,
@@ -127,11 +128,26 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp(
     bit_depth: SampleBitDepth,
     qp: i32,
 ) -> VvcQuantizedLumaTransformBlock {
+    quantize_vvc_luma_residual_greedy_with_qp_and_mts(residuals, width, height, bit_depth, qp, 0)
+}
+
+pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp_and_mts(
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    qp: i32,
+    mts_index: u8,
+) -> VvcQuantizedLumaTransformBlock {
     let coefficient_count = usize::from(width) * usize::from(height);
     assert_eq!(residuals.len(), coefficient_count);
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
     debug_assert!((0..=63).contains(&qp));
+    assert_eq!(
+        mts_index, 0,
+        "non-DCT2 VVC luma MTS quantization is not implemented yet"
+    );
 
     let dc_level = quantize_vvc_luma_residual_dc_by_search(residuals, width, height, bit_depth, qp);
 
@@ -229,6 +245,26 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp(
     bit_depth: SampleBitDepth,
     qp: i32,
 ) {
+    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
+        residuals, scratch, width, height, dc_level, ac_levels, bit_depth, qp, 0,
+    );
+}
+
+pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
+    residuals: &mut Vec<i16>,
+    scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    dc_level: i16,
+    ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
+    bit_depth: SampleBitDepth,
+    qp: i32,
+    mts_index: u8,
+) {
+    assert_eq!(
+        mts_index, 0,
+        "non-DCT2 VVC luma MTS inverse transform is not implemented yet"
+    );
     inverse_transform_vvc_quantized_block_into(
         residuals,
         scratch,

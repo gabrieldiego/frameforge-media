@@ -17,15 +17,15 @@ use super::super::{
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
     inverse_transform_vvc_chroma_quantized_block_into_with_qp,
-    inverse_transform_vvc_luma_quantized_block_into_with_qp,
+    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts,
     predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
     predict_vvc_luma_intra_block_into_with_availability,
     quantize_vvc_chroma_residual_greedy_with_qp, quantize_vvc_chroma_sample,
-    quantize_vvc_luma_residual_greedy_with_qp, reconstruct_vvc_chroma, VvcDcPredictionScratch,
-    VvcInverseTransformScratch, VvcQuantizedColor, VvcQuantizedResidualFrame, MAX_VVC_CHROMA_TUS,
-    MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CHROMA_AC_POSITIONS_4X4,
-    VVC_LUMA_AC_COEFFS_PER_TU,
+    quantize_vvc_luma_residual_greedy_with_qp_and_mts, reconstruct_vvc_chroma,
+    VvcDcPredictionScratch, VvcInverseTransformScratch, VvcQuantizedColor,
+    VvcQuantizedResidualFrame, MAX_VVC_CHROMA_TUS, MAX_VVC_LUMA_TUS, VVC_CHROMA_AC_COEFFS_PER_TU,
+    VVC_CHROMA_AC_POSITIONS_4X4, VVC_LUMA_AC_COEFFS_PER_TU,
 };
 #[cfg(feature = "vvc-stats")]
 use super::{VvcIntraSearchStats, VvcResidualEnergyStats};
@@ -1009,6 +1009,7 @@ fn finalize_vvc_luma_tu(
 ) -> VvcFinalizedLumaTu {
     let residual = finalize_vvc_luma_residual_block(
         coding_decision.residual_coding,
+        coding_decision.mts_index,
         residuals,
         node.width,
         node.height,
@@ -1017,6 +1018,7 @@ fn finalize_vvc_luma_tu(
     );
     reconstruct_vvc_luma_residual_block_into(
         residual,
+        coding_decision.mts_index,
         reconstructed_residual,
         transform_scratch,
         node.width,
@@ -1048,6 +1050,7 @@ fn finalize_vvc_luma_tu(
 
 fn finalize_vvc_luma_residual_block(
     residual_coding: VvcTuResidualCodingMode,
+    mts_index: u8,
     residuals: &[i16],
     width: u16,
     height: u16,
@@ -1056,6 +1059,7 @@ fn finalize_vvc_luma_residual_block(
 ) -> VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU> {
     match residual_coding {
         VvcTuResidualCodingMode::TransformSkip => {
+            debug_assert_eq!(mts_index, 0);
             let dc_level = residuals.first().copied().unwrap_or(0);
             let (ac_levels, has_ac) =
                 transform_skip_luma_ac_levels_and_flag(residuals, usize::from(width));
@@ -1067,8 +1071,8 @@ fn finalize_vvc_luma_residual_block(
             }
         }
         VvcTuResidualCodingMode::Transformed => {
-            let quantized = quantize_vvc_luma_residual_greedy_with_qp(
-                residuals, width, height, bit_depth, luma_qp,
+            let quantized = quantize_vvc_luma_residual_greedy_with_qp_and_mts(
+                residuals, width, height, bit_depth, luma_qp, mts_index,
             );
             VvcFinalizedResidualBlock {
                 dc_level: quantized.reconstructed_dc_coeff,
@@ -1082,6 +1086,7 @@ fn finalize_vvc_luma_residual_block(
 
 fn reconstruct_vvc_luma_residual_block_into(
     residual: VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU>,
+    mts_index: u8,
     reconstructed_residual: &mut Vec<i16>,
     transform_scratch: &mut VvcInverseTransformScratch,
     width: u16,
@@ -1098,7 +1103,7 @@ fn reconstruct_vvc_luma_residual_block_into(
             usize::from(height),
         );
     } else {
-        inverse_transform_vvc_luma_quantized_block_into_with_qp(
+        inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
             reconstructed_residual,
             transform_scratch,
             width,
@@ -1107,6 +1112,7 @@ fn reconstruct_vvc_luma_residual_block_into(
             &residual.ac_levels,
             bit_depth,
             luma_qp,
+            mts_index,
         );
     }
 }

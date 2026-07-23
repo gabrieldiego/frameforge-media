@@ -67,6 +67,37 @@ fn vvc_transform_accepts_8x8_luma_and_4x4_chroma_tus() {
 }
 
 #[test]
+#[should_panic(expected = "non-DCT2 VVC luma MTS quantization is not implemented yet")]
+fn vvc_luma_mts_quantization_rejects_unimplemented_non_dct2() {
+    quantize_vvc_luma_residual_greedy_with_qp_and_mts(
+        &[0; 8 * 8],
+        8,
+        8,
+        SampleBitDepth::new(8).expect("valid bit depth"),
+        VVC_DEFAULT_LOSSY_LUMA_QP,
+        2,
+    );
+}
+
+#[test]
+#[should_panic(expected = "non-DCT2 VVC luma MTS inverse transform is not implemented yet")]
+fn vvc_luma_mts_inverse_rejects_unimplemented_non_dct2() {
+    let mut residuals = Vec::new();
+    let mut scratch = VvcInverseTransformScratch::default();
+    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
+        &mut residuals,
+        &mut scratch,
+        8,
+        8,
+        0,
+        &[0; VVC_LUMA_AC_COEFFS_PER_TU],
+        SampleBitDepth::new(8).expect("valid bit depth"),
+        VVC_DEFAULT_LOSSY_LUMA_QP,
+        2,
+    );
+}
+
+#[test]
 fn vvc_luma_residual_quantization_reconstructs_solid_residual() {
     let residuals = vec![-64; 8 * 8];
     let quantized = quantize_vvc_luma_residual_greedy(

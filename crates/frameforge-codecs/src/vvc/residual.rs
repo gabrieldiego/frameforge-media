@@ -20,10 +20,10 @@ pub(super) use transform::{
 };
 pub(super) use transform::{
     inverse_transform_vvc_chroma_quantized_block_into_with_qp,
-    inverse_transform_vvc_luma_quantized_block_into_with_qp,
+    inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts,
     quantize_vvc_chroma_residual_greedy_with_qp, quantize_vvc_chroma_sample,
-    quantize_vvc_luma_residual_greedy_with_qp, reconstruct_vvc_chroma, VvcInverseTransformScratch,
-    VVC_DEFAULT_LOSSY_CHROMA_QP, VVC_DEFAULT_LOSSY_LUMA_QP,
+    quantize_vvc_luma_residual_greedy_with_qp_and_mts, reconstruct_vvc_chroma,
+    VvcInverseTransformScratch, VVC_DEFAULT_LOSSY_CHROMA_QP, VVC_DEFAULT_LOSSY_LUMA_QP,
 };
 
 pub(super) use prediction::{

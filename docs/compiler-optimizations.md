@@ -3481,6 +3481,45 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-chroma-sample-from-tu-decision-1f.json
 ```
 
+## VVC MTS Transform Plumbing
+
+Checkpoint: `vvc-mts-transform-plumbing-1f`.
+
+This checkpoint passes the selected luma `mts_index` through transformed luma
+quantization and inverse reconstruction. The selector still returns
+`DCT2_DCT2=0`, and the new MTS-aware transform entry points assert on nonzero
+indices until DST7/DCT8 forward and inverse transforms are implemented. The
+important cleanup is that transform choice now reaches the transform boundary
+from the unified block-mode decision instead of staying as syntax-only
+metadata.
+
+The first-frame six-vector matrix is byte-neutral against
+`vvc-luma-dct-selector-enabled-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,997,048 | 0.36 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mts-transform-plumbing-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-dct-selector-enabled-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
