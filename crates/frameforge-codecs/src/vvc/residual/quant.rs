@@ -967,6 +967,24 @@ fn residual_sse(residuals: &[i16]) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct VvcFinalizedResidualBlock<const AC_COEFFS: usize> {
+    dc_level: i16,
+    ac_levels: [i16; AC_COEFFS],
+    has_ac: bool,
+    transform_skip: bool,
+}
+
+impl<const AC_COEFFS: usize> VvcFinalizedResidualBlock<AC_COEFFS> {
+    fn abs_remainder(self) -> u8 {
+        self.dc_level.unsigned_abs().min(u8::MAX as u16) as u8
+    }
+
+    fn negative(self) -> bool {
+        self.dc_level < 0 && self.abs_remainder() != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct VvcFinalizedLumaTu {
     abs_remainder: u8,
     negative: bool,
@@ -989,77 +1007,108 @@ fn finalize_vvc_luma_tu(
     transform_scratch: &mut VvcInverseTransformScratch,
     reconstructed_residual: &mut Vec<i16>,
 ) -> VvcFinalizedLumaTu {
-    let finalized = match coding_decision.residual_coding {
+    let residual = finalize_vvc_luma_residual_block(
+        coding_decision.residual_coding,
+        residuals,
+        node.width,
+        node.height,
+        source_frame.format.bit_depth,
+        luma_qp,
+    );
+    reconstruct_vvc_luma_residual_block_into(
+        residual,
+        reconstructed_residual,
+        transform_scratch,
+        node.width,
+        node.height,
+        source_frame.format.bit_depth,
+        luma_qp,
+    );
+    fill_visible_luma_node(
+        &mut frame_recon.luma,
+        source_frame.geometry,
+        node,
+        predicted_luma,
+        reconstructed_residual,
+        source_frame.format.bit_depth,
+    );
+    let finalized = VvcFinalizedLumaTu {
+        abs_remainder: residual.abs_remainder(),
+        negative: residual.negative(),
+        dc_level: residual.dc_level,
+        ac_levels: residual.ac_levels,
+        has_ac: residual.has_ac,
+        transform_skip: residual.transform_skip,
+        mrl_index: coding_decision.mrl_index,
+        mts_index: coding_decision.mts_index,
+    };
+    frame_recon.mark_luma_node_available(node);
+    finalized
+}
+
+fn finalize_vvc_luma_residual_block(
+    residual_coding: VvcTuResidualCodingMode,
+    residuals: &[i16],
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    luma_qp: i32,
+) -> VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU> {
+    match residual_coding {
         VvcTuResidualCodingMode::TransformSkip => {
             let dc_level = residuals.first().copied().unwrap_or(0);
             let (ac_levels, has_ac) =
-                transform_skip_luma_ac_levels_and_flag(residuals, usize::from(node.width));
-            reconstruct_vvc_luma_transform_skip_residuals_into(
-                reconstructed_residual,
-                dc_level,
-                &ac_levels,
-                usize::from(node.width),
-                usize::from(node.height),
-            );
-            fill_visible_luma_node(
-                &mut frame_recon.luma,
-                source_frame.geometry,
-                node,
-                predicted_luma,
-                reconstructed_residual,
-                source_frame.format.bit_depth,
-            );
-            VvcFinalizedLumaTu {
-                abs_remainder: dc_level.unsigned_abs().min(u8::MAX as u16) as u8,
-                negative: dc_level < 0,
+                transform_skip_luma_ac_levels_and_flag(residuals, usize::from(width));
+            VvcFinalizedResidualBlock {
                 dc_level,
                 ac_levels,
                 has_ac,
                 transform_skip: true,
-                mrl_index: coding_decision.mrl_index,
-                mts_index: coding_decision.mts_index,
             }
         }
         VvcTuResidualCodingMode::Transformed => {
             let quantized = quantize_vvc_luma_residual_greedy_with_qp(
-                residuals,
-                node.width,
-                node.height,
-                source_frame.format.bit_depth,
-                luma_qp,
+                residuals, width, height, bit_depth, luma_qp,
             );
-            inverse_transform_vvc_luma_quantized_block_into_with_qp(
-                reconstructed_residual,
-                transform_scratch,
-                node.width,
-                node.height,
-                quantized.reconstructed_dc_coeff,
-                &quantized.reconstructed_ac_coeffs,
-                source_frame.format.bit_depth,
-                luma_qp,
-            );
-            fill_visible_luma_node(
-                &mut frame_recon.luma,
-                source_frame.geometry,
-                node,
-                predicted_luma,
-                reconstructed_residual,
-                source_frame.format.bit_depth,
-            );
-            VvcFinalizedLumaTu {
-                abs_remainder: quantized.abs_remainder,
-                negative: quantized.reconstructed_dc_coeff < 0 && quantized.abs_remainder != 0,
+            VvcFinalizedResidualBlock {
                 dc_level: quantized.reconstructed_dc_coeff,
                 ac_levels: quantized.reconstructed_ac_coeffs,
                 has_ac: quantized.has_ac,
                 transform_skip: false,
-                mrl_index: coding_decision.mrl_index,
-                mts_index: coding_decision.mts_index,
             }
         }
-    };
-    frame_recon.mark_luma_node_available(node);
-    finalized
+    }
+}
+
+fn reconstruct_vvc_luma_residual_block_into(
+    residual: VvcFinalizedResidualBlock<VVC_LUMA_AC_COEFFS_PER_TU>,
+    reconstructed_residual: &mut Vec<i16>,
+    transform_scratch: &mut VvcInverseTransformScratch,
+    width: u16,
+    height: u16,
+    bit_depth: SampleBitDepth,
+    luma_qp: i32,
+) {
+    if residual.transform_skip {
+        reconstruct_vvc_luma_transform_skip_residuals_into(
+            reconstructed_residual,
+            residual.dc_level,
+            &residual.ac_levels,
+            usize::from(width),
+            usize::from(height),
+        );
+    } else {
+        inverse_transform_vvc_luma_quantized_block_into_with_qp(
+            reconstructed_residual,
+            transform_scratch,
+            width,
+            height,
+            residual.dc_level,
+            &residual.ac_levels,
+            bit_depth,
+            luma_qp,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1089,124 +1138,138 @@ fn finalize_vvc_chroma_tu(
     transform_scratch: &mut VvcInverseTransformScratch,
     reconstructed_residual: &mut Vec<i16>,
 ) -> VvcFinalizedChromaTu {
-    let finalized = match coding_decision.residual_coding {
-        VvcTuResidualCodingMode::TransformSkip => {
-            let cb_dc_level = cb_residuals.first().copied().unwrap_or(0);
-            let cr_dc_level = cr_residuals.first().copied().unwrap_or(0);
-            let (cb_ac_levels, cb_has_ac) =
-                transform_skip_chroma_ac_levels_and_flag(cb_residuals, chroma_width);
-            let (cr_ac_levels, cr_has_ac) =
-                transform_skip_chroma_ac_levels_and_flag(cr_residuals, chroma_width);
-            reconstruct_vvc_chroma_transform_skip_residuals_into(
-                reconstructed_residual,
-                cb_dc_level,
-                &cb_ac_levels,
-                chroma_width,
-                chroma_height,
-            );
-            fill_visible_chroma_node(
-                &mut frame_recon.cb,
-                source_frame.geometry,
-                node,
-                source_frame.format.chroma_sampling,
-                predicted_cb,
-                reconstructed_residual,
-                source_frame.format.bit_depth,
-            );
-            reconstruct_vvc_chroma_transform_skip_residuals_into(
-                reconstructed_residual,
-                cr_dc_level,
-                &cr_ac_levels,
-                chroma_width,
-                chroma_height,
-            );
-            fill_visible_chroma_node(
-                &mut frame_recon.cr,
-                source_frame.geometry,
-                node,
-                source_frame.format.chroma_sampling,
-                predicted_cr,
-                reconstructed_residual,
-                source_frame.format.bit_depth,
-            );
-            VvcFinalizedChromaTu {
-                cb_dc_level,
-                cr_dc_level,
-                cb_ac_levels,
-                cr_ac_levels,
-                cb_has_ac,
-                cr_has_ac,
-                cb_transform_skip: true,
-                cr_transform_skip: true,
-            }
-        }
-        VvcTuResidualCodingMode::Transformed => {
-            let cb_quantized = quantize_vvc_chroma_residual_greedy_with_qp(
-                cb_residuals,
-                chroma_width as u16,
-                chroma_height as u16,
-                source_frame.format.bit_depth,
-                chroma_qp,
-            );
-            let cr_quantized = quantize_vvc_chroma_residual_greedy_with_qp(
-                cr_residuals,
-                chroma_width as u16,
-                chroma_height as u16,
-                source_frame.format.bit_depth,
-                chroma_qp,
-            );
-            inverse_transform_vvc_chroma_quantized_block_into_with_qp(
-                reconstructed_residual,
-                transform_scratch,
-                chroma_width as u16,
-                chroma_height as u16,
-                cb_quantized.reconstructed_dc_coeff,
-                &cb_quantized.reconstructed_ac_coeffs,
-                source_frame.format.bit_depth,
-                chroma_qp,
-            );
-            fill_visible_chroma_node(
-                &mut frame_recon.cb,
-                source_frame.geometry,
-                node,
-                source_frame.format.chroma_sampling,
-                predicted_cb,
-                reconstructed_residual,
-                source_frame.format.bit_depth,
-            );
-            inverse_transform_vvc_chroma_quantized_block_into_with_qp(
-                reconstructed_residual,
-                transform_scratch,
-                chroma_width as u16,
-                chroma_height as u16,
-                cr_quantized.reconstructed_dc_coeff,
-                &cr_quantized.reconstructed_ac_coeffs,
-                source_frame.format.bit_depth,
-                chroma_qp,
-            );
-            fill_visible_chroma_node(
-                &mut frame_recon.cr,
-                source_frame.geometry,
-                node,
-                source_frame.format.chroma_sampling,
-                predicted_cr,
-                reconstructed_residual,
-                source_frame.format.bit_depth,
-            );
-            VvcFinalizedChromaTu {
-                cb_dc_level: cb_quantized.reconstructed_dc_coeff,
-                cr_dc_level: cr_quantized.reconstructed_dc_coeff,
-                cb_ac_levels: cb_quantized.reconstructed_ac_coeffs,
-                cr_ac_levels: cr_quantized.reconstructed_ac_coeffs,
-                cb_has_ac: cb_quantized.has_ac,
-                cr_has_ac: cr_quantized.has_ac,
-                cb_transform_skip: false,
-                cr_transform_skip: false,
-            }
-        }
+    let cb_residual = finalize_vvc_chroma_residual_block(
+        coding_decision.residual_coding,
+        cb_residuals,
+        chroma_width,
+        chroma_height,
+        source_frame.format.bit_depth,
+        chroma_qp,
+    );
+    let cr_residual = finalize_vvc_chroma_residual_block(
+        coding_decision.residual_coding,
+        cr_residuals,
+        chroma_width,
+        chroma_height,
+        source_frame.format.bit_depth,
+        chroma_qp,
+    );
+    reconstruct_vvc_chroma_residual_block_into(
+        cb_residual,
+        reconstructed_residual,
+        transform_scratch,
+        chroma_width,
+        chroma_height,
+        source_frame.format.bit_depth,
+        chroma_qp,
+    );
+    fill_visible_chroma_node(
+        &mut frame_recon.cb,
+        source_frame.geometry,
+        node,
+        source_frame.format.chroma_sampling,
+        predicted_cb,
+        reconstructed_residual,
+        source_frame.format.bit_depth,
+    );
+    reconstruct_vvc_chroma_residual_block_into(
+        cr_residual,
+        reconstructed_residual,
+        transform_scratch,
+        chroma_width,
+        chroma_height,
+        source_frame.format.bit_depth,
+        chroma_qp,
+    );
+    fill_visible_chroma_node(
+        &mut frame_recon.cr,
+        source_frame.geometry,
+        node,
+        source_frame.format.chroma_sampling,
+        predicted_cr,
+        reconstructed_residual,
+        source_frame.format.bit_depth,
+    );
+    let finalized = VvcFinalizedChromaTu {
+        cb_dc_level: cb_residual.dc_level,
+        cr_dc_level: cr_residual.dc_level,
+        cb_ac_levels: cb_residual.ac_levels,
+        cr_ac_levels: cr_residual.ac_levels,
+        cb_has_ac: cb_residual.has_ac,
+        cr_has_ac: cr_residual.has_ac,
+        cb_transform_skip: cb_residual.transform_skip,
+        cr_transform_skip: cr_residual.transform_skip,
     };
     frame_recon.mark_chroma_node_available(node);
     finalized
+}
+
+fn finalize_vvc_chroma_residual_block(
+    residual_coding: VvcTuResidualCodingMode,
+    residuals: &[i16],
+    width: usize,
+    height: usize,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) -> VvcFinalizedResidualBlock<VVC_CHROMA_AC_COEFFS_PER_TU> {
+    match residual_coding {
+        VvcTuResidualCodingMode::TransformSkip => {
+            let dc_level = residuals.first().copied().unwrap_or(0);
+            let (ac_levels, has_ac) = transform_skip_chroma_ac_levels_and_flag(residuals, width);
+            VvcFinalizedResidualBlock {
+                dc_level,
+                ac_levels,
+                has_ac,
+                transform_skip: true,
+            }
+        }
+        VvcTuResidualCodingMode::Transformed => {
+            let quantized = quantize_vvc_chroma_residual_greedy_with_qp(
+                residuals,
+                width as u16,
+                height as u16,
+                bit_depth,
+                chroma_qp,
+            );
+            VvcFinalizedResidualBlock {
+                dc_level: quantized.reconstructed_dc_coeff,
+                ac_levels: quantized.reconstructed_ac_coeffs,
+                has_ac: quantized.has_ac,
+                transform_skip: false,
+            }
+        }
+    }
+}
+
+fn reconstruct_vvc_chroma_residual_block_into(
+    residual: VvcFinalizedResidualBlock<VVC_CHROMA_AC_COEFFS_PER_TU>,
+    reconstructed_residual: &mut Vec<i16>,
+    transform_scratch: &mut VvcInverseTransformScratch,
+    width: usize,
+    height: usize,
+    bit_depth: SampleBitDepth,
+    chroma_qp: i32,
+) {
+    if residual.transform_skip {
+        reconstruct_vvc_chroma_transform_skip_residuals_into(
+            reconstructed_residual,
+            residual.dc_level,
+            &residual.ac_levels,
+            width,
+            height,
+        );
+    } else {
+        inverse_transform_vvc_chroma_quantized_block_into_with_qp(
+            reconstructed_residual,
+            transform_scratch,
+            width as u16,
+            height as u16,
+            residual.dc_level,
+            &residual.ac_levels,
+            bit_depth,
+            chroma_qp,
+        );
+    }
 }
 
 fn vvc_global_ctu_node(mut node: VvcCodingTreeNode, region: VvcCtuRegion) -> VvcCodingTreeNode {

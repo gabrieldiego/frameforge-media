@@ -1602,10 +1602,9 @@ impl VvcResidualCabacSymbolStream {
         // H.266 7.3.11.11 residual_coding() first codes the last significant
         // coefficient position and then walks earlier scan positions with
         // sig_coeff_flag and level/sign syntax. VTM's CoeffCodingContext uses
-        // SCAN_GROUPED_4x4 with diagonal scan (CommonLib/Rom.cpp). This subset
-        // is intentionally limited to coefficients in the first 4x4 subblock
-        // while larger scan-position suffix and sb_coded_flag generation remain
-        // labelled future work.
+        // SCAN_GROUPED_4x4 with diagonal scan (CommonLib/Rom.cpp). Current
+        // production TUs cover up to 8x8 luma and 4x4 chroma, so this supports
+        // four luma coefficient groups and one chroma coefficient group.
         //
         // H.266 7.3.11.11 still uses this residual_coding() syntax for
         // transform-skipped TUs when sh_ts_residual_coding_disabled_flag is 1.

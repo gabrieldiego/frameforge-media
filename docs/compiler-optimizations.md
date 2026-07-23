@@ -3170,6 +3170,51 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-luma-mode-cell-map-1f.json
 ```
 
+## VVC Finalized Residual Blocks
+
+Checkpoint: `vvc-finalized-residual-blocks-1f`.
+
+This checkpoint removes the remaining duplicated luma/chroma TU finalizer
+branches that directly looked like lossy-vs-lossless paths. The finalizers now
+consume the per-block `VvcTuResidualCodingMode` selected by block mode policy,
+build a common finalized residual block, reconstruct it through the matching
+transform-skip or transformed helper, and then fill the visible reconstruction.
+This keeps lossy-specific and lossless-specific behavior at TU mode selection
+boundaries instead of as independent finalization paths.
+
+The reference-incompatible experimental 8x8 luma DCT coefficient selector
+remains compile-time disabled. The associated residual syntax mismatch still
+needs to be fixed before that candidate can be selected by production mode
+decision.
+
+The first-frame six-vector matrix is byte-neutral against
+`vvc-neighbour-cell-map-1f`:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| VVC | lossless | 5,884,724 | 0 |
+| VVC | qp=24 | 5,714,171 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-finalized-residual-blocks-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-neighbour-cell-map-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
