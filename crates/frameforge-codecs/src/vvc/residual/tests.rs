@@ -642,6 +642,59 @@ fn vvc_residual_symbol_stream_supports_grouped_8x8_luma_scan() {
 }
 
 #[test]
+fn vvc_residual_last_sig_suffixes_follow_vtm_prefix_order() {
+    let coeffs = vvc_luma_coefficients(8, 8, &[(63, 1)]);
+    let stream = VvcResidualCabacSymbolStream::luma_coefficients(3, 3, &coeffs);
+
+    assert_eq!(stream.config.last_significant_x, 7);
+    assert_eq!(stream.config.last_significant_y, 7);
+    assert!(stream.symbols.starts_with(&[
+        VvcResidualCabacSymbol::LastSigCoeffXPrefix {
+            bin_idx: 0,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffXPrefix {
+            bin_idx: 1,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffXPrefix {
+            bin_idx: 2,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffXPrefix {
+            bin_idx: 3,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffXPrefix {
+            bin_idx: 4,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffYPrefix {
+            bin_idx: 0,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffYPrefix {
+            bin_idx: 1,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffYPrefix {
+            bin_idx: 2,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffYPrefix {
+            bin_idx: 3,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffYPrefix {
+            bin_idx: 4,
+            bin: true,
+        },
+        VvcResidualCabacSymbol::LastSigCoeffXSuffix { bits: 1, count: 1 },
+        VvcResidualCabacSymbol::LastSigCoeffYSuffix { bits: 1, count: 1 },
+    ]));
+}
+
+#[test]
 fn vvc_residual_symbol_stream_maps_large_abs_remainder_by_spec_order() {
     let coeffs = vvc_luma_coefficients(8, 8, &[(0, -16)]);
     let stream = VvcResidualCabacSymbolStream::luma_coefficients(3, 3, &coeffs);

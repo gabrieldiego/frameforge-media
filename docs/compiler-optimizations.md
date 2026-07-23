@@ -3260,6 +3260,53 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-finalized-residual-blocks-1f.json
 ```
 
+## VVC Last-Significant Suffix Order
+
+Checkpoint: `vvc-last-sig-suffix-order-1f`.
+
+This checkpoint fixes the VVC residual emitter order for last-significant
+coefficient positions that require suffix bins. The direct CABAC path and the
+test-only symbolic stream now emit X and Y prefixes first, then X and Y suffixes,
+matching VTM's `last_sig_coeff()` ordering. The current default product path is
+byte-neutral because lossless luma still selects 4x4 leaves and lossy luma does
+not change mode decisions, but the fix makes 8x8 residual syntax
+reference-compatible.
+
+After this fix, a trial that changed lossless luma leaves from 4x4 to 8x8 passed
+both VVC smoke and high-depth reference validation. It was not kept as the
+default because the first-frame six-vector lossless total rose from 5,884,724
+bytes to 6,231,140 bytes, a +346,416 byte regression, while lossy stayed
+byte-identical. A future 4x4/8x8 selector should therefore be rate-aware rather
+than a global leaf-size switch.
+
+The active first-frame six-vector matrix is byte-neutral against
+`vvc-progressive-rice-remcap-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.35 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.40 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-last-sig-suffix-order-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-progressive-rice-remcap-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

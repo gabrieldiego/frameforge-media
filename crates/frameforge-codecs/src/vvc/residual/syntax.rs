@@ -1318,7 +1318,7 @@ impl VvcResidualCabacSymbolStream {
         let height = coeffs.height();
         let last_x = scan[last_scan_pos].x as u8;
         let last_y = scan[last_scan_pos].y as u8;
-        Self::emit_last_sig_coeff_position_direct(
+        let last_x_group = Self::emit_last_sig_coeff_prefix_direct(
             encoder,
             cabac,
             state.config.component,
@@ -1326,7 +1326,7 @@ impl VvcResidualCabacSymbolStream {
             log2_tb_width,
             last_x,
         );
-        Self::emit_last_sig_coeff_position_direct(
+        let last_y_group = Self::emit_last_sig_coeff_prefix_direct(
             encoder,
             cabac,
             state.config.component,
@@ -1334,6 +1334,8 @@ impl VvcResidualCabacSymbolStream {
             log2_tb_height,
             last_y,
         );
+        Self::emit_last_sig_coeff_suffix_direct(cabac, last_x_group, last_x);
+        Self::emit_last_sig_coeff_suffix_direct(cabac, last_y_group, last_y);
 
         let last_subset = last_scan_pos / 16;
         let mut residual_state = 0u8;
@@ -1484,14 +1486,14 @@ impl VvcResidualCabacSymbolStream {
         }
     }
 
-    fn emit_last_sig_coeff_position_direct(
+    fn emit_last_sig_coeff_prefix_direct(
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
         component: VvcResidualComponent,
         x_prefix: bool,
         log2_tb_size: u8,
         position: u8,
-    ) {
+    ) -> u8 {
         let group_idx = last_sig_coeff_group_index(position);
         let max_group_idx = last_sig_coeff_group_index((1u8 << log2_tb_size) - 1);
         for bin_idx in 0..group_idx {
@@ -1514,6 +1516,10 @@ impl VvcResidualCabacSymbolStream {
                 false,
             );
         }
+        group_idx
+    }
+
+    fn emit_last_sig_coeff_suffix_direct(cabac: &mut VvcCabacEncoder, group_idx: u8, position: u8) {
         if group_idx > 3 {
             let suffix_len = (group_idx - 2) >> 1;
             let suffix = u32::from(position - last_sig_coeff_group_min(group_idx));
@@ -1698,8 +1704,11 @@ impl VvcResidualCabacSymbolStream {
         let height = coeffs.height();
         let last_x = scan[last_scan_pos].x as u8;
         let last_y = scan[last_scan_pos].y as u8;
-        Self::append_last_sig_coeff_position(symbols, true, log2_tb_width, last_x);
-        Self::append_last_sig_coeff_position(symbols, false, log2_tb_height, last_y);
+        let last_x_group = Self::append_last_sig_coeff_prefix(symbols, true, log2_tb_width, last_x);
+        let last_y_group =
+            Self::append_last_sig_coeff_prefix(symbols, false, log2_tb_height, last_y);
+        Self::append_last_sig_coeff_suffix(symbols, true, last_x_group, last_x);
+        Self::append_last_sig_coeff_suffix(symbols, false, last_y_group, last_y);
 
         let last_subset = last_scan_pos / 16;
         let mut residual_state = 0u8;
@@ -1859,12 +1868,12 @@ impl VvcResidualCabacSymbolStream {
     }
 
     #[cfg(test)]
-    fn append_last_sig_coeff_position<S: VvcResidualSymbolSink>(
+    fn append_last_sig_coeff_prefix<S: VvcResidualSymbolSink>(
         symbols: &mut S,
         x_prefix: bool,
         log2_tb_size: u8,
         position: u8,
-    ) {
+    ) -> u8 {
         let group_idx = last_sig_coeff_group_index(position);
         let max_group_idx = last_sig_coeff_group_index((1u8 << log2_tb_size) - 1);
         for bin_idx in 0..group_idx {
@@ -1881,6 +1890,16 @@ impl VvcResidualCabacSymbolStream {
                 symbols.last_sig_coeff_y_prefix(group_idx, false);
             }
         }
+        group_idx
+    }
+
+    #[cfg(test)]
+    fn append_last_sig_coeff_suffix<S: VvcResidualSymbolSink>(
+        symbols: &mut S,
+        x_prefix: bool,
+        group_idx: u8,
+        position: u8,
+    ) {
         if group_idx > 3 {
             let suffix_len = (group_idx - 2) >> 1;
             let suffix = u32::from(position - last_sig_coeff_group_min(group_idx));
