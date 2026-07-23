@@ -3307,6 +3307,47 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-progressive-rice-remcap-1f.json
 ```
 
+## VVC MRL Syntax Capability
+
+Checkpoint: `vvc-mrl-syntax-1f`.
+
+This checkpoint wires the CABAC emission shape for nonzero VVC luma
+multi-reference-line indices. The production selector still returns MRL index
+0 because luma prediction has not yet been shifted to the additional reference
+lines, but the CTU body can now encode VTM's supported `MULTI_REF_LINE_IDX`
+values `[0, 1, 2]` instead of asserting on nonzero values. This keeps MRL as a
+future block-mode-selection tool without a separate lossy/lossless path.
+
+The new unit coverage sets a below-top-line luma TU to indices 0, 1, and 2 and
+checks that the CABAC bitstreams differ. Normal encoding is byte-neutral against
+`vvc-last-sig-suffix-order-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_luma_mrl_syntax_supports_nonzero_reference_lines --features vvc
+cargo test -p frameforge-codecs vvc --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mrl-syntax-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-last-sig-suffix-order-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

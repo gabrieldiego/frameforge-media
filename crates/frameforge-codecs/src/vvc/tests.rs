@@ -690,6 +690,45 @@ fn vvc_cabac_tool_flags_are_read_from_the_active_slice_config() {
 }
 
 #[test]
+fn vvc_luma_mrl_syntax_supports_nonzero_reference_lines() {
+    let neutral = quantize_vvc_color(VvcSampledColor {
+        y: 128,
+        u: 128,
+        v: 128,
+    });
+    let params = vvc_ctu_partition_params(
+        VvcVideoGeometry {
+            width: 16,
+            height: 16,
+        },
+        neutral,
+    )
+    .expect("16x16 partition parameters");
+    assert!(
+        params.luma_tu_count > 2,
+        "16x16 luma should include a below-top-line TU"
+    );
+    let config = vvc_test_slice_config();
+
+    fn bits_for_mrl(
+        params: &VvcCtuPartitionParams,
+        config: VvcSliceSyntaxConfig,
+        mrl_index: u8,
+    ) -> Vec<bool> {
+        let mut params = params.clone();
+        params.luma_tu_mrl_index[2] = mrl_index;
+        vvc_ctu_partition_cabac_bits(&params, config)
+    }
+
+    let normal_ref = bits_for_mrl(&params, config, 0);
+    let first_extra_ref = bits_for_mrl(&params, config, 1);
+    let second_extra_ref = bits_for_mrl(&params, config, 2);
+
+    assert_ne!(normal_ref, first_extra_ref);
+    assert_ne!(first_extra_ref, second_extra_ref);
+}
+
+#[test]
 fn vvc_slice_header_is_generated_before_cabac_tokens() {
     let black = quantize_vvc_color(VvcSampledColor { y: 0, u: 0, v: 0 });
     let geometry = VvcVideoGeometry::validation_minimum();

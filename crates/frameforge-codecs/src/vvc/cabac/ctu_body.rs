@@ -676,16 +676,20 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeLuma);
         // With sps_mrl_enabled_flag set, VVC extend_ref_line emits
         // MultiRefLineIdx for intra luma CUs that are not on the first luma
-        // line of the CTU. The current selector always chooses index 0; keep
-        // nonzero syntax guarded until prediction supports those references.
+        // line of the CTU. VTM's MULTI_REF_LINE_IDX table is [0, 1, 2].
         if self.slice_config.tools.mrl_enabled && node.y % VVC_CTU_SIZE as u16 != 0 {
             let mrl_index = self.params.luma_tu_mrl_index[self.luma_tu_index];
             assert_eq!(
-                mrl_index, 0,
-                "nonzero VVC MRL index is not wired into prediction yet"
+                mrl_index.min(2),
+                mrl_index,
+                "VVC MRL index must be one of 0, 1, or 2"
             );
             self.contexts
                 .encode(cabac, VvcCabacContext::MultiRefLineIdx(0), mrl_index != 0);
+            if mrl_index != 0 {
+                self.contexts
+                    .encode(cabac, VvcCabacContext::MultiRefLineIdx(1), mrl_index != 1);
+            }
         }
     }
 
