@@ -128,7 +128,6 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     #[cfg(feature = "vvc-stats")]
     let mut residual_energy_stats = VvcResidualEnergyStats::default();
 
-    let residual_mode = policy.context().residual_mode();
     let score_metric = policy.score_metric();
     let chroma_syntax_tie_breaker = policy.chroma_syntax_tie_breaker();
     let luma_max_leaf_size = policy.luma_max_leaf_size();
@@ -624,13 +623,13 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
     VvcQuantizedColor {
         y: vvc_downshift_sample_to_u8(color.y, source_frame.format.bit_depth),
         u: finalized_vvc_chroma_sample(
-            residual_mode,
+            cb_tu_transform_skip.first().copied().unwrap_or(false),
             color.u,
             cb_rem,
             source_frame.format.bit_depth,
         ),
         v: finalized_vvc_chroma_sample(
-            residual_mode,
+            cr_tu_transform_skip.first().copied().unwrap_or(false),
             color.v,
             cr_rem,
             source_frame.format.bit_depth,
@@ -665,14 +664,15 @@ pub(in crate::vvc) fn quantize_vvc_residual_ctu_into_frame_reconstruction_with_q
 }
 
 fn finalized_vvc_chroma_sample(
-    residual_mode: VvcResidualCodingMode,
+    transform_skip: bool,
     source: VvcSample,
     quantized_remainder: u8,
     bit_depth: SampleBitDepth,
 ) -> u8 {
-    match residual_mode {
-        VvcResidualCodingMode::Lossless => vvc_downshift_sample_to_u8(source, bit_depth),
-        VvcResidualCodingMode::Lossy => reconstruct_vvc_chroma(quantized_remainder),
+    if transform_skip {
+        vvc_downshift_sample_to_u8(source, bit_depth)
+    } else {
+        reconstruct_vvc_chroma(quantized_remainder)
     }
 }
 

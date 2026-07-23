@@ -3392,6 +3392,43 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mrl-syntax-1f.json
 ```
 
+## VVC Chroma Sample Decision Source
+
+Checkpoint: `vvc-chroma-sample-from-tu-decision-1f`.
+
+This checkpoint removes the last direct residual-mode branch from VVC residual
+CTU output finalization. The legacy sampled chroma fields now derive their
+lossless-versus-quantized value from the finalized chroma TU transform-skip
+metadata, which is selected by `VvcChromaTuCodingDecision`. That keeps even the
+compatibility fields behind the unified per-block decision path instead of
+checking the global lossy/lossless mode.
+
+The first-frame six-vector matrix is byte-neutral against `vvc-mts-syntax-1f`:
+
+| Codec | Mode | Total bytes | FPS | Byte delta |
+|---|---|---:|---:|---:|
+| VVC | lossless | 5,884,724 | 0.36 | 0 |
+| VVC | qp=24 | 5,714,171 | 0.39 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-chroma-sample-from-tu-decision-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mts-syntax-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

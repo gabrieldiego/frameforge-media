@@ -1592,10 +1592,6 @@ impl VvcResidualCodingPolicy {
         }
     }
 
-    pub(in crate::vvc) const fn context(self) -> VvcResidualModeDecisionContext {
-        self.context
-    }
-
     pub(in crate::vvc) const fn luma_max_leaf_size(self) -> u16 {
         self.luma_max_leaf_size
     }

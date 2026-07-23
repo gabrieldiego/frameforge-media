@@ -1771,8 +1771,8 @@ fn vvc_residual_coding_policy_carries_block_selection_contract() {
                 VvcResidualCodingMode::Lossy,
                 VvcResidualCodingMode::Lossless,
             ] {
+                let context = VvcResidualModeDecisionContext::new(format, residual_mode);
                 let policy = VvcResidualCodingPolicy::new(format, residual_mode);
-                let context = policy.context();
                 assert_eq!(context.residual_mode(), residual_mode);
                 assert_eq!(
                     policy.luma_max_leaf_size(),

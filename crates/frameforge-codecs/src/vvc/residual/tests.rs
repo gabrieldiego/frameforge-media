@@ -197,6 +197,8 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
     assert!(lossless.cr_tu_transform_skip[..lossless.chroma_tu_count]
         .iter()
         .all(|enabled| *enabled));
+    assert_eq!(lossless.u, 128);
+    assert_eq!(lossless.v, 192);
 }
 
 #[cfg(feature = "vvc-stats")]
