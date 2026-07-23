@@ -247,7 +247,10 @@ impl VvcCabacEncoder {
     }
 
     pub(in crate::vvc) fn encode_rem_abs_ep(&mut self, value: u32, rice_param: u32) {
-        let cutoff = 5;
+        const COEF_REMAIN_BIN_REDUCTION: u32 = 5;
+        const MAX_LOG2_TR_DYNAMIC_RANGE: u32 = 15;
+
+        let cutoff = COEF_REMAIN_BIN_REDUCTION;
         let threshold = cutoff << rice_param;
         if value < threshold {
             let length = (value >> rice_param) + 1;
@@ -257,12 +260,19 @@ impl VvcCabacEncoder {
         }
 
         let code_value = (value >> rice_param) - cutoff;
+        let max_prefix_length = 32 - cutoff - MAX_LOG2_TR_DYNAMIC_RANGE;
         let mut prefix_length = 0;
-        while code_value > ((2 << prefix_length) - 2) {
-            prefix_length += 1;
+        let suffix_length;
+        if code_value >= ((1 << max_prefix_length) - 1) {
+            prefix_length = max_prefix_length;
+            suffix_length = MAX_LOG2_TR_DYNAMIC_RANGE;
+        } else {
+            while code_value > ((2 << prefix_length) - 2) {
+                prefix_length += 1;
+            }
+            suffix_length = prefix_length + rice_param + 1;
         }
         let total_prefix_length = prefix_length + cutoff;
-        let suffix_length = prefix_length + rice_param + 1;
         let prefix = (1 << total_prefix_length) - 1;
         let suffix = ((code_value - ((1 << prefix_length) - 1)) << rice_param)
             | (value & ((1 << rice_param) - 1));

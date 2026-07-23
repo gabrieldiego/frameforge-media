@@ -402,6 +402,7 @@ pub(in crate::vvc) struct VvcResidualPass1State {
     pub(in crate::vvc) config: VvcResidualCtxConfig,
     pub(in crate::vvc) sig_coeff: [bool; VVC_RESIDUAL_CONTEXT_COEFFS],
     pub(in crate::vvc) abs_level_pass1: [u8; VVC_RESIDUAL_CONTEXT_COEFFS],
+    rice_abs_level: [u16; VVC_RESIDUAL_CONTEXT_COEFFS],
     pub(in crate::vvc) sb_coded: [bool; VVC_MAX_RESIDUAL_SUBBLOCKS],
 }
 
@@ -671,6 +672,7 @@ impl VvcResidualPass1State {
             config,
             sig_coeff: [false; VVC_RESIDUAL_CONTEXT_COEFFS],
             abs_level_pass1: [0; VVC_RESIDUAL_CONTEXT_COEFFS],
+            rice_abs_level: [0; VVC_RESIDUAL_CONTEXT_COEFFS],
             sb_coded: [false; VVC_MAX_RESIDUAL_SUBBLOCKS],
         }
     }
@@ -691,7 +693,16 @@ impl VvcResidualPass1State {
         // then reuses sumAbs - numPos for the par/gt context offset.
         // Keep that exact template magnitude here instead of an artificial
         // pass-1 clip so AC contexts track H.266 9.3.4.2.8/9.
-        self.abs_level_pass1[index] = template_abs_sum_level(abs_level);
+        let pass1_level = template_abs_sum_level(abs_level);
+        self.abs_level_pass1[index] = pass1_level;
+        self.rice_abs_level[index] = u16::from(pass1_level);
+    }
+
+    fn set_rice_abs_level(&mut self, x: u8, y: u8, abs_level: u16) {
+        let index = self
+            .coefficient_index(x, y)
+            .expect("VVC residual rice coefficient is outside the tracked transform block");
+        self.rice_abs_level[index] = abs_level;
     }
 
     pub(in crate::vvc) fn set_sb_coded(&mut self, x_s: u8, y_s: u8, coded: bool) {
@@ -873,6 +884,11 @@ impl VvcResidualPass1State {
     pub(in crate::vvc) fn abs_level_pass1_at(&self, x: u8, y: u8) -> u8 {
         self.coefficient_index(x, y)
             .map_or(0, |index| self.abs_level_pass1[index])
+    }
+
+    fn rice_abs_level_at(&self, x: u8, y: u8) -> u16 {
+        self.coefficient_index(x, y)
+            .map_or(0, |index| self.rice_abs_level[index])
     }
 
     pub(in crate::vvc) fn sb_coded_at(&self, x_s: u8, y_s: u8) -> bool {
@@ -1419,9 +1435,10 @@ impl VvcResidualCabacSymbolStream {
                     remainder_symbols[remainder_count] =
                         Some(VvcDelayedResidualCabacSymbol::AbsRemainder {
                             value: u32::from((abs_level - 4) >> 1),
-                            rice_param: derive_rice_param(scan_pos, coeffs, scan, 4),
+                            rice_param: derive_rice_param_from_state(scan_pos, state, scan, 4),
                         });
                     remainder_count += 1;
+                    state.set_rice_abs_level(pos.x as u8, pos.y as u8, abs_level);
                 }
             }
         }
@@ -1431,7 +1448,7 @@ impl VvcResidualCabacSymbolStream {
                 let pos = scan[scan_pos];
                 let level = coeffs.level_at(pos.x, pos.y);
                 let abs_level = level.unsigned_abs();
-                let rice_param = derive_rice_param(scan_pos, coeffs, scan, 0);
+                let rice_param = derive_rice_param_from_state(scan_pos, state, scan, 0);
                 let zero_pos = go_rice_zero_position(*residual_state, rice_param);
                 let rem_value = if abs_level == 0 {
                     zero_pos
@@ -1451,6 +1468,7 @@ impl VvcResidualCabacSymbolStream {
                 if abs_level != 0 {
                     append_sign_bit(&mut sign_bits, &mut sign_count, level < 0);
                     state.set_pass1_coeff(pos.x as u8, pos.y as u8, abs_level, level < 0);
+                    state.set_rice_abs_level(pos.x as u8, pos.y as u8, abs_level);
                 }
             }
         }
@@ -1551,8 +1569,11 @@ impl VvcResidualCabacSymbolStream {
         let width = 1usize << log2_tb_width;
         let height = 1usize << log2_tb_height;
         let coeffs = VvcRasterCoeffAccessor::new(coeff_levels, width, height);
+        let mut progressive_state = VvcResidualPass1State::new(plan.pass1_state.config);
+        progressive_state.sb_coded = plan.pass1_state.sb_coded;
         Self::append_coefficient_symbols(
             &mut symbols,
+            &mut progressive_state,
             &coeffs,
             log2_tb_width,
             log2_tb_height,
@@ -1666,6 +1687,7 @@ impl VvcResidualCabacSymbolStream {
     #[cfg(test)]
     fn append_coefficient_symbols<S: VvcResidualSymbolSink>(
         symbols: &mut S,
+        state: &mut VvcResidualPass1State,
         coeffs: &impl VvcCoeffAccessor,
         log2_tb_width: u8,
         log2_tb_height: u8,
@@ -1691,9 +1713,7 @@ impl VvcResidualCabacSymbolStream {
             let subblock = scan[min_scan_pos];
             let x_s = (subblock.x / 4) as u8;
             let y_s = (subblock.y / 4) as u8;
-            let subset_coded = scan[min_scan_pos..=max_scan_pos]
-                .iter()
-                .any(|pos| coeffs.level_at(pos.x, pos.y) != 0);
+            let subset_coded = state.sb_coded_at(x_s, y_s);
             if !is_last && is_not_first {
                 symbols.sb_coded_flag(x_s, y_s, subset_coded);
                 if !subset_coded {
@@ -1702,6 +1722,7 @@ impl VvcResidualCabacSymbolStream {
             }
             Self::append_coefficient_subblock_symbols(
                 symbols,
+                state,
                 coeffs,
                 scan,
                 min_scan_pos,
@@ -1717,6 +1738,7 @@ impl VvcResidualCabacSymbolStream {
     #[cfg(test)]
     fn append_coefficient_subblock_symbols<S: VvcResidualSymbolSink>(
         symbols: &mut S,
+        state: &mut VvcResidualPass1State,
         coeffs: &impl VvcCoeffAccessor,
         scan: &[VvcScanPosition],
         min_scan_pos: usize,
@@ -1762,6 +1784,7 @@ impl VvcResidualCabacSymbolStream {
                         Some(first_pos_2nd_pass.map_or(scan_pos, |first| first.max(scan_pos)));
                 }
                 append_sign_bit(&mut sign_bits, &mut sign_count, level < 0);
+                state.set_pass1_coeff(x, y, abs_level, level < 0);
             }
             *residual_state = disabled_dep_quant_state_transition(*residual_state, abs_level);
             next_scan_pos -= 1;
@@ -1781,9 +1804,10 @@ impl VvcResidualCabacSymbolStream {
                             x,
                             y,
                             value: u32::from((abs_level - 4) >> 1),
-                            rice_param: derive_rice_param(scan_pos, coeffs, scan, 4),
+                            rice_param: derive_rice_param_from_state(scan_pos, state, scan, 4),
                         });
                     remainder_count += 1;
+                    state.set_rice_abs_level(x, y, abs_level);
                 }
             }
         }
@@ -1793,7 +1817,7 @@ impl VvcResidualCabacSymbolStream {
                 let pos = scan[scan_pos];
                 let level = coeffs.level_at(pos.x, pos.y);
                 let abs_level = level.unsigned_abs();
-                let rice_param = derive_rice_param(scan_pos, coeffs, scan, 0);
+                let rice_param = derive_rice_param_from_state(scan_pos, state, scan, 0);
                 let zero_pos = go_rice_zero_position(*residual_state, rice_param);
                 let rem_value = if abs_level == 0 {
                     zero_pos
@@ -1813,6 +1837,8 @@ impl VvcResidualCabacSymbolStream {
                 *residual_state = disabled_dep_quant_state_transition(*residual_state, abs_level);
                 if abs_level != 0 {
                     append_sign_bit(&mut sign_bits, &mut sign_count, level < 0);
+                    state.set_pass1_coeff(pos.x as u8, pos.y as u8, abs_level, level < 0);
+                    state.set_rice_abs_level(pos.x as u8, pos.y as u8, abs_level);
                 }
             }
         }
@@ -2096,52 +2122,58 @@ fn disabled_dep_quant_state_transition(_state: u8, _abs_level: u16) -> u8 {
     0
 }
 
-fn derive_rice_param(
+fn derive_rice_param_from_state(
     scan_pos: usize,
-    coeffs: &impl VvcCoeffAccessor,
+    state: &VvcResidualPass1State,
     scan: &[VvcScanPosition],
     base_level: i32,
 ) -> u8 {
+    rice_param_from_template_abs_sum(
+        rice_template_abs_sum_from_state(scan_pos, state, scan),
+        base_level,
+    )
+}
+
+fn rice_param_from_template_abs_sum(sum_abs: i32, base_level: i32) -> u8 {
     const GO_RICE_PARS_COEFF: [u8; 32] = [
         0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3,
         3, 3,
     ];
-    let sum_abs = rice_template_abs_sum(scan_pos, coeffs, scan);
     let clipped = (sum_abs - 5 * base_level).clamp(0, 31) as usize;
     GO_RICE_PARS_COEFF[clipped]
 }
 
-fn rice_template_abs_sum(
+fn rice_template_abs_sum_from_state(
     scan_pos: usize,
-    coeffs: &impl VvcCoeffAccessor,
+    state: &VvcResidualPass1State,
     scan: &[VvcScanPosition],
 ) -> i32 {
     let pos = scan[scan_pos];
-    let width = coeffs.width();
-    let height = coeffs.height();
+    let width = state.config.tb_width();
+    let height = state.config.tb_height();
     let x = pos.x;
     let y = pos.y;
     let mut sum = 0i32;
     if x + 1 < width {
-        sum += coeff_abs_at(coeffs, x + 1, y);
+        sum += state_rice_abs_at(state, x + 1, y);
         if x + 2 < width {
-            sum += coeff_abs_at(coeffs, x + 2, y);
+            sum += state_rice_abs_at(state, x + 2, y);
         }
         if y + 1 < height {
-            sum += coeff_abs_at(coeffs, x + 1, y + 1);
+            sum += state_rice_abs_at(state, x + 1, y + 1);
         }
     }
     if y + 1 < height {
-        sum += coeff_abs_at(coeffs, x, y + 1);
+        sum += state_rice_abs_at(state, x, y + 1);
         if y + 2 < height {
-            sum += coeff_abs_at(coeffs, x, y + 2);
+            sum += state_rice_abs_at(state, x, y + 2);
         }
     }
     sum
 }
 
-fn coeff_abs_at(coeffs: &impl VvcCoeffAccessor, x: usize, y: usize) -> i32 {
-    i32::from(coeffs.level_at(x, y)).abs()
+fn state_rice_abs_at(state: &VvcResidualPass1State, x: usize, y: usize) -> i32 {
+    state.rice_abs_level_at(x as u8, y as u8) as i32
 }
 
 fn go_rice_zero_position(state: u8, rice_param: u8) -> u32 {

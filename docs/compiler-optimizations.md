@@ -3215,6 +3215,51 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-neighbour-cell-map-1f.json
 ```
 
+## VVC Progressive Rice State
+
+Checkpoint: `vvc-progressive-rice-remcap-1f`.
+
+This checkpoint tightens the shared VVC residual syntax path without changing
+mode decisions. Go-Rice parameter derivation now uses the progressively decoded
+residual state for both second-pass remainders and bypass-coded coefficients,
+matching the state visible to the decoder instead of consulting final
+coefficients. The CABAC EP absolute-remainder helper also now applies VVC's
+`maxLog2TrDynamicRange` prefix cap.
+
+An attempted lossless luma leaf-size unification to 8x8 exposed a remaining
+reference incompatibility in 8x8 transform-skip coefficient syntax:
+VTM rejected the stream at slice termination. Lossless luma therefore remains
+gated to 4x4 leaves at block mode selection while lossy luma keeps the 8x8
+leaf path. This keeps the unified finalizer/syntax machinery validated without
+weakening reference-decoder checks.
+
+The first-frame six-vector matrix is byte-neutral against
+`vvc-finalized-residual-blocks-1f`:
+
+| Codec | Mode | Total bytes | Byte delta |
+|---|---|---:|---:|
+| VVC | lossless | 5,884,724 | 0 |
+| VVC | qp=24 | 5,714,171 | 0 |
+
+Commands:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features vvc
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-progressive-rice-remcap-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-finalized-residual-blocks-1f.json
+```
+
 ## References
 
 - Cargo profile settings:
