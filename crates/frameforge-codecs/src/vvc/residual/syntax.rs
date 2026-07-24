@@ -1037,11 +1037,12 @@ impl VvcResidualCabacSymbolStream {
         ac_levels: &[i16; VVC_LUMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         transform_skip: bool,
+        bdpcm: bool,
         mts_index: u8,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
-        if transform_skip {
+        if transform_skip || bdpcm {
             debug_assert_eq!(mts_index, 0);
         }
         Self::emit_stored_coefficients_with_tool_flags(
@@ -1053,7 +1054,7 @@ impl VvcResidualCabacSymbolStream {
             has_ac,
             luma_stored_coeff_stride(log2_tb_width, log2_tb_height),
             transform_skip,
-            false,
+            bdpcm,
             if transform_skip { 0 } else { mts_index },
             encoder,
             cabac,
@@ -1110,6 +1111,7 @@ impl VvcResidualCabacSymbolStream {
         ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         transform_skip: bool,
+        bdpcm: bool,
         encoder: &mut VvcResidualCabacEncoder<'_>,
         cabac: &mut VvcCabacEncoder,
     ) {
@@ -1126,7 +1128,7 @@ impl VvcResidualCabacSymbolStream {
             has_ac,
             4,
             transform_skip,
-            false,
+            bdpcm,
             0,
             encoder,
             cabac,

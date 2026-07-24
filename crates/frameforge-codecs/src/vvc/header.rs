@@ -376,9 +376,9 @@ pub(in crate::vvc) fn vvc_sps_rbsp(
     writer.write_flag("sps_ciip_enabled_flag", false);
     writer.write_flag("sps_gpm_enabled_flag", false);
     writer.write_ue("sps_log2_parallel_merge_level_minus2", 0);
-    writer.write_flag("sps_isp_enabled_flag", false);
+    writer.write_flag("sps_isp_enabled_flag", tool_flags.isp_enabled);
     writer.write_flag("sps_mrl_enabled_flag", tool_flags.mrl_enabled);
-    writer.write_flag("sps_mip_enabled_flag", false);
+    writer.write_flag("sps_mip_enabled_flag", tool_flags.mip_enabled);
     if config.chroma_sampling != ChromaSampling::Monochrome {
         writer.write_flag("sps_cclm_enabled_flag", tool_flags.cclm_enabled);
     }

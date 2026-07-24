@@ -45,8 +45,10 @@ pub(in crate::vvc) enum VvcCabacContext {
     MttSplitCuVerticalFlag(u8),
     MttSplitCuBinaryFlag(u8),
     MultiRefLineIdx(u8),
+    MipFlag(u8),
     IntraLumaMpmFlag,
     IntraLumaPlanarFlag(u8),
+    IspMode(u8),
     CclmModeFlag,
     CclmModeIdx,
     IntraChromaPredMode(u8),
@@ -56,6 +58,7 @@ pub(in crate::vvc) enum VvcCabacContext {
     TransformSkipFlag(u8),
     BdpcmMode(u8),
     MtsIdx(u8),
+    LfnstIdx(u8),
     CuSkipFlag(u8),
     PredModeIbcFlag(u8),
     GeneralMergeFlag(u8),
@@ -105,6 +108,9 @@ impl VvcCabacContext {
             VvcCabacContext::SplitFlag(7) => Some(19),
             VvcCabacContext::SplitQtFlag(0) => Some(20),
             VvcCabacContext::MultiRefLineIdx(0) => Some(21),
+            VvcCabacContext::MipFlag(ctx @ 0..=3) => Some(305 + u16::from(ctx)),
+            VvcCabacContext::IspMode(ctx @ 0..=1) => Some(309 + u16::from(ctx)),
+            VvcCabacContext::LfnstIdx(ctx @ 0..=2) => Some(311 + u16::from(ctx)),
             VvcCabacContext::LastSigCoeffXPrefix(15) => Some(22),
             VvcCabacContext::LastSigCoeffYPrefix(15) => Some(23),
             VvcCabacContext::MttSplitCuVerticalFlag(3) => Some(24),
@@ -280,9 +286,19 @@ impl VvcCabacContext {
                 const I_SLICE_INIT: [u8; 2] = [25, 60];
                 I_SLICE_INIT[ctx as usize]
             }
+            VvcCabacContext::MipFlag(ctx) => {
+                // H.266 Table 58, initType 2 / I-slice.
+                const I_SLICE_INIT: [u8; 4] = [33, 49, 50, 25];
+                I_SLICE_INIT[ctx as usize]
+            }
             VvcCabacContext::IntraLumaMpmFlag => 45,
             VvcCabacContext::IntraLumaPlanarFlag(ctx) => {
                 const I_SLICE_INIT: [u8; 2] = [13, 28];
+                I_SLICE_INIT[ctx as usize]
+            }
+            VvcCabacContext::IspMode(ctx) => {
+                // H.266 Table 88, initType 2 / I-slice.
+                const I_SLICE_INIT: [u8; 2] = [33, 43];
                 I_SLICE_INIT[ctx as usize]
             }
             VvcCabacContext::CclmModeFlag => 59,
@@ -314,6 +330,11 @@ impl VvcCabacContext {
             }
             VvcCabacContext::MtsIdx(ctx) => {
                 const I_SLICE_INIT: [u8; 4] = [29, 0, 28, 0];
+                I_SLICE_INIT[ctx as usize]
+            }
+            VvcCabacContext::LfnstIdx(ctx) => {
+                // H.266 Table 86, initType 2 / I-slice.
+                const I_SLICE_INIT: [u8; 3] = [28, 52, 42];
                 I_SLICE_INIT[ctx as usize]
             }
             VvcCabacContext::CuSkipFlag(ctx) => {
@@ -424,9 +445,17 @@ impl VvcCabacContext {
                 const LOG2_WINDOW: [u8; 2] = [5, 8];
                 LOG2_WINDOW[ctx as usize]
             }
+            VvcCabacContext::MipFlag(ctx) => {
+                const LOG2_WINDOW: [u8; 4] = [9, 10, 9, 6];
+                LOG2_WINDOW[ctx as usize]
+            }
             VvcCabacContext::IntraLumaMpmFlag => 6,
             VvcCabacContext::IntraLumaPlanarFlag(ctx) => {
                 const LOG2_WINDOW: [u8; 2] = [1, 5];
+                LOG2_WINDOW[ctx as usize]
+            }
+            VvcCabacContext::IspMode(ctx) => {
+                const LOG2_WINDOW: [u8; 2] = [9, 2];
                 LOG2_WINDOW[ctx as usize]
             }
             VvcCabacContext::CclmModeFlag => 4,
@@ -458,6 +487,10 @@ impl VvcCabacContext {
             }
             VvcCabacContext::MtsIdx(ctx) => {
                 const LOG2_WINDOW: [u8; 4] = [8, 0, 9, 0];
+                LOG2_WINDOW[ctx as usize]
+            }
+            VvcCabacContext::LfnstIdx(ctx) => {
+                const LOG2_WINDOW: [u8; 3] = [9, 9, 10];
                 LOG2_WINDOW[ctx as usize]
             }
             VvcCabacContext::CuSkipFlag(ctx) => {
@@ -546,8 +579,10 @@ pub(in crate::vvc) struct VvcCabacContexts {
     pub(in crate::vvc) mtt_split_cu_vertical_flag: [VvcCabacProbModel; 15],
     pub(in crate::vvc) mtt_split_cu_binary_flag: [VvcCabacProbModel; 12],
     pub(in crate::vvc) multi_ref_line_idx: [VvcCabacProbModel; 2],
+    pub(in crate::vvc) mip_flag: [VvcCabacProbModel; 4],
     pub(in crate::vvc) intra_luma_mpm_flag: VvcCabacProbModel,
     pub(in crate::vvc) intra_luma_planar_flag: [VvcCabacProbModel; 2],
+    pub(in crate::vvc) isp_mode: [VvcCabacProbModel; 2],
     pub(in crate::vvc) cclm_mode_flag: VvcCabacProbModel,
     pub(in crate::vvc) cclm_mode_idx: VvcCabacProbModel,
     pub(in crate::vvc) intra_chroma_pred_mode: [VvcCabacProbModel; 2],
@@ -557,6 +592,7 @@ pub(in crate::vvc) struct VvcCabacContexts {
     pub(in crate::vvc) transform_skip_flag: [VvcCabacProbModel; 2],
     pub(in crate::vvc) bdpcm_mode: [VvcCabacProbModel; 4],
     pub(in crate::vvc) mts_idx: [VvcCabacProbModel; 4],
+    pub(in crate::vvc) lfnst_idx: [VvcCabacProbModel; 3],
     pub(in crate::vvc) cu_skip_flag: [VvcCabacProbModel; 9],
     pub(in crate::vvc) pred_mode_ibc_flag: [VvcCabacProbModel; 9],
     pub(in crate::vvc) general_merge_flag: [VvcCabacProbModel; 3],
@@ -620,6 +656,13 @@ impl VvcCabacContexts {
                     VvcCabacContext::MultiRefLineIdx(idx as u8).log2_window_size(),
                 )
             }),
+            mip_flag: std::array::from_fn(|idx| {
+                VvcCabacProbModel::from_init_value(
+                    VvcCabacContext::MipFlag(idx as u8).init_value(),
+                    slice_qp,
+                    VvcCabacContext::MipFlag(idx as u8).log2_window_size(),
+                )
+            }),
             intra_luma_mpm_flag: VvcCabacProbModel::from_init_value(
                 VvcCabacContext::IntraLumaMpmFlag.init_value(),
                 slice_qp,
@@ -630,6 +673,13 @@ impl VvcCabacContexts {
                     VvcCabacContext::IntraLumaPlanarFlag(idx as u8).init_value(),
                     slice_qp,
                     VvcCabacContext::IntraLumaPlanarFlag(idx as u8).log2_window_size(),
+                )
+            }),
+            isp_mode: std::array::from_fn(|idx| {
+                VvcCabacProbModel::from_init_value(
+                    VvcCabacContext::IspMode(idx as u8).init_value(),
+                    slice_qp,
+                    VvcCabacContext::IspMode(idx as u8).log2_window_size(),
                 )
             }),
             cclm_mode_flag: VvcCabacProbModel::from_init_value(
@@ -689,6 +739,13 @@ impl VvcCabacContexts {
                     VvcCabacContext::MtsIdx(idx as u8).init_value(),
                     slice_qp,
                     VvcCabacContext::MtsIdx(idx as u8).log2_window_size(),
+                )
+            }),
+            lfnst_idx: std::array::from_fn(|idx| {
+                VvcCabacProbModel::from_init_value(
+                    VvcCabacContext::LfnstIdx(idx as u8).init_value(),
+                    slice_qp,
+                    VvcCabacContext::LfnstIdx(idx as u8).log2_window_size(),
                 )
             }),
             cu_skip_flag: std::array::from_fn(|idx| {
@@ -829,10 +886,12 @@ impl VvcCabacContexts {
                     &self.mtt_split_cu_binary_flag[idx as usize]
                 }
                 VvcCabacContext::MultiRefLineIdx(idx) => &self.multi_ref_line_idx[idx as usize],
+                VvcCabacContext::MipFlag(idx) => &self.mip_flag[idx as usize],
                 VvcCabacContext::IntraLumaMpmFlag => &self.intra_luma_mpm_flag,
                 VvcCabacContext::IntraLumaPlanarFlag(idx) => {
                     &self.intra_luma_planar_flag[idx as usize]
                 }
+                VvcCabacContext::IspMode(idx) => &self.isp_mode[idx as usize],
                 VvcCabacContext::CclmModeFlag => &self.cclm_mode_flag,
                 VvcCabacContext::CclmModeIdx => &self.cclm_mode_idx,
                 VvcCabacContext::IntraChromaPredMode(idx) => {
@@ -844,6 +903,7 @@ impl VvcCabacContexts {
                 VvcCabacContext::TransformSkipFlag(idx) => &self.transform_skip_flag[idx as usize],
                 VvcCabacContext::BdpcmMode(idx) => &self.bdpcm_mode[idx as usize],
                 VvcCabacContext::MtsIdx(idx) => &self.mts_idx[idx as usize],
+                VvcCabacContext::LfnstIdx(idx) => &self.lfnst_idx[idx as usize],
                 VvcCabacContext::CuSkipFlag(idx) => &self.cu_skip_flag[idx as usize],
                 VvcCabacContext::PredModeIbcFlag(idx) => &self.pred_mode_ibc_flag[idx as usize],
                 VvcCabacContext::GeneralMergeFlag(idx) => &self.general_merge_flag[idx as usize],
@@ -911,10 +971,12 @@ impl VvcCabacContexts {
             VvcCabacContext::MultiRefLineIdx(idx) => {
                 self.multi_ref_line_idx[idx as usize].encode(cabac, bin)
             }
+            VvcCabacContext::MipFlag(idx) => self.mip_flag[idx as usize].encode(cabac, bin),
             VvcCabacContext::IntraLumaMpmFlag => self.intra_luma_mpm_flag.encode(cabac, bin),
             VvcCabacContext::IntraLumaPlanarFlag(idx) => {
                 self.intra_luma_planar_flag[idx as usize].encode(cabac, bin)
             }
+            VvcCabacContext::IspMode(idx) => self.isp_mode[idx as usize].encode(cabac, bin),
             VvcCabacContext::CclmModeFlag => self.cclm_mode_flag.encode(cabac, bin),
             VvcCabacContext::CclmModeIdx => self.cclm_mode_idx.encode(cabac, bin),
             VvcCabacContext::IntraChromaPredMode(idx) => {
@@ -928,6 +990,7 @@ impl VvcCabacContexts {
             }
             VvcCabacContext::BdpcmMode(idx) => self.bdpcm_mode[idx as usize].encode(cabac, bin),
             VvcCabacContext::MtsIdx(idx) => self.mts_idx[idx as usize].encode(cabac, bin),
+            VvcCabacContext::LfnstIdx(idx) => self.lfnst_idx[idx as usize].encode(cabac, bin),
             VvcCabacContext::CuSkipFlag(idx) => self.cu_skip_flag[idx as usize].encode(cabac, bin),
             VvcCabacContext::PredModeIbcFlag(idx) => {
                 self.pred_mode_ibc_flag[idx as usize].encode(cabac, bin)

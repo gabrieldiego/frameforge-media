@@ -1,7 +1,7 @@
 use crate::picture::{ChromaSampling, SampleBitDepth};
 
 use super::super::{
-    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcChromaCclmMode,
+    chroma_subsample_x, chroma_subsample_y, vvc_neutral_sample, VvcBdpcmMode, VvcChromaCclmMode,
     VvcCodingTreeNode, VvcIntraPredictionMode, VvcSample, VvcVideoGeometry, VVC_CTU_SIZE,
 };
 
@@ -347,7 +347,7 @@ pub(in crate::vvc) fn predict_vvc_chroma_cclm_block_into_with_availability(
                 luma_availability,
                 x,
                 y,
-                template.left_available,
+                template.downsample_left_available,
             );
             let predicted = right_shift_i32(params.a * luma_sample, params.shift) + params.b;
             prediction[y * chroma_width + x] = predicted.clamp(0, max_sample) as VvcSample;
@@ -355,11 +355,122 @@ pub(in crate::vvc) fn predict_vvc_chroma_cclm_block_into_with_availability(
     }
 }
 
+pub(in crate::vvc) fn predict_vvc_luma_bdpcm_block_into_with_availability(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    mode: VvcBdpcmMode,
+    luma: &[VvcSample],
+    geometry: VvcVideoGeometry,
+    node: VvcCodingTreeNode,
+    bit_depth: SampleBitDepth,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) {
+    predict_vvc_bdpcm_block_into(
+        prediction,
+        scratch,
+        mode,
+        luma,
+        geometry.width,
+        geometry.height,
+        usize::from(node.x),
+        usize::from(node.y),
+        usize::from(node.width),
+        usize::from(node.height),
+        bit_depth,
+        availability,
+    );
+}
+
+pub(in crate::vvc) fn predict_vvc_chroma_bdpcm_block_into_with_availability(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    mode: VvcBdpcmMode,
+    chroma: &[VvcSample],
+    geometry: VvcVideoGeometry,
+    node: VvcCodingTreeNode,
+    chroma_sampling: ChromaSampling,
+    bit_depth: SampleBitDepth,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) {
+    let subsample_x = chroma_subsample_x(chroma_sampling);
+    let subsample_y = chroma_subsample_y(chroma_sampling);
+    predict_vvc_bdpcm_block_into(
+        prediction,
+        scratch,
+        mode,
+        chroma,
+        geometry.width / subsample_x,
+        geometry.height / subsample_y,
+        usize::from(node.x) / subsample_x,
+        usize::from(node.y) / subsample_y,
+        usize::from(node.width) / subsample_x,
+        usize::from(node.height) / subsample_y,
+        bit_depth,
+        availability,
+    );
+}
+
 pub(in crate::vvc) struct VvcDcPredictionScratch {
     top: [VvcSample; VVC_ANGULAR_REFERENCE_CAPACITY],
     left: [VvcSample; VVC_ANGULAR_REFERENCE_CAPACITY],
     top_work: [i32; VVC_CTU_SIZE],
     bottom_delta: [i32; VVC_CTU_SIZE],
+}
+
+fn predict_vvc_bdpcm_block_into(
+    prediction: &mut Vec<VvcSample>,
+    scratch: &mut VvcDcPredictionScratch,
+    mode: VvcBdpcmMode,
+    plane: &[VvcSample],
+    plane_width: usize,
+    plane_height: usize,
+    start_x: usize,
+    start_y: usize,
+    width: usize,
+    height: usize,
+    bit_depth: SampleBitDepth,
+    availability: Option<VvcPlaneAvailability<'_>>,
+) {
+    debug_assert!(mode.is_enabled());
+    prediction.clear();
+    prediction.resize(width * height, 0);
+    match mode {
+        VvcBdpcmMode::None => unreachable!("BDPCM predictor requires an enabled direction"),
+        VvcBdpcmMode::Horizontal => {
+            left_references_into(
+                &mut scratch.left[..height],
+                plane,
+                plane_width,
+                plane_height,
+                start_x,
+                start_y,
+                height,
+                bit_depth,
+                0,
+                availability,
+            );
+            for y in 0..height {
+                prediction[y * width..(y + 1) * width].fill(scratch.left[y]);
+            }
+        }
+        VvcBdpcmMode::Vertical => {
+            top_references_into(
+                &mut scratch.top[..width],
+                plane,
+                plane_width,
+                plane_height,
+                start_x,
+                start_y,
+                width,
+                bit_depth,
+                0,
+                availability,
+            );
+            for row in prediction.chunks_exact_mut(width) {
+                row.copy_from_slice(&scratch.top[..width]);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -392,6 +503,7 @@ struct VvcCclmParameters {
 struct VvcCclmTemplate {
     above_available: bool,
     left_available: bool,
+    downsample_left_available: bool,
     actual_top: usize,
     actual_left: usize,
 }
@@ -415,6 +527,7 @@ fn vvc_cclm_template(
         VvcChromaCclmMode::Linear => VvcCclmTemplate {
             above_available: top_available,
             left_available,
+            downsample_left_available: left_available,
             actual_top: usize::from(top_available) * width,
             actual_left: usize::from(left_available) * height,
         },
@@ -437,6 +550,7 @@ fn vvc_cclm_template(
             VvcCclmTemplate {
                 above_available: top_available,
                 left_available: false,
+                downsample_left_available: left_available,
                 actual_top: usize::from(top_available) * (width + extra),
                 actual_left: 0,
             }
@@ -460,6 +574,7 @@ fn vvc_cclm_template(
             VvcCclmTemplate {
                 above_available: false,
                 left_available,
+                downsample_left_available: left_available,
                 actual_top: 0,
                 actual_left: usize::from(left_available) * (height + extra),
             }
@@ -511,7 +626,7 @@ fn derive_vvc_cclm_parameters(
                 bit_depth,
                 luma_availability,
                 pos,
-                template.left_available,
+                template.downsample_left_available,
             );
             select_chroma[idx] = i32::from(cclm_chroma_sample(
                 chroma,
@@ -2202,4 +2317,90 @@ fn dc_prediction_value(
         width.max(height)
     } as u64;
     ((sum + (denom >> 1)) >> denom.ilog2()) as VvcSample
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vvc::{VvcPartSplit, VvcTreeType};
+
+    #[test]
+    fn mdlm_top_preserves_actual_left_availability_for_downsampling_padding() {
+        let geometry = VvcVideoGeometry {
+            width: 16,
+            height: 24,
+        };
+        let node = VvcCodingTreeNode {
+            x: 8,
+            y: 16,
+            width: 8,
+            height: 8,
+            cqt_depth: 3,
+            mtt_depth: 0,
+            depth_offset: 0,
+            part_idx: 1,
+            parent_split: VvcPartSplit::Quad,
+            tree_type: VvcTreeType::DualTreeChroma,
+            split_history: [VvcPartSplit::Quad; 2],
+        };
+        let chroma_width = 8;
+        let chroma_height = 12;
+        let chroma_availability = vec![true; chroma_width * chroma_height];
+        let template = vvc_cclm_template(
+            VvcChromaCclmMode::MdlmTop,
+            Some(VvcPlaneAvailability::new(
+                &chroma_availability,
+                chroma_width,
+            )),
+            chroma_width,
+            chroma_height,
+            4,
+            8,
+            4,
+            4,
+            ChromaSampling::Cs420,
+        );
+        assert!(!template.left_available);
+        assert!(template.downsample_left_available);
+
+        let mut luma = vec![0; geometry.width * geometry.height];
+        for y in 0..geometry.height {
+            luma[y * geometry.width + 7] = 0;
+            luma[y * geometry.width + 8] = 80;
+            luma[y * geometry.width + 9] = 160;
+        }
+        let luma_availability = vec![true; luma.len()];
+        let bit_depth = SampleBitDepth::new(8).expect("valid bit depth");
+        let actual = cclm_downsample_inner_luma(
+            &luma,
+            geometry,
+            node,
+            ChromaSampling::Cs420,
+            bit_depth,
+            Some(VvcPlaneAvailability::new(
+                &luma_availability,
+                geometry.width,
+            )),
+            0,
+            0,
+            template.downsample_left_available,
+        );
+        let incorrectly_padded = cclm_downsample_inner_luma(
+            &luma,
+            geometry,
+            node,
+            ChromaSampling::Cs420,
+            bit_depth,
+            Some(VvcPlaneAvailability::new(
+                &luma_availability,
+                geometry.width,
+            )),
+            0,
+            0,
+            template.left_available,
+        );
+
+        assert_eq!(actual, 80);
+        assert_eq!(incorrectly_padded, 100);
+    }
 }

@@ -331,28 +331,6 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp_an
     );
 }
 
-#[cfg(test)]
-pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into(
-    residuals: &mut Vec<i16>,
-    scratch: &mut VvcInverseTransformScratch,
-    width: u16,
-    height: u16,
-    dc_level: i16,
-    ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
-    bit_depth: SampleBitDepth,
-) {
-    inverse_transform_vvc_chroma_quantized_block_into_with_qp(
-        residuals,
-        scratch,
-        width,
-        height,
-        dc_level,
-        ac_levels,
-        bit_depth,
-        VVC_DEFAULT_LOSSY_CHROMA_QP,
-    );
-}
-
 pub(in crate::vvc) fn inverse_transform_vvc_chroma_quantized_block_into_with_qp(
     residuals: &mut Vec<i16>,
     scratch: &mut VvcInverseTransformScratch,

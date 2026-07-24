@@ -6,17 +6,11 @@ mod syntax;
 pub(super) mod transform;
 
 use super::VvcSample;
-use super::{VvcChromaIntraPredictionMode, VvcIntraPredictionMode};
+use super::{VvcBdpcmMode, VvcChromaIntraPredictionMode, VvcIntraPredictionMode};
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(super) use transform::{
-    inverse_transform_vvc_chroma_quantized_block_into, inverse_transform_vvc_luma_residual_levels,
-    quantize_vvc_chroma, quantize_vvc_luma_residual_greedy, transform_vvc_tu, VVC_CHROMA_DC_BASE,
-    VVC_LUMA_DC_BASE,
-};
 pub(super) use transform::{
     inverse_transform_vvc_chroma_quantized_block_into_with_qp,
     inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts,
@@ -24,11 +18,18 @@ pub(super) use transform::{
     quantize_vvc_luma_residual_greedy_with_qp_and_mts, reconstruct_vvc_chroma,
     VvcInverseTransformScratch, VVC_DEFAULT_LOSSY_CHROMA_QP, VVC_DEFAULT_LOSSY_LUMA_QP,
 };
+#[cfg(test)]
+pub(super) use transform::{
+    inverse_transform_vvc_luma_residual_levels, quantize_vvc_chroma,
+    quantize_vvc_luma_residual_greedy, transform_vvc_tu, VVC_CHROMA_DC_BASE, VVC_LUMA_DC_BASE,
+};
 
 pub(super) use prediction::{
     fill_visible_chroma_node, fill_visible_luma_node,
+    predict_vvc_chroma_bdpcm_block_into_with_availability,
     predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
+    predict_vvc_luma_bdpcm_block_into_with_availability,
     predict_vvc_luma_intra_block_into_with_availability,
     predict_vvc_luma_intra_block_into_with_mrl_and_availability, VvcDcPredictionScratch,
     VvcPlaneAvailability,
@@ -43,7 +44,7 @@ pub(super) use quant::{
     VvcLumaModeSearchState,
 };
 #[cfg(test)]
-pub(super) use recon::reconstruct_vvc_residual_frame;
+pub(super) use recon::{reconstruct_vvc_residual_frame, reconstruct_vvc_residual_frame_with_qp};
 pub(super) use syntax::{
     VvcResidualCabacEncoder, VvcResidualCabacOptions, VvcResidualCabacSymbolStream,
 };
@@ -64,6 +65,7 @@ pub struct VvcQuantizedColor {
     pub(super) luma_tu_ac_levels: [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_has_ac: [bool; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_transform_skip: [bool; MAX_VVC_LUMA_TUS],
+    pub(super) luma_tu_bdpcm_modes: [VvcBdpcmMode; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_mrl_index: [u8; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_mts_index: [u8; MAX_VVC_LUMA_TUS],
     pub(super) luma_tu_count: usize,
@@ -77,6 +79,7 @@ pub struct VvcQuantizedColor {
     pub(super) cr_tu_has_ac: [bool; MAX_VVC_CHROMA_TUS],
     pub(super) cb_tu_transform_skip: [bool; MAX_VVC_CHROMA_TUS],
     pub(super) cr_tu_transform_skip: [bool; MAX_VVC_CHROMA_TUS],
+    pub(super) chroma_tu_bdpcm_modes: [VvcBdpcmMode; MAX_VVC_CHROMA_TUS],
     pub(super) cb_rem: u8,
     pub(super) cr_rem: u8,
     #[cfg(feature = "vvc-stats")]
@@ -92,9 +95,13 @@ pub(super) struct VvcIntraSearchStats {
     pub(super) luma_planar_candidates: usize,
     pub(super) luma_directional_coarse_candidates: usize,
     pub(super) luma_directional_refinement_candidates: usize,
+    pub(super) luma_rd_refinement_attempts: usize,
+    pub(super) luma_rd_refinement_switches: usize,
     pub(super) chroma_derived_candidates: usize,
     pub(super) chroma_explicit_candidates: usize,
     pub(super) chroma_cclm_candidates: usize,
+    pub(super) chroma_rd_refinement_attempts: usize,
+    pub(super) chroma_rd_refinement_switches: usize,
 }
 
 #[cfg(feature = "vvc-stats")]
@@ -129,6 +136,14 @@ impl VvcIntraSearchStats {
         self.luma_directional_refinement_candidates += 1;
     }
 
+    pub(super) fn add_luma_rd_refinement_attempt(&mut self) {
+        self.luma_rd_refinement_attempts += 1;
+    }
+
+    pub(super) fn add_luma_rd_refinement_switch(&mut self) {
+        self.luma_rd_refinement_switches += 1;
+    }
+
     pub(super) fn add_chroma_derived(&mut self) {
         self.chroma_derived_candidates += 1;
     }
@@ -139,6 +154,14 @@ impl VvcIntraSearchStats {
 
     pub(super) fn add_chroma_cclm(&mut self) {
         self.chroma_cclm_candidates += 1;
+    }
+
+    pub(super) fn add_chroma_rd_refinement_attempt(&mut self) {
+        self.chroma_rd_refinement_attempts += 1;
+    }
+
+    pub(super) fn add_chroma_rd_refinement_switch(&mut self) {
+        self.chroma_rd_refinement_switches += 1;
     }
 }
 

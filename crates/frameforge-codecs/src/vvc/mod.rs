@@ -27,6 +27,8 @@ mod nal;
 mod palette;
 mod residual;
 mod syntax;
+#[cfg(feature = "vvc-stats")]
+use cabac::VvcFrameCtuCabacState;
 use cabac::{
     encode_ctu_partition_body, encode_frame_partition_body_with_contexts,
     initial_vvc_cabac_contexts, vvc_chroma_intra_mode_syntax_bin_count, vvc_chroma_transform_nodes,
@@ -329,6 +331,8 @@ struct VvcCounterStats {
 #[cfg(feature = "vvc-stats")]
 struct VvcCtuBitSink {
     sink: Option<JsonlInstrumentationSink>,
+    frame_idx: Option<usize>,
+    frame_state: Option<VvcFrameCtuCabacState>,
 }
 
 #[cfg(feature = "vvc-stats")]
@@ -414,12 +418,14 @@ fn vvc_cabac_symbol_category(symbol: VvcCabacDumpSymbol) -> VvcCtuBitCategory {
 fn vvc_context_id_bit_category(ctx_id: u16) -> VvcCtuBitCategory {
     match ctx_id {
         0..=3 | 19 | 20 | 24..=41 => VvcCtuBitCategory::Partition,
-        4 | 21 | 53 => VvcCtuBitCategory::LumaMode,
+        4 | 21 | 53 | 305..=310 => VvcCtuBitCategory::LumaMode,
         13 | 14 | 304 => VvcCtuBitCategory::ChromaMode,
         42..=52 => VvcCtuBitCategory::Palette,
         274..=282 => VvcCtuBitCategory::Intrabc,
         265..=273 | 283..=294 => VvcCtuBitCategory::Inter,
-        5..=12 | 15..=18 | 22 | 23 | 54..=70 | 71..=264 | 295..=303 => VvcCtuBitCategory::Residual,
+        5..=12 | 15..=18 | 22 | 23 | 54..=70 | 71..=264 | 295..=303 | 311..=313 => {
+            VvcCtuBitCategory::Residual
+        }
         _ => VvcCtuBitCategory::Other,
     }
 }
@@ -430,6 +436,8 @@ impl VvcCtuBitSink {
         Ok(Self {
             sink: JsonlInstrumentationSink::append_from_env(VVC_CTU_BITS_ENV)
                 .map_err(|err| err.to_string())?,
+            frame_idx: None,
+            frame_state: None,
         })
     }
 
@@ -440,6 +448,7 @@ impl VvcCtuBitSink {
     fn write_ctu(
         &mut self,
         frame_idx: usize,
+        picture_geometry: VvcVideoGeometry,
         region: VvcCtuRegion,
         format: VvcPictureFormat,
         lossless: bool,
@@ -461,15 +470,29 @@ impl VvcCtuBitSink {
         ) else {
             return Ok(());
         };
-        let dump = vvc_ctu_partition_cabac_dump(&params, slice_config);
+        if self.frame_idx != Some(frame_idx) {
+            self.frame_idx = Some(frame_idx);
+            self.frame_state = Some(VvcFrameCtuCabacState::new(picture_geometry, slice_config));
+        }
+        let frame_state = self
+            .frame_state
+            .as_mut()
+            .expect("VVC CTU bit sink must initialize frame CABAC state");
+        let dump = vvc_ctu_partition_cabac_dump_with_frame_state(
+            frame_state,
+            region.slice_address,
+            &params,
+            slice_config,
+        );
         let luma_modes = vvc_luma_mode_counts(quantized);
         let chroma_modes = vvc_chroma_mode_counts(quantized);
         let residual_coding = vvc_tu_residual_coding_counts(quantized);
+        let bdpcm = vvc_tu_bdpcm_counts(quantized);
         let energy = quantized.residual_energy_stats;
         let bit_categories = VvcCtuBitCategories::from_symbols(&dump.semantic_symbols);
         let search = quantized.intra_search_stats;
         let line = format!(
-            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_tu_transform_skip_count\":{},\"luma_tu_transformed_count\":{},\"cb_tu_transform_skip_count\":{},\"cb_tu_transformed_count\":{},\"cr_tu_transform_skip_count\":{},\"cr_tu_transformed_count\":{},\"chroma_tu_transform_skip_count\":{},\"chroma_tu_transformed_count\":{},\"luma_residual_sse_total\":{},\"luma_residual_sse_coded_first4x4\":{},\"luma_residual_sse_uncoded_tail\":{},\"chroma_residual_sse_total\":{},\"chroma_residual_sse_coded_first4x4\":{},\"chroma_residual_sse_uncoded_tail\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
+            "{{\"codec\":\"vvc\",\"source\":\"frameforge\",\"path\":\"residual_ctu\",\"frame_index\":{},\"ctu_address\":{},\"sb_x\":{},\"sb_y\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"superblock_size\":{},\"chroma_sampling\":\"{:?}\",\"bit_depth\":{},\"lossless\":{},\"slice_qp\":{},\"chroma_qp\":{},\"luma_tu_count\":{},\"chroma_tu_count\":{},\"luma_tu_transform_skip_count\":{},\"luma_tu_transformed_count\":{},\"cb_tu_transform_skip_count\":{},\"cb_tu_transformed_count\":{},\"cr_tu_transform_skip_count\":{},\"cr_tu_transformed_count\":{},\"chroma_tu_transform_skip_count\":{},\"chroma_tu_transformed_count\":{},\"luma_bdpcm_horizontal_count\":{},\"luma_bdpcm_vertical_count\":{},\"chroma_bdpcm_horizontal_count\":{},\"chroma_bdpcm_vertical_count\":{},\"luma_residual_sse_total\":{},\"luma_residual_sse_coded_first4x4\":{},\"luma_residual_sse_uncoded_tail\":{},\"chroma_residual_sse_total\":{},\"chroma_residual_sse_coded_first4x4\":{},\"chroma_residual_sse_uncoded_tail\":{},\"luma_candidate_count\":{},\"luma_candidate_dc\":{},\"luma_candidate_planar\":{},\"luma_candidate_directional\":{},\"luma_candidate_directional_coarse\":{},\"luma_candidate_directional_refinement\":{},\"luma_rd_refinement_attempts\":{},\"luma_rd_refinement_switches\":{},\"chroma_candidate_count\":{},\"chroma_candidate_derived\":{},\"chroma_candidate_explicit\":{},\"chroma_candidate_cclm\":{},\"chroma_rd_refinement_attempts\":{},\"chroma_rd_refinement_switches\":{},\"luma_mode_dc\":{},\"luma_mode_planar\":{},\"luma_mode_horizontal\":{},\"luma_mode_vertical\":{},\"luma_mode_angular\":{},\"chroma_mode_derived\":{},\"chroma_mode_dc\":{},\"chroma_mode_planar\":{},\"chroma_mode_horizontal\":{},\"chroma_mode_vertical\":{},\"chroma_mode_angular\":{},\"chroma_mode_cclm\":{},\"chroma_mode_cclm_linear\":{},\"chroma_mode_mdlm_left\":{},\"chroma_mode_mdlm_top\":{},\"partition_bits\":{},\"luma_mode_bits\":{},\"chroma_mode_bits\":{},\"residual_bits\":{},\"intrabc_bits\":{},\"inter_bits\":{},\"palette_bits\":{},\"other_bits\":{},\"context_bins\":{},\"semantic_symbols\":{},\"bin_engine_events\":{},\"total_symbol_bits\":{}}}",
             frame_idx,
             region.slice_address,
             region.origin_x / VVC_CTU_SIZE,
@@ -494,6 +517,10 @@ impl VvcCtuBitSink {
             residual_coding.cr_transformed,
             residual_coding.chroma_transform_skip(),
             residual_coding.chroma_transformed(),
+            bdpcm.luma_horizontal,
+            bdpcm.luma_vertical,
+            bdpcm.chroma_horizontal,
+            bdpcm.chroma_vertical,
             energy.luma_total_sse,
             energy.luma_coded_first4x4_sse,
             energy.luma_uncoded_tail_sse,
@@ -506,10 +533,14 @@ impl VvcCtuBitSink {
             search.luma_directional_candidates(),
             search.luma_directional_coarse_candidates,
             search.luma_directional_refinement_candidates,
+            search.luma_rd_refinement_attempts,
+            search.luma_rd_refinement_switches,
             search.chroma_candidates(),
             search.chroma_derived_candidates,
             search.chroma_explicit_candidates,
             search.chroma_cclm_candidates,
+            search.chroma_rd_refinement_attempts,
+            search.chroma_rd_refinement_switches,
             luma_modes.dc,
             luma_modes.planar,
             luma_modes.horizontal,
@@ -744,6 +775,20 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
         "chroma_tu_transformed_count",
         residual_coding.chroma_transformed() as u64,
     );
+    let bdpcm = vvc_tu_bdpcm_counts(quantized);
+    stats.add_counter("luma_bdpcm_horizontal_count", bdpcm.luma_horizontal as u64);
+    stats.add_counter("luma_bdpcm_vertical_count", bdpcm.luma_vertical as u64);
+    stats.add_counter(
+        "chroma_bdpcm_horizontal_count",
+        bdpcm.chroma_horizontal as u64,
+    );
+    stats.add_counter("chroma_bdpcm_vertical_count", bdpcm.chroma_vertical as u64);
+    let mts = vvc_luma_tu_mts_counts(quantized);
+    stats.add_counter("luma_mts_nonzero_count", mts.nonzero as u64);
+    stats.add_counter("luma_mts_dst7_dst7_count", mts.dst7_dst7 as u64);
+    stats.add_counter("luma_mts_dct8_dst7_count", mts.dct8_dst7 as u64);
+    stats.add_counter("luma_mts_dst7_dct8_count", mts.dst7_dct8 as u64);
+    stats.add_counter("luma_mts_dct8_dct8_count", mts.dct8_dct8 as u64);
     let energy = quantized.residual_energy_stats;
     stats.add_counter("luma_residual_sse_total", energy.luma_total_sse);
     stats.add_counter(
@@ -782,6 +827,14 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
         "luma_candidate_directional_refinement",
         search.luma_directional_refinement_candidates as u64,
     );
+    stats.add_counter(
+        "luma_rd_refinement_attempts",
+        search.luma_rd_refinement_attempts as u64,
+    );
+    stats.add_counter(
+        "luma_rd_refinement_switches",
+        search.luma_rd_refinement_switches as u64,
+    );
     stats.add_counter("chroma_candidate_count", search.chroma_candidates() as u64);
     stats.add_counter(
         "chroma_candidate_derived",
@@ -794,6 +847,14 @@ fn add_vvc_quantized_ctu_counters(stats: &mut VvcFrameStats, quantized: &VvcQuan
     stats.add_counter(
         "chroma_candidate_cclm",
         search.chroma_cclm_candidates as u64,
+    );
+    stats.add_counter(
+        "chroma_rd_refinement_attempts",
+        search.chroma_rd_refinement_attempts as u64,
+    );
+    stats.add_counter(
+        "chroma_rd_refinement_switches",
+        search.chroma_rd_refinement_switches as u64,
     );
     let modes = vvc_luma_mode_counts(quantized);
     stats.add_counter("luma_mode_dc", modes.dc as u64);
@@ -902,6 +963,73 @@ fn vvc_tu_residual_coding_counts(quantized: &VvcQuantizedColor) -> VvcTuResidual
             counts.cr_transform_skip += 1;
         } else {
             counts.cr_transformed += 1;
+        }
+    }
+    counts
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Default, Clone, Copy)]
+struct VvcTuBdpcmCounts {
+    luma_horizontal: usize,
+    luma_vertical: usize,
+    chroma_horizontal: usize,
+    chroma_vertical: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_tu_bdpcm_counts(quantized: &VvcQuantizedColor) -> VvcTuBdpcmCounts {
+    let mut counts = VvcTuBdpcmCounts::default();
+    for idx in 0..quantized.luma_tu_count {
+        match quantized.luma_tu_bdpcm_modes[idx] {
+            VvcBdpcmMode::None => {}
+            VvcBdpcmMode::Horizontal => counts.luma_horizontal += 1,
+            VvcBdpcmMode::Vertical => counts.luma_vertical += 1,
+        }
+    }
+    for idx in 0..quantized.chroma_tu_count {
+        match quantized.chroma_tu_bdpcm_modes[idx] {
+            VvcBdpcmMode::None => {}
+            VvcBdpcmMode::Horizontal => counts.chroma_horizontal += 1,
+            VvcBdpcmMode::Vertical => counts.chroma_vertical += 1,
+        }
+    }
+    counts
+}
+
+#[cfg(feature = "vvc-stats")]
+#[derive(Debug, Default, Clone, Copy)]
+struct VvcLumaTuMtsCounts {
+    nonzero: usize,
+    dst7_dst7: usize,
+    dct8_dst7: usize,
+    dst7_dct8: usize,
+    dct8_dct8: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_luma_tu_mts_counts(quantized: &VvcQuantizedColor) -> VvcLumaTuMtsCounts {
+    let mut counts = VvcLumaTuMtsCounts::default();
+    for idx in 0..quantized.luma_tu_count {
+        match quantized.luma_tu_mts_index[idx] {
+            0 => {}
+            2 => {
+                counts.nonzero += 1;
+                counts.dst7_dst7 += 1;
+            }
+            3 => {
+                counts.nonzero += 1;
+                counts.dct8_dst7 += 1;
+            }
+            4 => {
+                counts.nonzero += 1;
+                counts.dst7_dct8 += 1;
+            }
+            5 => {
+                counts.nonzero += 1;
+                counts.dct8_dct8 += 1;
+            }
+            _ => counts.nonzero += 1,
         }
     }
     counts
@@ -1107,6 +1235,8 @@ pub(super) struct VvcSyntaxToolFlags {
     mts_enabled: bool,
     explicit_mts_intra_enabled: bool,
     lfnst_enabled: bool,
+    isp_enabled: bool,
+    mip_enabled: bool,
     joint_cbcr_enabled: bool,
     mrl_enabled: bool,
     cclm_enabled: bool,
@@ -1132,11 +1262,13 @@ impl VvcSyntaxToolFlags {
         Self {
             ibc_enabled: false,
             palette_enabled: false,
-            transform_skip_enabled: residual_mode.is_lossless(),
-            bdpcm_enabled: false,
+            transform_skip_enabled: true,
+            bdpcm_enabled: true,
             mts_enabled: false,
             explicit_mts_intra_enabled: !residual_mode.is_lossless(),
             lfnst_enabled: false,
+            isp_enabled: false,
+            mip_enabled: false,
             joint_cbcr_enabled: false,
             mrl_enabled: true,
             cclm_enabled: true,
@@ -1159,6 +1291,8 @@ impl VvcSyntaxToolFlags {
             mts_enabled: false,
             explicit_mts_intra_enabled: false,
             lfnst_enabled: false,
+            isp_enabled: false,
+            mip_enabled: false,
             joint_cbcr_enabled: false,
             mrl_enabled: false,
             cclm_enabled: false,
@@ -1258,6 +1392,27 @@ pub(in crate::vvc) enum VvcResidualCodingMode {
 pub(in crate::vvc) enum VvcTuResidualCodingMode {
     Transformed,
     TransformSkip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vvc) enum VvcBdpcmMode {
+    None,
+    Horizontal,
+    Vertical,
+}
+
+impl VvcBdpcmMode {
+    pub(in crate::vvc) const fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub(in crate::vvc) const fn inferred_intra_mode(self) -> Option<VvcIntraPredictionMode> {
+        match self {
+            Self::None => None,
+            Self::Horizontal => Some(VvcIntraPredictionMode::Horizontal),
+            Self::Vertical => Some(VvcIntraPredictionMode::Vertical),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1445,8 +1600,16 @@ pub(in crate::vvc) struct VvcLumaIntraCandidateCost {
 }
 
 impl VvcLumaIntraCandidateCost {
-    const fn new(mode: VvcIntraPredictionMode, score: u64) -> Self {
+    pub(in crate::vvc) const fn new(mode: VvcIntraPredictionMode, score: u64) -> Self {
         Self { mode, score }
+    }
+
+    pub(in crate::vvc) const fn mode(self) -> VvcIntraPredictionMode {
+        self.mode
+    }
+
+    pub(in crate::vvc) const fn score(self) -> u64 {
+        self.score
     }
 }
 
@@ -1484,7 +1647,7 @@ impl VvcLumaIntraCandidateCosts {
         self
     }
 
-    fn iter(self) -> impl Iterator<Item = VvcLumaIntraCandidateCost> {
+    pub(in crate::vvc) fn iter(self) -> impl Iterator<Item = VvcLumaIntraCandidateCost> {
         self.candidates.into_iter().take(self.count)
     }
 }
@@ -1496,8 +1659,16 @@ pub(in crate::vvc) struct VvcChromaIntraCandidateCost {
 }
 
 impl VvcChromaIntraCandidateCost {
-    const fn new(mode: VvcChromaIntraPredictionMode, score: u64) -> Self {
+    pub(in crate::vvc) const fn new(mode: VvcChromaIntraPredictionMode, score: u64) -> Self {
         Self { mode, score }
+    }
+
+    pub(in crate::vvc) const fn mode(self) -> VvcChromaIntraPredictionMode {
+        self.mode
+    }
+
+    pub(in crate::vvc) const fn score(self) -> u64 {
+        self.score
     }
 }
 
@@ -1539,7 +1710,7 @@ impl VvcChromaIntraCandidateCosts {
         self
     }
 
-    fn iter(self) -> impl Iterator<Item = VvcChromaIntraCandidateCost> {
+    pub(in crate::vvc) fn iter(self) -> impl Iterator<Item = VvcChromaIntraCandidateCost> {
         self.candidates.into_iter().take(self.count)
     }
 }
@@ -1596,12 +1767,21 @@ impl VvcResidualCodingPolicy {
         self.luma_max_leaf_size
     }
 
+    const fn with_luma_max_leaf_size(mut self, luma_max_leaf_size: u16) -> Self {
+        self.luma_max_leaf_size = luma_max_leaf_size;
+        self
+    }
+
     pub(in crate::vvc) const fn score_metric(self) -> VvcResidualScoreMetric {
         self.score_metric
     }
 
     pub(in crate::vvc) const fn chroma_syntax_tie_breaker(self) -> bool {
         self.chroma_syntax_tie_breaker
+    }
+
+    pub(in crate::vvc) const fn residual_mode(self) -> VvcResidualCodingMode {
+        self.context.residual_mode()
     }
 
     pub(in crate::vvc) fn select_luma_intra_mode(
@@ -1760,8 +1940,9 @@ pub(in crate::vvc) fn select_vvc_luma_tu_mts_index(
         residual_coding,
         mrl_index,
     );
-    // TODO(vvc): choose nonzero MTS after the corresponding forward and
-    // inverse transforms are wired into quantization and reconstruction.
+    // TODO(vvc): choose nonzero MTS once the production selector is rate-safe
+    // and cheap enough for 8x8 luma TUs. The transform and syntax plumbing is
+    // wired, but the current exhaustive selector regresses bitrate and FPS.
     0
 }
 
@@ -2223,13 +2404,16 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
     let frame_len = stream_layout.frame_len();
     let residual_mode = VvcResidualCodingMode::for_encode_options(options);
     let residual_policy = VvcResidualCodingPolicy::new(stream_format, residual_mode);
-    let luma_max_leaf_size = residual_policy.luma_max_leaf_size();
     let slice_config = vvc_slice_config_for_input_format(
         residual_mode.slice_config(stream_format, options.qp),
         format,
     );
-    let luma_qp = slice_config.slice_qp.clamp(0, 63);
-    let chroma_qp = vvc_lossy_chroma_qp_for_slice_qp(luma_qp);
+    let luma_qp = slice_config.slice_qp;
+    let chroma_qp = if residual_mode.is_lossless() {
+        slice_config.slice_qp
+    } else {
+        vvc_lossy_chroma_qp_for_slice_qp(luma_qp)
+    };
     let picture_partitioning = residual_mode.picture_partitioning();
     write_annex_b_to(
         bitstream,
@@ -2299,6 +2483,14 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                 let mut frame_ctus = Vec::with_capacity(vvc_picture_ctu_count(geometry));
                 let mut luma_mode_search_state = VvcLumaModeSearchState::new_for_geometry(geometry);
                 for region in vvc_ctu_regions(geometry) {
+                    let luma_max_leaf_size = select_vvc_luma_max_leaf_size_for_ctu(
+                        residual_policy,
+                        &source_frame,
+                        region,
+                        luma_qp,
+                    );
+                    let ctu_residual_policy =
+                        residual_policy.with_luma_max_leaf_size(luma_max_leaf_size);
                     #[cfg(feature = "vvc-stats")]
                     let stage_start = Instant::now();
                     let quantized =
@@ -2306,17 +2498,29 @@ fn vvc_yuv_encode_stream_with_limits_and_progress_and_frame_metrics<R: Read, W: 
                             &source_frame,
                             &mut frame_recon,
                             region,
-                            residual_policy,
+                            ctu_residual_policy,
                             luma_qp,
                             chroma_qp,
                             &mut luma_mode_search_state,
                         );
                     #[cfg(feature = "vvc-stats")]
-                    add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
+                    {
+                        add_vvc_quantized_ctu_counters(&mut frame_stats, &quantized);
+                        match luma_max_leaf_size {
+                            VVC_LOSSLESS_LUMA_LEAF_SIZE => {
+                                frame_stats.add_counter("luma_ctu_leaf4_count", 1);
+                            }
+                            VVC_CURRENT_MAX_LUMA_LEAF_SIZE => {
+                                frame_stats.add_counter("luma_ctu_leaf8_count", 1);
+                            }
+                            _ => {}
+                        }
+                    }
                     #[cfg(feature = "vvc-stats")]
                     if vvc_ctu_bits.is_enabled() {
                         vvc_ctu_bits.write_ctu(
                             frame_idx,
+                            geometry,
                             region,
                             stream_format,
                             options.lossless,
@@ -2426,6 +2630,137 @@ fn vvc_ctu_regions(geometry: VvcVideoGeometry) -> impl Iterator<Item = VvcCtuReg
             }
         })
     })
+}
+
+fn select_vvc_luma_max_leaf_size_for_ctu(
+    policy: VvcResidualCodingPolicy,
+    source_frame: &VvcSampledFrame,
+    region: VvcCtuRegion,
+    luma_qp: i32,
+) -> u16 {
+    let default_leaf_size = policy.luma_max_leaf_size();
+    if policy.residual_mode() != VvcResidualCodingMode::Lossy
+        || default_leaf_size <= VVC_LOSSLESS_LUMA_LEAF_SIZE
+    {
+        return default_leaf_size;
+    }
+
+    let split_gain = vvc_luma_4x4_split_dc_sse_gain(source_frame, region);
+    if split_gain.block_count == 0 {
+        return default_leaf_size;
+    }
+
+    let lambda = vvc_luma_leaf_split_lambda(luma_qp, source_frame.format.bit_depth);
+    let split_rate_penalty = lambda
+        .saturating_mul(split_gain.block_count as u64)
+        .saturating_mul(512);
+    let meaningful_distortion_gain = split_gain.total_sse / 8;
+    if split_gain.sse_gain > split_rate_penalty && split_gain.sse_gain > meaningful_distortion_gain
+    {
+        VVC_LOSSLESS_LUMA_LEAF_SIZE
+    } else {
+        default_leaf_size
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct VvcLumaSplitSseGain {
+    block_count: usize,
+    total_sse: u64,
+    sse_gain: u64,
+}
+
+fn vvc_luma_4x4_split_dc_sse_gain(
+    source_frame: &VvcSampledFrame,
+    region: VvcCtuRegion,
+) -> VvcLumaSplitSseGain {
+    let x_end = region
+        .origin_x
+        .saturating_add(region.geometry.width)
+        .min(source_frame.geometry.width);
+    let y_end = region
+        .origin_y
+        .saturating_add(region.geometry.height)
+        .min(source_frame.geometry.height);
+    if x_end <= region.origin_x || y_end <= region.origin_y {
+        return VvcLumaSplitSseGain::default();
+    }
+
+    let mut gain = VvcLumaSplitSseGain::default();
+    for y in (region.origin_y..y_end).step_by(usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE)) {
+        let block_height = (y_end - y).min(usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE));
+        if block_height < usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE) {
+            continue;
+        }
+        for x in (region.origin_x..x_end).step_by(usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE)) {
+            let block_width = (x_end - x).min(usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE));
+            if block_width < usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE) {
+                continue;
+            }
+            let sse_8x8 = vvc_luma_block_mean_sse(
+                source_frame,
+                x,
+                y,
+                usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE),
+                usize::from(VVC_CURRENT_MAX_LUMA_LEAF_SIZE),
+            );
+            let mut sse_4x4_sum = 0u64;
+            for child_y in [y, y + usize::from(VVC_LOSSLESS_LUMA_LEAF_SIZE)] {
+                for child_x in [x, x + usize::from(VVC_LOSSLESS_LUMA_LEAF_SIZE)] {
+                    sse_4x4_sum = sse_4x4_sum.saturating_add(vvc_luma_block_mean_sse(
+                        source_frame,
+                        child_x,
+                        child_y,
+                        usize::from(VVC_LOSSLESS_LUMA_LEAF_SIZE),
+                        usize::from(VVC_LOSSLESS_LUMA_LEAF_SIZE),
+                    ));
+                }
+            }
+            gain.block_count += 1;
+            gain.total_sse = gain.total_sse.saturating_add(sse_8x8);
+            gain.sse_gain = gain
+                .sse_gain
+                .saturating_add(sse_8x8.saturating_sub(sse_4x4_sum));
+        }
+    }
+    gain
+}
+
+fn vvc_luma_block_mean_sse(
+    source_frame: &VvcSampledFrame,
+    origin_x: usize,
+    origin_y: usize,
+    width: usize,
+    height: usize,
+) -> u64 {
+    debug_assert!(origin_x + width <= source_frame.geometry.width);
+    debug_assert!(origin_y + height <= source_frame.geometry.height);
+    let stride = source_frame.geometry.width;
+    let sample_count = width * height;
+    let mut sum = 0u64;
+    for y in origin_y..origin_y + height {
+        let row = y * stride;
+        for x in origin_x..origin_x + width {
+            sum += u64::from(source_frame.luma[row + x]);
+        }
+    }
+    let mean = ((sum + (sample_count / 2) as u64) / sample_count as u64) as i64;
+    let mut sse = 0u64;
+    for y in origin_y..origin_y + height {
+        let row = y * stride;
+        for x in origin_x..origin_x + width {
+            let diff = i64::from(source_frame.luma[row + x]) - mean;
+            sse = sse.saturating_add((diff * diff) as u64);
+        }
+    }
+    sse
+}
+
+fn vvc_luma_leaf_split_lambda(qp: i32, bit_depth: SampleBitDepth) -> u64 {
+    let qp_scale = 1u64 << (qp.clamp(0, 63) / 6);
+    let bit_depth_delta = u32::from(bit_depth.bits().saturating_sub(8));
+    let bit_depth_scale = 1u64 << (bit_depth_delta * 2);
+    qp_scale.saturating_mul(bit_depth_scale)
 }
 
 impl VvcReconstructionFrame {
@@ -3032,10 +3367,12 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
     }
     let mut cb_tu_transform_skip = color.cb_tu_transform_skip;
     let mut cr_tu_transform_skip = color.cr_tu_transform_skip;
+    let mut chroma_tu_bdpcm_modes = color.chroma_tu_bdpcm_modes;
     if color.chroma_tu_count <= 1 {
         for idx in 0..chroma_tu_count.min(MAX_VVC_CHROMA_TUS) {
             cb_tu_transform_skip[idx] = color.cb_tu_transform_skip[0];
             cr_tu_transform_skip[idx] = color.cr_tu_transform_skip[0];
+            chroma_tu_bdpcm_modes[idx] = color.chroma_tu_bdpcm_modes[0];
         }
     }
     let (
@@ -3047,6 +3384,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_ac_levels,
         luma_tu_has_ac,
         luma_tu_transform_skip,
+        luma_tu_bdpcm_modes,
         luma_tu_mrl_index,
         luma_tu_mts_index,
     ) = vvc_luma_residual_arrays_for_geometry(
@@ -3073,6 +3411,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         luma_tu_ac_levels,
         luma_tu_has_ac,
         luma_tu_transform_skip,
+        luma_tu_bdpcm_modes,
         luma_tu_mrl_index,
         luma_tu_mts_index,
         cb_dc_abs_level: color.cb_rem,
@@ -3086,6 +3425,7 @@ fn vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
         cr_tu_has_ac: color.cr_tu_has_ac,
         cb_tu_transform_skip,
         cr_tu_transform_skip,
+        chroma_tu_bdpcm_modes,
     })
 }
 
@@ -3104,6 +3444,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     [[i16; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
     [bool; MAX_VVC_LUMA_TUS],
+    [VvcBdpcmMode; MAX_VVC_LUMA_TUS],
     [u8; MAX_VVC_LUMA_TUS],
     [u8; MAX_VVC_LUMA_TUS],
 ) {
@@ -3115,6 +3456,7 @@ fn vvc_luma_residual_arrays_for_geometry(
     let mut luma_tu_ac_levels = color.luma_tu_ac_levels;
     let mut luma_tu_has_ac = color.luma_tu_has_ac;
     let mut luma_tu_transform_skip = color.luma_tu_transform_skip;
+    let mut luma_tu_bdpcm_modes = color.luma_tu_bdpcm_modes;
     let mut luma_tu_mrl_index = color.luma_tu_mrl_index;
     let mut luma_tu_mts_index = color.luma_tu_mts_index;
     if color.luma_tu_count > 1 {
@@ -3127,6 +3469,7 @@ fn vvc_luma_residual_arrays_for_geometry(
             luma_tu_ac_levels,
             luma_tu_has_ac,
             luma_tu_transform_skip,
+            luma_tu_bdpcm_modes,
             luma_tu_mrl_index,
             luma_tu_mts_index,
         );
@@ -3143,6 +3486,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         luma_tu_ac_levels[idx] = color.luma_tu_ac_levels[0];
         luma_tu_has_ac[idx] = color.luma_tu_has_ac[0];
         luma_tu_transform_skip[idx] = color.luma_tu_transform_skip[0];
+        luma_tu_bdpcm_modes[idx] = color.luma_tu_bdpcm_modes[0];
         luma_tu_mrl_index[idx] = color.luma_tu_mrl_index[0];
         luma_tu_mts_index[idx] = color.luma_tu_mts_index[0];
     }
@@ -3155,6 +3499,7 @@ fn vvc_luma_residual_arrays_for_geometry(
         luma_tu_ac_levels,
         luma_tu_has_ac,
         luma_tu_transform_skip,
+        luma_tu_bdpcm_modes,
         luma_tu_mrl_index,
         luma_tu_mts_index,
     )
@@ -3212,6 +3557,37 @@ fn vvc_ctu_partition_cabac_dump(
     let mut cabac = VvcCabacEncoder::new_with_dump();
     cabac.start();
     encode_ctu_partition_body(&mut cabac, params, slice_config);
+    cabac.encode_bin_trm(true);
+    let semantic_symbols = cabac.semantic_symbols.clone();
+    let context_events = cabac.context_events.clone();
+    let context_bin_count = cabac.context_bin_count;
+    let bin_engine_events = cabac.bin_engine_events.clone();
+    let symbols = cabac.dump_symbols.clone();
+    let bits = cabac.finish();
+    VvcCtuCabacDump {
+        symbols,
+        semantic_symbols,
+        context_events,
+        context_bin_count,
+        bin_engine_events,
+        bits,
+    }
+}
+
+#[cfg(feature = "vvc-stats")]
+fn vvc_ctu_partition_cabac_dump_with_frame_state(
+    frame_state: &mut VvcFrameCtuCabacState,
+    slice_address: usize,
+    params: &VvcCtuPartitionParams,
+    slice_config: VvcSliceSyntaxConfig,
+) -> VvcCtuCabacDump {
+    debug_assert!((8..=64).contains(&params.root_width));
+    debug_assert!((8..=64).contains(&params.root_height));
+    debug_assert!(params.visible_width >= 8 && params.visible_height >= 8);
+
+    let mut cabac = VvcCabacEncoder::new_with_dump();
+    cabac.start();
+    frame_state.encode_ctu(&mut cabac, slice_address, params, slice_config);
     cabac.encode_bin_trm(true);
     let semantic_symbols = cabac.semantic_symbols.clone();
     let context_events = cabac.context_events.clone();

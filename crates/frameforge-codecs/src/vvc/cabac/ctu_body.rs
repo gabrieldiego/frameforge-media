@@ -8,10 +8,10 @@ use crate::picture::ChromaSampling;
 use crate::vvc::residual::{VvcResidualCabacEncoder, VvcResidualCabacSymbolStream};
 use crate::vvc::{
     chroma_subsample_x, chroma_subsample_y, vvc_chroma_cclm_node_allowed,
-    vvc_chroma_explicit_candidate_index, VvcChromaCclmMode, VvcChromaIntraPredictionMode,
-    VvcIntraPredictionMode, VvcResidualComponent, VvcSliceSyntaxConfig, VvcVideoGeometry,
-    VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE, VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE,
-    VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
+    vvc_chroma_explicit_candidate_index, VvcBdpcmMode, VvcChromaCclmMode,
+    VvcChromaIntraPredictionMode, VvcIntraPredictionMode, VvcResidualComponent,
+    VvcSliceSyntaxConfig, VvcVideoGeometry, VVC_CHROMA_AC_COEFFS_PER_TU, VVC_CTU_SIZE,
+    VVC_CURRENT_ENCODER_CHROMA_420_TB_SIZE, VVC_CURRENT_MAX_LUMA_MTT_DEPTH,
 };
 
 const VVC_LUMA_ANGULAR_BASE: i16 = 2;
@@ -268,6 +268,74 @@ pub(in crate::vvc) fn encode_frame_partition_body_with_contexts(
     }
 }
 
+#[cfg(feature = "vvc-stats")]
+pub(in crate::vvc) struct VvcFrameCtuCabacState {
+    contexts: VvcCabacContexts,
+    luma_neighbours: VvcLumaNeighbourState,
+    luma_mode_neighbours: VvcLumaModeNeighbourState,
+    chroma_neighbours: VvcChromaNeighbourState,
+    picture_width: u16,
+    picture_height: u16,
+    ctu_cols: usize,
+}
+
+#[cfg(feature = "vvc-stats")]
+impl VvcFrameCtuCabacState {
+    pub(in crate::vvc) fn new(
+        picture_geometry: VvcVideoGeometry,
+        slice_config: VvcSliceSyntaxConfig,
+    ) -> Self {
+        let picture_width = picture_geometry.coded_width() as u16;
+        let picture_height = picture_geometry.coded_height() as u16;
+        Self {
+            contexts: initial_vvc_cabac_contexts(slice_config),
+            luma_neighbours: VvcLumaNeighbourState::new(picture_width, picture_height),
+            luma_mode_neighbours: VvcLumaModeNeighbourState::new(picture_width, picture_height),
+            chroma_neighbours: VvcChromaNeighbourState::new(
+                picture_width,
+                picture_height,
+                slice_config.coding_tree.chroma_sampling,
+            ),
+            picture_width,
+            picture_height,
+            ctu_cols: picture_geometry.coded_width().div_ceil(VVC_CTU_SIZE),
+        }
+    }
+
+    pub(in crate::vvc) fn encode_ctu(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        slice_address: usize,
+        params: &VvcCtuPartitionParams,
+        slice_config: VvcSliceSyntaxConfig,
+    ) {
+        let ctu_x = slice_address % self.ctu_cols;
+        let ctu_y = slice_address / self.ctu_cols;
+        let origin_x = (ctu_x * VVC_CTU_SIZE) as u16;
+        let origin_y = (ctu_y * VVC_CTU_SIZE) as u16;
+        let mut ops = Vec::new();
+        VvcCtuCabacOp::append_intra_ctu_partition_with_luma_neighbours(
+            &mut ops,
+            &mut self.luma_neighbours,
+            params.shape(),
+            origin_x,
+            origin_y,
+            self.picture_width,
+            self.picture_height,
+            params.luma_max_leaf_size,
+        );
+        let mut ctu_encoder = VvcCtuCabacGenerator::new(&mut self.contexts, params, slice_config);
+        for op in ops {
+            ctu_encoder.emit_with_frame_neighbours(
+                cabac,
+                op,
+                &mut self.luma_mode_neighbours,
+                &mut self.chroma_neighbours,
+            );
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::vvc) struct VvcCtuCabacGenerator<'a, 'p> {
     contexts: &'a mut VvcCabacContexts,
@@ -291,6 +359,7 @@ struct VvcLumaModeNeighbourState {
     cell_width: usize,
     valid: Vec<bool>,
     modes: Vec<VvcIntraPredictionMode>,
+    mip_flags: Vec<bool>,
 }
 
 impl VvcLumaModeNeighbourState {
@@ -304,6 +373,7 @@ impl VvcLumaModeNeighbourState {
             cell_width,
             valid: vec![false; samples],
             modes: vec![VvcIntraPredictionMode::Planar; samples],
+            mip_flags: vec![false; samples],
         }
     }
 
@@ -321,12 +391,28 @@ impl VvcLumaModeNeighbourState {
         self.valid[index].then_some(self.modes[index])
     }
 
+    fn mip_flag_at(&self, x: u16, y: u16) -> bool {
+        self.index(x, y)
+            .filter(|&index| self.valid[index])
+            .is_some_and(|index| self.mip_flags[index])
+    }
+
     fn left_of(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
         let x = node.x.checked_sub(1)?;
         let y = (node.y + node.height)
             .saturating_sub(1)
             .min(self.height.saturating_sub(1));
         self.mode_at(x, y)
+    }
+
+    fn left_mip_flag_of(&self, node: VvcCodingTreeNode) -> bool {
+        let Some(x) = node.x.checked_sub(1) else {
+            return false;
+        };
+        let y = (node.y + node.height)
+            .saturating_sub(1)
+            .min(self.height.saturating_sub(1));
+        self.mip_flag_at(x, y)
     }
 
     fn above_of(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
@@ -338,6 +424,16 @@ impl VvcLumaModeNeighbourState {
             .saturating_sub(1)
             .min(self.width.saturating_sub(1));
         self.mode_at(x, y)
+    }
+
+    fn above_mip_flag_of(&self, node: VvcCodingTreeNode) -> bool {
+        let Some(y) = node.y.checked_sub(1) else {
+            return false;
+        };
+        let x = (node.x + node.width)
+            .saturating_sub(1)
+            .min(self.width.saturating_sub(1));
+        self.mip_flag_at(x, y)
     }
 
     fn co_located_for_chroma(&self, node: VvcCodingTreeNode) -> Option<VvcIntraPredictionMode> {
@@ -367,6 +463,7 @@ impl VvcLumaModeNeighbourState {
                 let index = usize::from(cell_y) * self.cell_width + usize::from(cell_x);
                 self.valid[index] = true;
                 self.modes[index] = mode;
+                self.mip_flags[index] = false;
             }
         }
     }
@@ -529,8 +626,13 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 split_ctx,
             } => {
                 self.emit_luma_leaf_split_with_ctx(cabac, node, write_split_flag, split_ctx);
-                self.emit_luma_multi_ref_line(cabac, node);
-                self.emit_luma_intra_prediction_mode(cabac, node, luma_mode_neighbours);
+                if !self.emit_luma_bdpcm_mode(cabac, node, luma_mode_neighbours) {
+                    if !self.emit_luma_mip_mode(cabac, node, luma_mode_neighbours) {
+                        self.emit_luma_multi_ref_line(cabac, node);
+                        self.emit_luma_isp_mode(cabac, node);
+                        self.emit_luma_intra_prediction_mode(cabac, node, luma_mode_neighbours);
+                    }
+                }
                 self.emit_luma_residual(cabac, node);
             }
             VvcCtuCabacOp::ChromaTree {
@@ -716,6 +818,63 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         neighbours.mark_leaf(node, mode);
     }
 
+    fn emit_luma_bdpcm_mode(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        neighbours: &mut VvcLumaModeNeighbourState,
+    ) -> bool {
+        if !self.luma_bdpcm_allowed(node) {
+            return false;
+        }
+        let mode = self.params.luma_tu_bdpcm_modes[self.luma_tu_index];
+        self.contexts
+            .encode(cabac, VvcCabacContext::BdpcmMode(0), mode.is_enabled());
+        if mode.is_enabled() {
+            self.contexts.encode(
+                cabac,
+                VvcCabacContext::BdpcmMode(1),
+                matches!(mode, VvcBdpcmMode::Vertical),
+            );
+            neighbours.mark_leaf(
+                node,
+                mode.inferred_intra_mode()
+                    .expect("enabled BDPCM mode has an inferred intra mode"),
+            );
+        }
+        mode.is_enabled()
+    }
+
+    fn emit_luma_mip_mode(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        neighbours: &mut VvcLumaModeNeighbourState,
+    ) -> bool {
+        if !self.slice_config.tools.mip_enabled {
+            return false;
+        }
+        let ctx = self.luma_mip_flag_ctx(node, neighbours);
+        // Active MIP prediction still needs the matrix predictor tables and
+        // syntax payload. Keep the spec flag site wired and emit no-MIP for
+        // now when a gated config enables the SPS capability.
+        self.contexts
+            .encode(cabac, VvcCabacContext::MipFlag(ctx), false);
+        false
+    }
+
+    fn luma_mip_flag_ctx(
+        &self,
+        node: VvcCodingTreeNode,
+        neighbours: &VvcLumaModeNeighbourState,
+    ) -> u8 {
+        if node.width > node.height.saturating_mul(2) || node.height > node.width.saturating_mul(2)
+        {
+            return 3;
+        }
+        u8::from(neighbours.left_mip_flag_of(node)) + u8::from(neighbours.above_mip_flag_of(node))
+    }
+
     fn emit_luma_multi_ref_line(&mut self, cabac: &mut VvcCabacEncoder, node: VvcCodingTreeNode) {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeLuma);
         // With sps_mrl_enabled_flag set, VVC extend_ref_line emits
@@ -737,11 +896,47 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         }
     }
 
-    fn emit_luma_cbf(&mut self, cabac: &mut VvcCabacEncoder, node: VvcCodingTreeNode, cbf: bool) {
+    fn emit_luma_isp_mode(&mut self, cabac: &mut VvcCabacEncoder, node: VvcCodingTreeNode) {
+        if !self.luma_isp_allowed(node) {
+            return;
+        }
+        // Active ISP needs split transform-tree ownership. Emit the NONE flag
+        // at the VTM syntax site while the production selector remains absent.
+        self.contexts
+            .encode(cabac, VvcCabacContext::IspMode(0), false);
+    }
+
+    fn luma_bdpcm_allowed(&self, node: VvcCodingTreeNode) -> bool {
+        self.slice_config.tools.bdpcm_enabled
+            && node.width <= 8
+            && node.height <= 8
+            && node.width >= 4
+            && node.height >= 4
+    }
+
+    fn luma_isp_allowed(&self, node: VvcCodingTreeNode) -> bool {
+        self.slice_config.tools.isp_enabled
+            && self.params.luma_tu_mrl_index[self.luma_tu_index] == 0
+            && node.width >= 4
+            && node.height >= 4
+            && node.width <= 64
+            && node.height <= 64
+            && node.width.is_power_of_two()
+            && node.height.is_power_of_two()
+    }
+
+    fn emit_luma_cbf(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        cbf: bool,
+        bdpcm: bool,
+    ) {
         debug_assert_eq!(node.tree_type, VvcTreeType::DualTreeLuma);
         // VVC 7.3.11.10 transform_unit emits tu_y_coded_flag / cbf_comp
         // through QtCbf[Y].
-        self.contexts.encode(cabac, VvcCabacContext::QtCbfY(0), cbf);
+        self.contexts
+            .encode(cabac, VvcCabacContext::QtCbfY(u8::from(bdpcm)), cbf);
     }
 
     fn emit_luma_residual(&mut self, cabac: &mut VvcCabacEncoder, node: VvcCodingTreeNode) {
@@ -753,7 +948,8 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         );
         let dc_level = self.params.luma_tu_dc_levels[tu_idx];
         let cbf = dc_level != 0 || self.params.luma_tu_has_ac[tu_idx];
-        self.emit_luma_cbf(cabac, node, cbf);
+        let bdpcm_mode = self.params.luma_tu_bdpcm_modes[tu_idx];
+        self.emit_luma_cbf(cabac, node, cbf, bdpcm_mode.is_enabled());
         if !cbf {
             return;
         }
@@ -773,6 +969,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             ac_levels,
             has_ac,
             transform_skip,
+            bdpcm_mode.is_enabled(),
             mts_index,
             &mut residual,
             cabac,
@@ -781,6 +978,42 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
     }
 
     fn emit_luma_post_residual_tools(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        has_ac: bool,
+        transform_skip: bool,
+        mts_index: u8,
+    ) {
+        self.emit_luma_lfnst_idx(cabac, node, has_ac, transform_skip, mts_index);
+        self.emit_luma_mts_idx(cabac, node, has_ac, transform_skip, mts_index);
+    }
+
+    fn emit_luma_lfnst_idx(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        has_ac: bool,
+        transform_skip: bool,
+        mts_index: u8,
+    ) {
+        if !self.slice_config.tools.lfnst_enabled
+            || transform_skip
+            || mts_index != 0
+            || !has_ac
+            || node.width > 64
+            || node.height > 64
+        {
+            return;
+        }
+        // Active LFNST needs transform-domain candidate ownership and
+        // coefficient-group constraints. Keep the syntax site wired and emit
+        // lfnst_idx=0 while production selection is absent.
+        self.contexts
+            .encode(cabac, VvcCabacContext::LfnstIdx(0), false);
+    }
+
+    fn emit_luma_mts_idx(
         &mut self,
         cabac: &mut VvcCabacEncoder,
         node: VvcCodingTreeNode,
@@ -1136,6 +1369,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
         ac_levels: &[i16; VVC_CHROMA_AC_COEFFS_PER_TU],
         has_ac: bool,
         transform_skip: bool,
+        bdpcm: bool,
     ) {
         let width = usize::from(vvc_chroma_width(node, chroma_sampling));
         let height = usize::from(vvc_chroma_height(node, chroma_sampling));
@@ -1150,6 +1384,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             ac_levels,
             has_ac,
             transform_skip,
+            bdpcm,
             &mut residual,
             cabac,
         );
@@ -1177,16 +1412,29 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             tu_idx < self.params.chroma_tu_count,
             "missing chroma TU coefficient data for coding-tree leaf {tu_idx}"
         );
-        self.emit_chroma_intra_prediction_mode(cabac, node, tu_idx, luma_mode_neighbours);
+        let chroma_bdpcm_mode = self.params.chroma_tu_bdpcm_modes[tu_idx];
+        if !self.emit_chroma_bdpcm_mode(cabac, node, chroma_bdpcm_mode) {
+            self.emit_chroma_intra_prediction_mode(cabac, node, tu_idx, luma_mode_neighbours);
+        }
         self.chroma_tu_index += 1;
         let cb_dc_level = self.params.cb_tu_dc_levels[tu_idx];
         let cr_dc_level = self.params.cr_tu_dc_levels[tu_idx];
         let cbf_cb = cb_dc_level != 0 || self.params.cb_tu_has_ac[tu_idx];
         let cbf_cr = cr_dc_level != 0 || self.params.cr_tu_has_ac[tu_idx];
+        let cbf_cb_ctx = if chroma_bdpcm_mode.is_enabled() {
+            1
+        } else {
+            cbf_cb_ctx
+        };
+        let cbf_cr_ctx = if chroma_bdpcm_mode.is_enabled() {
+            2
+        } else {
+            u8::from(cbf_cb)
+        };
         self.contexts
             .encode(cabac, VvcCabacContext::QtCbfCb(cbf_cb_ctx), cbf_cb);
         self.contexts
-            .encode(cabac, VvcCabacContext::QtCbfCr(u8::from(cbf_cb)), cbf_cr);
+            .encode(cabac, VvcCabacContext::QtCbfCr(cbf_cr_ctx), cbf_cr);
         if cbf_cb {
             Self::emit_chroma_residual(
                 &mut *self.contexts,
@@ -1199,6 +1447,7 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 &self.params.cb_tu_ac_levels[tu_idx],
                 self.params.cb_tu_has_ac[tu_idx],
                 self.params.cb_tu_transform_skip[tu_idx],
+                chroma_bdpcm_mode.is_enabled(),
             );
         }
         if cbf_cr {
@@ -1213,9 +1462,31 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 &self.params.cr_tu_ac_levels[tu_idx],
                 self.params.cr_tu_has_ac[tu_idx],
                 self.params.cr_tu_transform_skip[tu_idx],
+                chroma_bdpcm_mode.is_enabled(),
             );
         }
         neighbours.mark_leaf(node);
+    }
+
+    fn emit_chroma_bdpcm_mode(
+        &mut self,
+        cabac: &mut VvcCabacEncoder,
+        node: VvcCodingTreeNode,
+        mode: VvcBdpcmMode,
+    ) -> bool {
+        if !self.chroma_bdpcm_allowed(node) {
+            return false;
+        }
+        self.contexts
+            .encode(cabac, VvcCabacContext::BdpcmMode(2), mode.is_enabled());
+        if mode.is_enabled() {
+            self.contexts.encode(
+                cabac,
+                VvcCabacContext::BdpcmMode(3),
+                matches!(mode, VvcBdpcmMode::Vertical),
+            );
+        }
+        mode.is_enabled()
     }
 
     fn emit_chroma_intra_prediction_mode(
@@ -1286,6 +1557,15 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
             return false;
         }
         vvc_chroma_cclm_node_allowed(node)
+    }
+
+    fn chroma_bdpcm_allowed(&self, node: VvcCodingTreeNode) -> bool {
+        if !self.slice_config.tools.bdpcm_enabled {
+            return false;
+        }
+        let chroma_width = vvc_chroma_width(node, self.params.chroma_sampling);
+        let chroma_height = vvc_chroma_height(node, self.params.chroma_sampling);
+        chroma_width <= 8 && chroma_height <= 8 && chroma_width >= 4 && chroma_height >= 4
     }
 
     fn chroma_split_ctx(

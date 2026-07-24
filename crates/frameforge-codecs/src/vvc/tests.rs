@@ -322,6 +322,7 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
         luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
         luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
+        luma_tu_bdpcm_modes: [VvcBdpcmMode::None; MAX_VVC_LUMA_TUS],
         luma_tu_mrl_index: [0; MAX_VVC_LUMA_TUS],
         luma_tu_mts_index: [0; MAX_VVC_LUMA_TUS],
         luma_tu_count: 1,
@@ -335,6 +336,7 @@ fn vvc_quantized_color(y: u8, luma_rem: u8) -> VvcQuantizedColor {
         cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
         cb_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
         cr_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
+        chroma_tu_bdpcm_modes: [VvcBdpcmMode::None; MAX_VVC_CHROMA_TUS],
         cb_rem: 16,
         cr_rem: 16,
         #[cfg(feature = "vvc-stats")]
@@ -607,14 +609,19 @@ fn vvc_sps_tool_flags_follow_the_active_slice_config() {
         vvc_ue_value(&rbsp, "sps_max_mtt_hierarchy_depth_intra_slice_luma"),
         u32::from(VVC_CURRENT_MAX_LUMA_MTT_DEPTH)
     );
-    assert_vvc_flag(&rbsp, "sps_transform_skip_enabled_flag", false);
-    assert_vvc_field_absent(&rbsp, "sps_log2_transform_skip_max_size_minus2");
-    assert_vvc_field_absent(&rbsp, "sps_bdpcm_enabled_flag");
+    assert_vvc_flag(&rbsp, "sps_transform_skip_enabled_flag", true);
+    assert_eq!(
+        vvc_ue_value(&rbsp, "sps_log2_transform_skip_max_size_minus2"),
+        1
+    );
+    assert_vvc_flag(&rbsp, "sps_bdpcm_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_mts_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_explicit_mts_intra_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_explicit_mts_inter_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_lfnst_enabled_flag", false);
+    assert_vvc_flag(&rbsp, "sps_isp_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_mrl_enabled_flag", true);
+    assert_vvc_flag(&rbsp, "sps_mip_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_cclm_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_palette_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_dep_quant_enabled_flag", false);
@@ -640,6 +647,8 @@ fn vvc_sps_tool_flags_can_enable_gated_tools_from_one_config() {
     config.tools.transform_skip_enabled = true;
     config.tools.explicit_mts_intra_enabled = true;
     config.tools.lfnst_enabled = true;
+    config.tools.isp_enabled = true;
+    config.tools.mip_enabled = true;
     config.tools.dependent_quantization_enabled = true;
     config.tools.sign_data_hiding_enabled = true;
 
@@ -649,11 +658,13 @@ fn vvc_sps_tool_flags_can_enable_gated_tools_from_one_config() {
         vvc_ue_value(&rbsp, "sps_log2_transform_skip_max_size_minus2"),
         1
     );
-    assert_vvc_flag(&rbsp, "sps_bdpcm_enabled_flag", false);
+    assert_vvc_flag(&rbsp, "sps_bdpcm_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_mts_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_explicit_mts_intra_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_explicit_mts_inter_enabled_flag", false);
     assert_vvc_flag(&rbsp, "sps_lfnst_enabled_flag", true);
+    assert_vvc_flag(&rbsp, "sps_isp_enabled_flag", true);
+    assert_vvc_flag(&rbsp, "sps_mip_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_dep_quant_enabled_flag", true);
     assert_vvc_flag(&rbsp, "sps_sign_data_hiding_enabled_flag", true);
 
@@ -1046,6 +1057,12 @@ fn vvc_contexts_include_residual_init_tables() {
     assert_eq!(VvcCabacContext::BdpcmMode(3).log2_window_size(), 0);
     assert_eq!(VvcCabacContext::MtsIdx(2).init_value(), 28);
     assert_eq!(VvcCabacContext::MtsIdx(2).log2_window_size(), 9);
+    assert_eq!(VvcCabacContext::MipFlag(2).init_value(), 50);
+    assert_eq!(VvcCabacContext::MipFlag(3).log2_window_size(), 6);
+    assert_eq!(VvcCabacContext::IspMode(1).init_value(), 43);
+    assert_eq!(VvcCabacContext::IspMode(1).log2_window_size(), 2);
+    assert_eq!(VvcCabacContext::LfnstIdx(1).init_value(), 52);
+    assert_eq!(VvcCabacContext::LfnstIdx(2).log2_window_size(), 10);
     assert_eq!(VvcCabacContext::LastSigCoeffXPrefix(20).init_value(), 12);
     assert_eq!(
         VvcCabacContext::LastSigCoeffYPrefix(20).log2_window_size(),
@@ -1305,6 +1322,52 @@ fn vvc_ctu_body_emits_mts_idx_after_luma_residual_when_enabled() {
 }
 
 #[test]
+fn vvc_ctu_body_emits_inactive_lfnst_idx_when_enabled() {
+    let neutral = quantize_vvc_color(VvcSampledColor {
+        y: 128,
+        u: 128,
+        v: 128,
+    });
+    let mut params = vvc_ctu_partition_params(
+        VvcVideoGeometry {
+            width: 16,
+            height: 16,
+        },
+        neutral,
+    )
+    .expect("16x16 partition parameters");
+    params.luma_tu_ac_levels[0][0] = 1;
+    params.luma_tu_has_ac[0] = true;
+
+    let mut config = vvc_test_slice_config();
+    config.tools.lfnst_enabled = true;
+
+    let mut contexts = initial_vvc_cabac_contexts(config);
+    let initial_lfnst_state = contexts.lfnst_idx[0].state();
+    let mut cabac = VvcCabacEncoder::new();
+    cabac.start();
+    encode_ctu_partition_body_with_contexts(&mut cabac, &mut contexts, &params, config);
+
+    assert_ne!(contexts.lfnst_idx[0].state(), initial_lfnst_state);
+
+    params.luma_tu_transform_skip[0] = true;
+    let mut transform_skip_config = config;
+    transform_skip_config.tools.transform_skip_enabled = true;
+    let mut contexts = initial_vvc_cabac_contexts(transform_skip_config);
+    let initial_lfnst_state = contexts.lfnst_idx[0].state();
+    let mut cabac = VvcCabacEncoder::new();
+    cabac.start();
+    encode_ctu_partition_body_with_contexts(
+        &mut cabac,
+        &mut contexts,
+        &params,
+        transform_skip_config,
+    );
+
+    assert_eq!(contexts.lfnst_idx[0].state(), initial_lfnst_state);
+}
+
+#[test]
 fn vvc_luma_mts_syntax_supports_non_default_transform_indices() {
     let neutral = quantize_vvc_color(VvcSampledColor {
         y: 128,
@@ -1535,6 +1598,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
+            luma_tu_bdpcm_modes: [VvcBdpcmMode::None; MAX_VVC_LUMA_TUS],
             luma_tu_mrl_index: [0; MAX_VVC_LUMA_TUS],
             luma_tu_mts_index: [0; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
@@ -1548,6 +1612,7 @@ fn vvc_ctu_cabac_generator_uses_one_recursive_luma_base() {
             cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
             cb_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
             cr_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
+            chroma_tu_bdpcm_modes: [VvcBdpcmMode::None; MAX_VVC_CHROMA_TUS],
         };
         let ops = VvcCtuCabacOp::ctu_partition(&params);
         let chroma_nodes: Vec<_> = ops
@@ -1705,6 +1770,63 @@ fn vvc_luma_leaf_size_selector_is_shared_across_formats() {
             );
         }
     }
+}
+
+#[test]
+fn vvc_ctu_luma_leaf_size_selector_uses_local_split_gain() {
+    let bit_depth = SampleBitDepth::new(8).expect("supported VVC bit depth");
+    let format = VvcPictureFormat {
+        chroma_sampling: ChromaSampling::Cs420,
+        bit_depth,
+    };
+    let geometry = VvcVideoGeometry {
+        width: 64,
+        height: 64,
+    };
+    let chroma_len = (geometry.width / 2) * (geometry.height / 2);
+    let region = VvcCtuRegion {
+        slice_address: 0,
+        origin_x: 0,
+        origin_y: 0,
+        geometry,
+    };
+    let lossy_policy = VvcResidualCodingPolicy::new(format, VvcResidualCodingMode::Lossy);
+    let lossless_policy = VvcResidualCodingPolicy::new(format, VvcResidualCodingMode::Lossless);
+    let flat = VvcSampledFrame {
+        geometry,
+        format,
+        luma: vec![128; geometry.luma_samples()],
+        cb: vec![128; chroma_len],
+        cr: vec![128; chroma_len],
+        chroma_len,
+    };
+    assert_eq!(
+        select_vvc_luma_max_leaf_size_for_ctu(lossy_policy, &flat, region, 24),
+        VVC_CURRENT_MAX_LUMA_LEAF_SIZE
+    );
+    assert_eq!(
+        select_vvc_luma_max_leaf_size_for_ctu(lossless_policy, &flat, region, 24),
+        VVC_LOSSLESS_LUMA_LEAF_SIZE
+    );
+
+    let mut checker_luma = Vec::with_capacity(geometry.luma_samples());
+    for y in 0..geometry.height {
+        for x in 0..geometry.width {
+            checker_luma.push(if ((x / 4) + (y / 4)) & 1 == 0 { 0 } else { 255 });
+        }
+    }
+    let checker = VvcSampledFrame {
+        geometry,
+        format,
+        luma: checker_luma,
+        cb: vec![128; chroma_len],
+        cr: vec![128; chroma_len],
+        chroma_len,
+    };
+    assert_eq!(
+        select_vvc_luma_max_leaf_size_for_ctu(lossy_policy, &checker, region, 24),
+        VVC_LOSSLESS_LUMA_LEAF_SIZE
+    );
 }
 
 #[test]
@@ -2182,6 +2304,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             luma_tu_ac_levels: [[0; VVC_LUMA_AC_COEFFS_PER_TU]; MAX_VVC_LUMA_TUS],
             luma_tu_has_ac: [false; MAX_VVC_LUMA_TUS],
             luma_tu_transform_skip: [false; MAX_VVC_LUMA_TUS],
+            luma_tu_bdpcm_modes: [VvcBdpcmMode::None; MAX_VVC_LUMA_TUS],
             luma_tu_mrl_index: [0; MAX_VVC_LUMA_TUS],
             luma_tu_mts_index: [0; MAX_VVC_LUMA_TUS],
             cb_dc_abs_level: 0,
@@ -2195,6 +2318,7 @@ fn vvc_ctu_chroma_tree_uses_luma_coordinate_root() {
             cr_tu_has_ac: [false; MAX_VVC_CHROMA_TUS],
             cb_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
             cr_tu_transform_skip: [false; MAX_VVC_CHROMA_TUS],
+            chroma_tu_bdpcm_modes: [VvcBdpcmMode::None; MAX_VVC_CHROMA_TUS],
         };
         let root = params.ctu_chroma_root();
         assert_eq!((root.width, root.height), expected_root);

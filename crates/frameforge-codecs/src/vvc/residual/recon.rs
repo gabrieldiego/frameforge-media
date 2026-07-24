@@ -6,18 +6,22 @@ use super::super::{
     VvcIntraPredictionMode, VvcSample, VvcSampledFrame, VvcVideoGeometry,
 };
 use super::quant::{
-    reconstruct_vvc_chroma_transform_skip_residuals_into,
-    reconstruct_vvc_luma_transform_skip_residuals_into,
+    reconstruct_vvc_chroma_bdpcm_transform_skip_residuals_into_with_qp,
+    reconstruct_vvc_chroma_transform_skip_residuals_into_with_qp,
+    reconstruct_vvc_luma_bdpcm_transform_skip_residuals_into_with_qp,
+    reconstruct_vvc_luma_transform_skip_residuals_into_with_qp,
 };
 use super::{
     fill_visible_chroma_node, fill_visible_luma_node,
-    inverse_transform_vvc_chroma_quantized_block_into,
+    inverse_transform_vvc_chroma_quantized_block_into_with_qp,
     inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts,
+    predict_vvc_chroma_bdpcm_block_into_with_availability,
     predict_vvc_chroma_cclm_block_into_with_availability,
     predict_vvc_chroma_intra_block_into_with_availability,
+    predict_vvc_luma_bdpcm_block_into_with_availability,
     predict_vvc_luma_intra_block_into_with_mrl_and_availability, VvcDcPredictionScratch,
     VvcInverseTransformScratch, VvcPlaneAvailability, VvcQuantizedColor, MAX_VVC_LUMA_TUS,
-    VVC_DEFAULT_LOSSY_LUMA_QP,
+    VVC_DEFAULT_LOSSY_CHROMA_QP, VVC_DEFAULT_LOSSY_LUMA_QP,
 };
 
 pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
@@ -25,9 +29,31 @@ pub(in crate::vvc) fn reconstruct_vvc_residual_frame(
     quantized: VvcQuantizedColor,
     partition_params: VvcCtuPartitionParams,
 ) -> Vec<VvcSample> {
+    reconstruct_vvc_residual_frame_with_qp(
+        frame,
+        quantized,
+        partition_params,
+        VVC_DEFAULT_LOSSY_LUMA_QP,
+        VVC_DEFAULT_LOSSY_CHROMA_QP,
+    )
+}
+
+pub(in crate::vvc) fn reconstruct_vvc_residual_frame_with_qp(
+    frame: &VvcSampledFrame,
+    quantized: VvcQuantizedColor,
+    partition_params: VvcCtuPartitionParams,
+    luma_qp: i32,
+    chroma_qp: i32,
+) -> Vec<VvcSample> {
     match frame.format.chroma_sampling {
         ChromaSampling::Cs420 | ChromaSampling::Cs422 | ChromaSampling::Cs444 => {
-            reconstruct_vvc_residual_frame_planar(frame, quantized, partition_params)
+            reconstruct_vvc_residual_frame_planar(
+                frame,
+                quantized,
+                partition_params,
+                luma_qp,
+                chroma_qp,
+            )
         }
         other => {
             unimplemented!("residual reconstruction is not wired for {other:?}")
@@ -39,6 +65,8 @@ fn reconstruct_vvc_residual_frame_planar(
     frame: &VvcSampledFrame,
     quantized: VvcQuantizedColor,
     partition_params: VvcCtuPartitionParams,
+    luma_qp: i32,
+    chroma_qp: i32,
 ) -> Vec<VvcSample> {
     let layout = PlanarYuvGeometry::for_validated_shape(
         frame.geometry.width,
@@ -57,28 +85,60 @@ fn reconstruct_vvc_residual_frame_planar(
     let shape = partition_params.shape();
     let luma_nodes = vvc_luma_transform_nodes(shape, partition_params.luma_max_leaf_size);
     for node in luma_nodes.iter().copied() {
-        predict_vvc_luma_intra_block_into_with_mrl_and_availability(
-            &mut predicted_luma,
-            &mut prediction_scratch,
-            quantized.luma_tu_intra_modes[tu_idx],
-            &luma,
-            frame.geometry,
-            node,
-            frame.format.bit_depth,
-            quantized.luma_tu_mrl_index[tu_idx],
-            Some(VvcPlaneAvailability::new(
-                &luma_available,
-                frame.geometry.width,
-            )),
-        );
-        if quantized.luma_tu_transform_skip[tu_idx] {
-            reconstruct_vvc_luma_transform_skip_residuals_into(
-                &mut residuals,
-                quantized.luma_tu_dc_levels[tu_idx],
-                &quantized.luma_tu_ac_levels[tu_idx],
-                usize::from(node.width),
-                usize::from(node.height),
+        let luma_bdpcm_mode = quantized.luma_tu_bdpcm_modes[tu_idx];
+        if luma_bdpcm_mode.is_enabled() {
+            predict_vvc_luma_bdpcm_block_into_with_availability(
+                &mut predicted_luma,
+                &mut prediction_scratch,
+                luma_bdpcm_mode,
+                &luma,
+                frame.geometry,
+                node,
+                frame.format.bit_depth,
+                Some(VvcPlaneAvailability::new(
+                    &luma_available,
+                    frame.geometry.width,
+                )),
             );
+        } else {
+            predict_vvc_luma_intra_block_into_with_mrl_and_availability(
+                &mut predicted_luma,
+                &mut prediction_scratch,
+                quantized.luma_tu_intra_modes[tu_idx],
+                &luma,
+                frame.geometry,
+                node,
+                frame.format.bit_depth,
+                quantized.luma_tu_mrl_index[tu_idx],
+                Some(VvcPlaneAvailability::new(
+                    &luma_available,
+                    frame.geometry.width,
+                )),
+            );
+        }
+        if quantized.luma_tu_transform_skip[tu_idx] {
+            if luma_bdpcm_mode.is_enabled() {
+                reconstruct_vvc_luma_bdpcm_transform_skip_residuals_into_with_qp(
+                    &mut residuals,
+                    quantized.luma_tu_dc_levels[tu_idx],
+                    &quantized.luma_tu_ac_levels[tu_idx],
+                    usize::from(node.width),
+                    usize::from(node.height),
+                    frame.format.bit_depth,
+                    luma_qp,
+                    luma_bdpcm_mode,
+                );
+            } else {
+                reconstruct_vvc_luma_transform_skip_residuals_into_with_qp(
+                    &mut residuals,
+                    quantized.luma_tu_dc_levels[tu_idx],
+                    &quantized.luma_tu_ac_levels[tu_idx],
+                    usize::from(node.width),
+                    usize::from(node.height),
+                    frame.format.bit_depth,
+                    luma_qp,
+                );
+            }
         } else {
             inverse_transform_vvc_luma_quantized_block_into_with_qp_and_mts(
                 &mut residuals,
@@ -88,7 +148,7 @@ fn reconstruct_vvc_residual_frame_planar(
                 quantized.luma_tu_dc_levels[tu_idx],
                 &quantized.luma_tu_ac_levels[tu_idx],
                 frame.format.bit_depth,
-                VVC_DEFAULT_LOSSY_LUMA_QP,
+                luma_qp,
                 quantized.luma_tu_mts_index[tu_idx],
             );
         }
@@ -149,16 +209,45 @@ fn reconstruct_vvc_residual_frame_planar(
         );
         let chroma_node_width = node.width / chroma_subsample_x(chroma_sampling) as u16;
         let chroma_node_height = node.height / chroma_subsample_y(chroma_sampling) as u16;
-        if quantized.cb_tu_transform_skip[tu_idx] {
-            reconstruct_vvc_chroma_transform_skip_residuals_into(
-                &mut residuals,
-                quantized.cb_tu_dc_levels[tu_idx],
-                &quantized.cb_tu_ac_levels[tu_idx],
-                usize::from(chroma_node_width),
-                usize::from(chroma_node_height),
+        let chroma_bdpcm_mode = quantized.chroma_tu_bdpcm_modes[tu_idx];
+        if chroma_bdpcm_mode.is_enabled() {
+            predict_vvc_chroma_bdpcm_block_into_with_availability(
+                &mut predicted_cb,
+                &mut prediction_scratch,
+                chroma_bdpcm_mode,
+                &cb,
+                frame.geometry,
+                node,
+                chroma_sampling,
+                frame.format.bit_depth,
+                Some(VvcPlaneAvailability::new(&cb_available, frame_chroma_width)),
             );
+        }
+        if quantized.cb_tu_transform_skip[tu_idx] {
+            if chroma_bdpcm_mode.is_enabled() {
+                reconstruct_vvc_chroma_bdpcm_transform_skip_residuals_into_with_qp(
+                    &mut residuals,
+                    quantized.cb_tu_dc_levels[tu_idx],
+                    &quantized.cb_tu_ac_levels[tu_idx],
+                    usize::from(chroma_node_width),
+                    usize::from(chroma_node_height),
+                    frame.format.bit_depth,
+                    chroma_qp,
+                    chroma_bdpcm_mode,
+                );
+            } else {
+                reconstruct_vvc_chroma_transform_skip_residuals_into_with_qp(
+                    &mut residuals,
+                    quantized.cb_tu_dc_levels[tu_idx],
+                    &quantized.cb_tu_ac_levels[tu_idx],
+                    usize::from(chroma_node_width),
+                    usize::from(chroma_node_height),
+                    frame.format.bit_depth,
+                    chroma_qp,
+                );
+            }
         } else {
-            inverse_transform_vvc_chroma_quantized_block_into(
+            inverse_transform_vvc_chroma_quantized_block_into_with_qp(
                 &mut residuals,
                 &mut transform_scratch,
                 chroma_node_width,
@@ -166,6 +255,7 @@ fn reconstruct_vvc_residual_frame_planar(
                 quantized.cb_tu_dc_levels[tu_idx],
                 &quantized.cb_tu_ac_levels[tu_idx],
                 frame.format.bit_depth,
+                chroma_qp,
             );
         }
         fill_visible_chroma_node(
@@ -177,33 +267,62 @@ fn reconstruct_vvc_residual_frame_planar(
             &residuals,
             frame.format.bit_depth,
         );
-        predict_vvc_recon_chroma_mode_into(
-            &mut predicted_cr,
-            &mut prediction_scratch,
-            chroma_mode,
-            co_located_luma_mode,
-            &cr,
-            &luma,
-            frame.geometry,
-            node,
-            chroma_sampling,
-            frame.format.bit_depth,
-            Some(VvcPlaneAvailability::new(&cr_available, frame_chroma_width)),
-            Some(VvcPlaneAvailability::new(
-                &luma_available,
-                frame.geometry.width,
-            )),
-        );
-        if quantized.cr_tu_transform_skip[tu_idx] {
-            reconstruct_vvc_chroma_transform_skip_residuals_into(
-                &mut residuals,
-                quantized.cr_tu_dc_levels[tu_idx],
-                &quantized.cr_tu_ac_levels[tu_idx],
-                usize::from(chroma_node_width),
-                usize::from(chroma_node_height),
+        if chroma_bdpcm_mode.is_enabled() {
+            predict_vvc_chroma_bdpcm_block_into_with_availability(
+                &mut predicted_cr,
+                &mut prediction_scratch,
+                chroma_bdpcm_mode,
+                &cr,
+                frame.geometry,
+                node,
+                chroma_sampling,
+                frame.format.bit_depth,
+                Some(VvcPlaneAvailability::new(&cr_available, frame_chroma_width)),
             );
         } else {
-            inverse_transform_vvc_chroma_quantized_block_into(
+            predict_vvc_recon_chroma_mode_into(
+                &mut predicted_cr,
+                &mut prediction_scratch,
+                chroma_mode,
+                co_located_luma_mode,
+                &cr,
+                &luma,
+                frame.geometry,
+                node,
+                chroma_sampling,
+                frame.format.bit_depth,
+                Some(VvcPlaneAvailability::new(&cr_available, frame_chroma_width)),
+                Some(VvcPlaneAvailability::new(
+                    &luma_available,
+                    frame.geometry.width,
+                )),
+            );
+        }
+        if quantized.cr_tu_transform_skip[tu_idx] {
+            if chroma_bdpcm_mode.is_enabled() {
+                reconstruct_vvc_chroma_bdpcm_transform_skip_residuals_into_with_qp(
+                    &mut residuals,
+                    quantized.cr_tu_dc_levels[tu_idx],
+                    &quantized.cr_tu_ac_levels[tu_idx],
+                    usize::from(chroma_node_width),
+                    usize::from(chroma_node_height),
+                    frame.format.bit_depth,
+                    chroma_qp,
+                    chroma_bdpcm_mode,
+                );
+            } else {
+                reconstruct_vvc_chroma_transform_skip_residuals_into_with_qp(
+                    &mut residuals,
+                    quantized.cr_tu_dc_levels[tu_idx],
+                    &quantized.cr_tu_ac_levels[tu_idx],
+                    usize::from(chroma_node_width),
+                    usize::from(chroma_node_height),
+                    frame.format.bit_depth,
+                    chroma_qp,
+                );
+            }
+        } else {
+            inverse_transform_vvc_chroma_quantized_block_into_with_qp(
                 &mut residuals,
                 &mut transform_scratch,
                 chroma_node_width,
@@ -211,6 +330,7 @@ fn reconstruct_vvc_residual_frame_planar(
                 quantized.cr_tu_dc_levels[tu_idx],
                 &quantized.cr_tu_ac_levels[tu_idx],
                 frame.format.bit_depth,
+                chroma_qp,
             );
         }
         fill_visible_chroma_node(

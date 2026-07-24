@@ -3660,6 +3660,513 @@ make benchmark-encode-matrix \
   ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-frame-luma-mode-state-1f.json
 ```
 
+## VVC Intra Parity Checklist
+
+Checkpoint in progress: `vvc-intra-parity`.
+
+The AV2 encoder is still ahead of the VVC intra encoder in both implemented
+mode surface and mode-selection efficiency. The VVC residual path is now mostly
+unified across lossy/lossless, bit depth, and chroma sampling, so new intra work
+should land as selectable tools inside that path rather than as separate
+format-specific encoders.
+
+Current gaps to close against AV2-style intra behavior:
+
+1. Reuse finalized RD decisions. VVC lossy MRL scoring quantizes candidate
+   residuals; TU finalization must reuse the selected quantized block instead
+   of recomputing it.
+2. Rank more predictor choices by emitted/reconstructed cost. AV2 uses sampled
+   RD-style scores for lossy intra decisions, while VVC still selects most
+   luma/chroma predictors from raw residual energy.
+3. Integrate screen-content mode choice into the residual path. VVC has
+   palette, IBC, transform-skip residual, and BDPCM helpers, but they remain a
+   separate 4:4:4 path instead of competing against residual intra decisions.
+4. Finish safe non-DCT2 MTS selection. Syntax, transform plumbing, a
+   one-candidate selector, and stats counters exist. Production selection stays
+   disabled because the validated selector probes were not yet rate/FPS
+   positive on the six-vector first-frame matrix.
+5. Continue refining lossy transform-skip/BDPCM selection. Lossy transform-skip
+   and regular luma/chroma BDPCM now compete inside the residual path, but the
+   selector should still learn better rate pruning from the stats traces.
+6. Add VVC-only intra tools that are not AV2 analogues but are needed for
+   parity in practice. MIP/ISP/LFNST CABAC contexts and SPS flags are now
+   plumbed; active MIP, active ISP, and LFNST transform selection still need
+   predictor/transform ownership before they can compete in production.
+7. Improve partition/transform-size decisions. Current VVC residual coding is
+   dominated by 8x8 lossy leaves and 4x4 lossless leaves; AV2 has more
+   effective rate-aware leaf and block choices.
+8. Keep instrumentation compile-gated. Per-CTU bit categories, stage timing,
+   residual energy, and candidate counters are useful for this work but must
+   stay out of normal product builds.
+
+### VVC MRL RD Residual Reuse
+
+This checkpoint implements item 1. The MRL selector now returns the selected
+reference-line index plus the finalized quantized luma residual block when the
+candidate was scored through lossy RD. TU finalization consumes that cached
+block, preserving the selected coefficients and reconstruction while avoiding a
+second quantization pass for MRL-eligible transformed TUs. Lossless MRL scoring
+continues to use the cheaper raw residual score and does not cache a residual.
+
+Validation:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_luma_mrl --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Strict VTM validation passed for all smoke and high-depth smoke rows. The
+six-vector first-frame matrix was byte-identical against
+`vvc-mrl-rd-score-1f`:
+
+| Mode | Bytes | FPS | Byte delta |
+|---|---:|---:|---:|
+| lossless | 5,856,819 | 0.33 | 0 |
+| qp=24 | 5,541,589 | 0.30 | 0 |
+
+Per-row VVC QP24 deltas versus `vvc-mrl-rd-score-1f`:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 233,302 | 0.51 | 26.131 | 0 |
+| SceneComposition_1_422 | 311,833 | 0.44 | 26.170 | 0 |
+| screen_wayland_activity_rgb | 809,785 | 0.21 | 25.393 | 0 |
+| MissionControlClip1_420 | 823,645 | 0.34 | 16.850 | 0 |
+| MissionControlClip1_422 | 1,271,391 | 0.28 | 16.074 | 0 |
+| MissionControlClip1_444 | 2,091,633 | 0.24 | 15.619 | 0 |
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mrl-rd-cache-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mrl-rd-score-1f.json
+```
+
+### VVC Frame-Aligned MPM And CTU-Bit Stats
+
+This checkpoint fixes a nonzero-MRL robustness issue found while collecting a
+fresh first-frame stats trace. The residual quantizer and CABAC writer must use
+the same luma-neighbor availability when deciding whether a luma mode is MPM
+coded. The quantizer now mirrors the CABAC CTU-top rule for above-neighbor mode
+availability, so nonzero MRL is not selected from a neighbor context that the
+writer will later suppress.
+
+The compile-gated CTU-bit sink also now keeps frame-level CABAC context and
+neighbour state across CTUs. This fixes the stats path for MRL-enabled streams:
+per-CTU bit-category rows can be emitted without encoding each CTU as an
+isolated picture. Normal builds are unaffected because this state exists only
+under `vvc-stats`.
+
+Validation:
+
+```sh
+cargo fmt
+cargo check -p frameforge-codecs --features "vvc vvc-stats"
+cargo test -p frameforge-codecs vvc_luma_mrl --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+cargo check --workspace \
+  --features "codec-av2 codec-vvc filter-pattern filter-identity filter-crop filter-scale frameforge-codecs/vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+The stats probe that previously panicked now completes:
+
+```sh
+FRAMEFORGE_VVC_STATS=verification/generated/profiling/vvc_mpm_aligned_scene420_lossy_1f.jsonl \
+FRAMEFORGE_VVC_CTU_BITS=verification/generated/profiling/vvc_mpm_aligned_scene420_lossy_1f_ctu.jsonl \
+./ff encode \
+  verification/generated/test_vectors/aomctc_b2_SceneComposition_1_420_1920x1080_15_1f_yuv420p8.yuv \
+  --video 1920x1080:yuv420p8 --frames 1 --fps 15 \
+  --encode vvc:verification/generated/profiling/vvc_mpm_aligned_scene420_lossy_1f.vvc \
+  --recon verification/generated/profiling/vvc_mpm_aligned_scene420_lossy_1f_recon.yuv \
+  --qp 24
+```
+
+Probe result: 233,233 encoded bytes, PSNR 26.126 dB, and VVC stats reported
+`ctu_quantize` at about 2.06 s versus `frame_entropy_write` at about 0.12 s on
+the first SceneComposition 4:2:0 frame. Candidate/residual work remains the
+dominant intra bottleneck.
+
+First-frame six-vector matrix versus `vvc-mrl-rd-cache-1f`:
+
+| Mode | Previous bytes | Current bytes | Byte delta | Previous FPS | Current FPS |
+|---|---:|---:|---:|---:|---:|
+| lossless | 5,856,819 | 5,856,894 | +75 | 0.33 | 0.34 |
+| qp=24 | 5,541,589 | 5,530,447 | -11,142 | 0.30 | 0.30 |
+
+Per-row VVC QP24 deltas:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 233,291 | 0.51 | 26.126 | -11 |
+| SceneComposition_1_422 | 313,075 | 0.40 | 26.159 | +1,242 |
+| screen_wayland_activity_rgb | 813,021 | 0.21 | 25.371 | +3,236 |
+| MissionControlClip1_420 | 821,385 | 0.34 | 16.851 | -2,260 |
+| MissionControlClip1_422 | 1,269,904 | 0.30 | 16.080 | -1,487 |
+| MissionControlClip1_444 | 2,079,771 | 0.23 | 15.649 | -11,862 |
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-intra-parity-mpm-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-mrl-rd-cache-1f.json
+```
+
+### VVC Luma RD Shortlist
+
+Checkpoint: `vvc-luma-rd-pareto-1f`.
+
+This checkpoint starts item 2 by adding an output-aware lossy luma mode
+refinement pass. The regular predictor search still supplies the candidate
+ordering, but the best raw mode is now compared against the next shortlisted
+mode after quantization and inverse reconstruction. The selector is conservative
+and only switches when the candidate improves estimated residual rate without
+raising reconstructed-residual distortion, or improves distortion without
+raising estimated residual rate. The selected quantized residual is cached and
+reused by TU finalization.
+
+This is useful plumbing but not yet a strong production tradeoff by itself. On
+the first-frame six-vector matrix, lossy total size improved by only 1,004 bytes
+versus `vvc-intra-parity-mpm-1f`, while several rows lost noticeable FPS.
+
+| Mode | Current bytes | FPS |
+|---|---:|---:|
+| lossless | 5,857,190 | 0.32 |
+| qp=24 | 5,529,443 | 0.25 |
+
+Per-row VVC QP24 deltas versus `vvc-intra-parity-mpm-1f`:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 231,229 | 0.41 | 26.183 | -2,062 |
+| SceneComposition_1_422 | 311,019 | 0.36 | 26.194 | -2,056 |
+| screen_wayland_activity_rgb | 812,752 | 0.18 | 25.391 | -269 |
+| MissionControlClip1_420 | 825,674 | 0.26 | 16.834 | +4,289 |
+| MissionControlClip1_422 | 1,272,654 | 0.23 | 16.070 | +2,750 |
+| MissionControlClip1_444 | 2,076,115 | 0.19 | 15.665 | -3,656 |
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-luma-rd-pareto-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-intra-parity-mpm-1f.json
+```
+
+### VVC Chroma RD Shortlist
+
+Checkpoint: `vvc-chroma-rd-pareto-1f`.
+
+This checkpoint extends item 2 to chroma predictor selection. The chroma search
+now keeps its normal derived/explicit/CCLM candidate list, then compares the
+selected raw mode against the next shortlisted candidate after quantization and
+inverse reconstruction of both Cb and Cr. The selector uses the same Pareto rule
+as luma and caches the selected chroma residual blocks for finalization.
+
+The change validated against VTM on smoke and high-depth smoke. Unlike the luma
+shortlist, it produced consistent first-frame gains across all six lossy rows:
+total QP24 size dropped 208,614 bytes versus `vvc-intra-parity-mpm-1f`, with
+PSNR increasing on every row. The cost is extra candidate reconstruction work,
+so total QP24 FPS moved from about 0.30 at `vvc-intra-parity-mpm-1f` to 0.23.
+The `vvc-stats` instrumentation now also records
+`luma_rd_refinement_attempts`, `luma_rd_refinement_switches`,
+`chroma_rd_refinement_attempts`, and `chroma_rd_refinement_switches` per CTU and
+in aggregate stats.
+
+| Mode | Current bytes | FPS |
+|---|---:|---:|
+| lossless | 5,857,190 | 0.33 |
+| qp=24 | 5,321,833 | 0.23 |
+
+Per-row VVC QP24 deltas versus `vvc-intra-parity-mpm-1f`:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 221,496 | 0.40 | 26.517 | -11,795 |
+| SceneComposition_1_422 | 295,710 | 0.33 | 26.638 | -17,365 |
+| screen_wayland_activity_rgb | 769,779 | 0.16 | 25.778 | -43,242 |
+| MissionControlClip1_420 | 812,856 | 0.25 | 17.051 | -8,529 |
+| MissionControlClip1_422 | 1,241,090 | 0.21 | 16.333 | -28,814 |
+| MissionControlClip1_444 | 1,980,902 | 0.17 | 16.061 | -98,869 |
+
+Validation:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-chroma-rd-pareto-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-intra-parity-mpm-1f.json
+```
+
+### VVC CTU Luma Leaf Selector
+
+Checkpoint: `vvc-ctu-leaf-sse-selector-1f`.
+
+This checkpoint addresses item 7 for the current luma partition surface. VVC
+already has legal 8x8 and 4x4 luma residual leaves; the encoder now chooses the
+per-CTU lossy luma leaf size from a rate-aware split proxy instead of using a
+single picture-wide 8x8 choice. The proxy compares each 8x8 luma block's SSE
+to its local mean with the sum of its four 4x4 local-mean SSEs, then selects
+4x4 CTU leaves only when the estimated distortion reduction clears both a
+QP/bit-depth-scaled rate penalty and a meaningful fraction of the CTU's luma
+variance. Lossless keeps the existing 4x4 path unchanged.
+
+The first-frame six-vector matrix is reference-compatible and lossless
+byte-neutral versus `vvc-chroma-rd-pareto-1f`. QP24 total size drops by 72,342
+bytes, and PSNR improves on every row. Two 10-bit 4:2:x rows spend extra luma
+bits to buy that quality, while screen/RGB and 4:4:4 rows carry most of the net
+bitrate win. A tighter split-gain probe (`vvc-ctu-leaf-sse-selector-tight-1f`)
+reduced those row regressions but lost the useful overall size reduction, so
+the looser net-positive selector remains active.
+
+| Mode | Current bytes | FPS | Byte delta |
+|---|---:|---:|---:|
+| lossless | 5,857,190 | 0.33 | 0 |
+| qp=24 | 5,249,491 | 0.22 | -72,342 |
+
+Per-row VVC QP24 deltas versus `vvc-chroma-rd-pareto-1f`:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 213,467 | 0.37 | 28.292 | -8,029 |
+| SceneComposition_1_422 | 277,512 | 0.32 | 28.201 | -18,198 |
+| screen_wayland_activity_rgb | 735,952 | 0.15 | 26.236 | -33,827 |
+| MissionControlClip1_420 | 879,658 | 0.24 | 18.378 | +66,802 |
+| MissionControlClip1_422 | 1,251,166 | 0.21 | 17.479 | +10,076 |
+| MissionControlClip1_444 | 1,891,736 | 0.17 | 17.070 | -89,166 |
+
+Validation:
+
+```sh
+cargo fmt
+cargo test -p frameforge-codecs vvc_ctu_luma_leaf_size_selector_uses_local_split_gain --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-ctu-leaf-sse-selector-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-chroma-rd-pareto-1f.json
+```
+
+### VVC MTS Selector Probe
+
+Checkpoint probe: `vvc-mts-enabled-1f`.
+
+The non-DCT2 luma MTS transform and syntax path is now reference-valid on the
+smoke and high-depth smoke validation sets when the selector is enabled. The
+current selector remains production-disabled, however, because its first-frame
+matrix tradeoff is poor: total QP24 size increased from 5,321,833 bytes to
+5,357,473 bytes versus `vvc-chroma-rd-pareto-1f`, and FPS fell from 0.23 to
+0.07. This should be revisited with a cheaper mode-directed shortlist and a
+rate-safer selection rule instead of trying every non-DCT2 transform on every
+eligible 8x8 luma TU.
+
+| Mode | Current bytes | FPS | Byte delta |
+|---|---:|---:|---:|
+| lossless | 5,857,190 | 0.34 | 0 |
+| qp=24 | 5,357,473 | 0.07 | +35,640 |
+
+Validation while temporarily enabling `VVC_ENABLE_LUMA_MTS_SELECTION`:
+
+```sh
+cargo test -p frameforge-codecs vvc_luma_mts --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mts-enabled-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-chroma-rd-pareto-1f.json
+```
+
+### VVC Residual BDPCM Selection
+
+Checkpoint: `vvc-bdpcm-residual-1f`.
+
+This checkpoint completes the first usable form of item 5. Residual slices now
+signal BDPCM capability in the SPS, and both lossy and lossless luma/chroma TUs
+can select regular horizontal or vertical BDPCM inside the unified residual
+path. The selector compares BDPCM candidates against the already-selected
+regular predictor using reconstructed residual distortion and estimated syntax
+rate, then only switches on Pareto wins so a BDPCM candidate does not buy rate
+by making the reconstructed residual worse.
+
+The coefficient path applies forward residual DPCM before transform-skip
+quantization and inverse residual DPCM before transform-skip dequantization,
+matching the VTM ordering. Dedicated BDPCM predictors bypass angular filtering
+and PDPC while still using the same left/top availability model as the regular
+intra predictor. The compile-gated `vvc-stats` path now records aggregate
+luma/chroma horizontal/vertical BDPCM counts and includes `bdpcm_mode` in the
+per-TU trace.
+
+First-frame six-vector matrix versus `vvc-ctu-leaf-sse-selector-1f`:
+
+| Mode | Previous bytes | Current bytes | Byte delta | Previous FPS | Current FPS |
+|---|---:|---:|---:|---:|---:|
+| lossless | 5,857,190 | 5,508,189 | -349,001 | 0.33 | 0.25 |
+| qp=24 | 5,249,491 | 1,502,019 | -3,747,472 | 0.22 | 0.19 |
+
+Per-row VVC QP24 deltas versus `vvc-ctu-leaf-sse-selector-1f`:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 130,885 | 0.32 | 34.731 | -82,582 |
+| SceneComposition_1_422 | 141,690 | 0.27 | 35.896 | -135,822 |
+| screen_wayland_activity_rgb | 309,755 | 0.13 | 36.574 | -426,197 |
+| MissionControlClip1_420 | 280,461 | 0.22 | 31.702 | -599,197 |
+| MissionControlClip1_422 | 303,102 | 0.18 | 32.841 | -948,064 |
+| MissionControlClip1_444 | 336,126 | 0.15 | 34.396 | -1,555,610 |
+
+Validation:
+
+```sh
+cargo fmt
+cargo check -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-bdpcm-residual-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-ctu-leaf-sse-selector-1f.json
+```
+
+### VVC MIP/ISP/LFNST Context Plumbing
+
+This checkpoint wires the currently inactive VVC-only intra tool syntax sites
+far enough that future predictors can be added without reworking SPS or CABAC
+context ownership:
+
+- MIP, ISP, and LFNST now have explicit CABAC context entries, VTM-derived
+  I-slice init/log2 tables, RTL trace ids, and stats bit-category mapping.
+- Residual SPS tool flags now carry `isp_enabled` and `mip_enabled` from the
+  active slice configuration instead of hard-coding both to false.
+- The luma CU syntax path contains inactive MIP, ISP, and LFNST emitters in
+  the VTM-shaped order. Normal residual configs keep the flags false, so
+  production streams remain byte-neutral. Enabling the flags currently emits
+  the no-tool branch; active MIP still needs matrix predictor tables, active
+  ISP needs split transform-tree ownership, and active LFNST needs transform
+  candidate ownership plus coefficient-group constraints.
+
+Validation:
+
+```sh
+cargo fmt
+cargo check -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+### VVC MTS Candidate Accounting
+
+Checkpoint: `vvc-mts-cost-accounting-1f`.
+
+This checkpoint keeps non-DCT2 MTS transform and syntax support available, but
+does not enable production selection. Two active selector probes were
+reference-valid against VTM, yet neither was a useful default:
+
+- `vvc-mts-directed-pareto-1f` tried one residual-gradient-directed MTS
+  candidate per eligible 8x8 luma TU. It finished at 1,502,177 lossy bytes
+  versus 1,502,019 for `vvc-bdpcm-residual-1f`, and reduced total lossy FPS
+  from 0.19 to 0.16.
+- `vvc-mts-directed-pareto-tsfirst-1f` avoided MTS trials when transform skip
+  already won against DCT2, but still finished at 1,503,572 lossy bytes and
+  did not recover enough FPS to justify enabling the selector.
+
+The retained default-path change is narrower: the shared luma quantized
+residual scorer now includes the explicit MTS flag cost for transformed blocks,
+and the gated `vvc-stats` counters report nonzero luma MTS index counts by
+transform pair. With `VVC_ENABLE_LUMA_MTS_SELECTION=false`, the stats probe on
+the first SceneComposition 4:2:0 frame reported all luma MTS counts as zero.
+
+First-frame six-vector matrix versus `vvc-bdpcm-residual-1f`:
+
+| Mode | Previous bytes | Current bytes | Byte delta | Previous FPS | Current FPS |
+|---|---:|---:|---:|---:|---:|
+| lossless | 5,508,189 | 5,508,189 | 0 | 0.25 | 0.25 |
+| qp=24 | 1,502,019 | 1,503,572 | +1,553 | 0.19 | 0.19 |
+
+Per-row VVC QP24 deltas:
+
+| Vector | Bytes | FPS | PSNR | Byte delta |
+|---|---:|---:|---:|---:|
+| SceneComposition_1_420 | 130,858 | 0.30 | 34.731 | -27 |
+| SceneComposition_1_422 | 141,676 | 0.26 | 35.896 | -14 |
+| screen_wayland_activity_rgb | 309,776 | 0.13 | 36.575 | +21 |
+| MissionControlClip1_420 | 281,027 | 0.21 | 31.696 | +566 |
+| MissionControlClip1_422 | 303,523 | 0.18 | 32.834 | +421 |
+| MissionControlClip1_444 | 336,712 | 0.15 | 34.395 | +586 |
+
+Validation:
+
+```sh
+cargo fmt
+cargo check -p frameforge-codecs --features vvc
+cargo test -p frameforge-codecs vvc --features "vvc vvc-stats"
+make validate-set CODEC=vvc VALIDATION_SET=smoke VALIDATION_REFERENCE_MODE=required
+make validate-set CODEC=vvc VALIDATION_SET=high-depth-smoke VALIDATION_REFERENCE_MODE=required
+```
+
+Command:
+
+```sh
+make benchmark-encode-matrix \
+  ENCODE_MATRIX_RUN=vvc-mts-cost-accounting-1f \
+  ENCODE_MATRIX_CODECS=vvc \
+  ENCODE_MATRIX_MODES="lossless lossy" \
+  ENCODE_MATRIX_FRAMES=1 \
+  ENCODE_MATRIX_BASELINE=verification/generated/encode_matrix/vvc-bdpcm-residual-1f.json
+```
+
 ## References
 
 - Cargo profile settings:

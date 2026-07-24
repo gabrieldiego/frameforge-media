@@ -317,13 +317,16 @@ fn vvc_frame_quantization_builds_per_leaf_luma_tu_metadata() {
         .all(|index| *index == 0));
     assert!(color.luma_tu_transform_skip[..color.luma_tu_count]
         .iter()
-        .all(|enabled| !*enabled));
+        .zip(color.luma_tu_bdpcm_modes[..color.luma_tu_count].iter())
+        .all(|(transform_skip, bdpcm_mode)| !bdpcm_mode.is_enabled() || *transform_skip));
     assert!(color.cb_tu_transform_skip[..color.chroma_tu_count]
         .iter()
-        .all(|enabled| !*enabled));
+        .zip(color.chroma_tu_bdpcm_modes[..color.chroma_tu_count].iter())
+        .all(|(transform_skip, bdpcm_mode)| !bdpcm_mode.is_enabled() || *transform_skip));
     assert!(color.cr_tu_transform_skip[..color.chroma_tu_count]
         .iter()
-        .all(|enabled| !*enabled));
+        .zip(color.chroma_tu_bdpcm_modes[..color.chroma_tu_count].iter())
+        .all(|(transform_skip, bdpcm_mode)| !bdpcm_mode.is_enabled() || *transform_skip));
 
     let mut reconstruction = VvcReconstructionFrame::new_neutral(frame.geometry, frame.format);
     let lossless = quant::quantize_vvc_residual_ctu_into_frame_reconstruction(
@@ -405,6 +408,35 @@ fn vvc_transform_skip_reconstruction_uses_encoded_luma_coefficients() {
         8,
     );
     assert_eq!(reconstructed, residuals_8x8);
+}
+
+#[test]
+fn vvc_transform_skip_lossy_coefficients_use_vtm_dequant_scale() {
+    let bit_depth = SampleBitDepth::new(8).expect("valid bit depth");
+    let qp = 24;
+    let residuals = [37, -14, 5, 0, 19, -22, 1, -1, 0, 0, 0, 0, 0, 0, 0, 0];
+    let dc_level = quant::quantize_vvc_transform_skip_level(residuals[0], bit_depth, qp);
+    let (ac_levels, has_ac) =
+        quant::transform_skip_luma_ac_levels_and_flag_with_qp(&residuals, 4, bit_depth, qp);
+
+    assert_eq!(dc_level, 4);
+    assert!(has_ac);
+
+    let mut reconstructed = Vec::new();
+    quant::reconstruct_vvc_luma_transform_skip_residuals_into_with_qp(
+        &mut reconstructed,
+        dc_level,
+        &ac_levels,
+        4,
+        4,
+        bit_depth,
+        qp,
+    );
+    assert_eq!(reconstructed[0], 40);
+    assert_eq!(reconstructed[1], -10);
+    assert_eq!(reconstructed[2], 0);
+    assert_eq!(reconstructed[4], 20);
+    assert_eq!(reconstructed[5], -20);
 }
 
 #[test]
@@ -665,7 +697,8 @@ fn vvc_lossless_transform_skip_reconstruction_matches_explicit_reconstruction() 
         VVC_LOSSLESS_LUMA_LEAF_SIZE,
     )
     .expect("lossless 16x16 CTU params");
-    let explicit = reconstruct_vvc_residual_frame(&frame, quantized, params);
+    let qp = vvc_lossless_slice_qp(frame.format.bit_depth);
+    let explicit = reconstruct_vvc_residual_frame_with_qp(&frame, quantized, params, qp, qp);
 
     let mut source_samples = Vec::new();
     source_samples.extend_from_slice(&frame.luma);
