@@ -69,7 +69,7 @@ make run ARGS="--help"
 The installed command name is intended to be short:
 
 ```sh
-ff --help
+./ff --help
 ```
 
 Run the default local quality gate:
@@ -85,6 +85,7 @@ make test-vector-sets
 make validate-set CODEC=av2 VALIDATION_SET=smoke
 make validate-set CODEC=vvc VALIDATION_SET=smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SOURCE_FILTERS=1
+make validate-set CODEC=av2 VALIDATION_SET=pipeline-smoke
 ```
 
 Reference decoders are optional but recommended for strict bitstream checks.
@@ -114,7 +115,7 @@ Override `CARGO_FEATURES` to build a smaller or more specialized binary:
 
 ```sh
 make build CARGO_FEATURES=all
-make build CARGO_FEATURES="codec-av2 filter-scale"
+make build CARGO_FEATURES="codec-av2 filter-pattern filter-identity"
 make build CARGO_FEATURES=
 ```
 
@@ -140,7 +141,7 @@ ff encode input.yuv --video 640x360:yuv444p \
 ff encode input.y4m --encode av2:output.obu --set lossless
 ff encode input.y4m --encode av2:output.obu --qp 24
 ff encode --filter pattern=checker --video 64x64:yuv444p \
-  --encode av2:pattern.obu
+  --frames 1 --encode av2:pattern.obu
 ff encode input_640x360_30_1f_yuv444p8.yuv \
   --filter identity --encode av2:output.obu
 ff encode input_640x360_30_1f_yuv444p8.yuv \
@@ -151,28 +152,30 @@ The commands validate command-line structure and report stage availability.
 When built with `codec-av2` or `codec-vvc`, `ff encode` can encode raw YUV
 inputs and Y4M inputs through the imported software model for that codec. Y4M
 files are demuxed by the shared input reader before frames reach AV2 or VVC.
-Filters are still parsed for the future pipeline shape but are not executed
-yet.
 
-Input options, such as `--video`, `--fps`, and `--frames`, belong after the
-input path and override metadata inferred from filenames or Y4M headers. If
-metadata is available from a Y4M header or from the filename, the corresponding
-input option can be omitted. If `--frames` and filename frame-count metadata
-are both omitted for a file input, `ff encode` processes whole frames until the
-raw input file or Y4M stream reaches EOF. If `--frames` is larger than the
-number of complete frames in the file, `ff encode` stops at EOF instead of
-failing. Source filters require explicit `--frames` because they do not have a
-file EOF. Filter options come next. Output/encoder options, such as
-`--recon output.yuv`, `--set lossless`, `--qp <1..255>`, `--preset`, and
-repeated `--set key[=value]`, belong after `--encode codec:output`. Bare
-`--set` keys imply `true`. `--qp` requests lossy AV2 or VVC quantization and
-is mutually exclusive with `--set lossless`; lower values preserve more detail.
-Global accepted settings are listed by `ff codecs`; codec-specific settings
-are listed with the codec that owns them. The current AV2-specific
+Current option placement and inference rules:
+
+- Input options, such as `--video`, `--fps`, and `--frames`, belong after the
+  input path and override metadata inferred from filenames or Y4M headers.
+- If `--frames` and filename frame-count metadata are both omitted for a file
+  input, `ff encode` processes whole frames until the raw input file or Y4M
+  stream reaches EOF.
+- If `--frames` is larger than the number of complete frames in a file,
+  `ff encode` stops at EOF instead of failing.
+- Source filters require explicit `--frames` because they do not have a file
+  EOF.
+- Output/encoder options, such as `--recon output.yuv`, `--set lossless`,
+  `--qp <1..255>`, `--preset`, and repeated `--set key[=value]`, belong after
+  `--encode codec:output`.
+- Bare `--set` keys imply `true`. `--qp` requests lossy AV2 or VVC
+  quantization and is mutually exclusive with `--set lossless`; lower values
+  preserve more detail.
+
+Global accepted settings are listed by `ff codecs`; codec-specific settings are
+listed with the codec that owns them. The current AV2-specific
 `--set predictive` mode is experimental and lossless-only. It starts a
-multi-picture AV2 stream and uses show-existing-frame for exact repeated
-frames; non-identical frames still fall back to the existing lossless
-key-frame path.
+multi-picture AV2 stream and uses show-existing-frame for exact repeated frames;
+non-identical frames still fall back to the existing lossless key-frame path.
 
 The positional input is optional when the first filter is a source. The initial
 source filter is `pattern=<name>`, with `black`, `checker`, `gradient`, and
@@ -181,6 +184,15 @@ because there is no filename to infer dimensions or pixel format from. The
 `identity` transform filter is executable for file inputs and source-filter
 inputs; `crop` and `scale` remain listed as future stage scaffolds and are
 rejected until their frame transforms are implemented.
+
+Current filter capability:
+
+| Filter | Kind | Status |
+|---|---|---|
+| `pattern=<name>` | source | executable generated input |
+| `identity` | transform | executable no-op frame pass-through |
+| `crop` | transform | scaffold; rejected until implemented |
+| `scale` | transform | scaffold; rejected until implemented |
 
 Raw video metadata uses a compact `WxH:pixfmt` spelling when it cannot be
 inferred from the input filename or Y4M header, or when it needs to be
@@ -204,11 +216,23 @@ The raw input CLI/API contract is documented in
 crates/
   frameforge-core/  Shared frame, packet, error, and pipeline primitives.
   frameforge-codecs/  Imported experimental AV2/VVC software models.
-  frameforge-cli/   Command-line entry point, installed as `ff`.
+  frameforge-cli/   Command-line entry point and CLI integration tests.
 docs/                     Architecture and validation notes.
-tests/                    Future integration tests and fixtures.
+tests/                    Future shared integration tests and fixtures.
 tools/                    Future development and validation helper scripts.
 ```
+
+## Current Limitations
+
+- Compressed input decode is not implemented yet; `ff encode` accepts raw YUV
+  and Y4M inputs.
+- AV2 and VVC encoders are experimental software models, not production codec
+  implementations.
+- `identity` is the only executable transform filter. `crop` and `scale` are
+  feature-gated discovery scaffolds.
+- Reference decoders are optional local tools. Use
+  `VALIDATION_REFERENCE_MODE=required` when a release or compatibility claim
+  depends on external decode validation.
 
 ## Safety Posture
 
