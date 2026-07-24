@@ -64,9 +64,13 @@ impl Av2MvpBlockSize {
             (16, 64) => 14,
             (64, 16) => 15,
             (8, 64) | (64, 8) => {
-                panic!("AV2 8:1 leaves are not partition context points")
+                debug_assert!(false, "AV2 8:1 leaves are not partition context points");
+                0
             }
-            _ => unreachable!("unsupported AV2 MVP block size"),
+            _ => {
+                debug_assert!(false, "unsupported AV2 MVP block size");
+                0
+            }
         }
     }
 
@@ -82,9 +86,13 @@ impl Av2MvpBlockSize {
             (8, 32) | (16, 64) => 13,
             (32, 8) | (64, 16) => 14,
             (8, 64) | (64, 8) => {
-                panic!("AV2 8:1 leaves are not partition context points")
+                debug_assert!(false, "AV2 8:1 leaves are not partition context points");
+                0
             }
-            _ => unreachable!("unsupported AV2 MVP block size"),
+            _ => {
+                debug_assert!(false, "unsupported AV2 MVP block size");
+                0
+            }
         }
     }
 

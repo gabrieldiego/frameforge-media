@@ -191,9 +191,9 @@ pub fn insert_emulation_prevention_bytes(rbsp: &[u8]) -> Vec<u8> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NalUnitKind {
-    /// Placeholder for a coded picture payload. Exact VVC NAL unit typing is TODO.
+    /// Generic coded-picture category for legacy/shared Annex-B tests.
     CodedPicture,
-    /// Placeholder parameter set category. Exact VPS/SPS/PPS syntax is TODO.
+    /// Generic parameter-set category for legacy/shared Annex-B tests.
     ParameterSet,
     /// Non-codec project metadata payload, not a conforming video bitstream.
     FrameForgePlaceholder,
@@ -232,8 +232,8 @@ impl AnnexBWriter {
 }
 
 fn placeholder_nal_header(kind: NalUnitKind, temporal_id: u8) -> [u8; 2] {
-    // TODO(vvc): Replace with exact VVC forbidden_zero_bit, nuh_layer_id,
-    // nal_unit_type, and nuh_temporal_id_plus1 packing.
+    // This shared helper writes project-local placeholder headers. Codec
+    // modules that need conforming NAL headers own their exact header packing.
     let kind_code = match kind {
         NalUnitKind::CodedPicture => 1,
         NalUnitKind::ParameterSet => 2,

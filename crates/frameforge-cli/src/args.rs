@@ -104,7 +104,7 @@ pub const INPUT_OPTIONS: &[HelpRow] = &[
 
 pub const FILTER_OPTIONS: &[HelpRow] = &[HelpRow {
     syntax: "-f, --filter <spec>",
-    summary: "Filter stage, repeatable, e.g. pattern=black or scale=w=640:h=360",
+    summary: "Filter stage, repeatable, e.g. pattern=black or identity",
 }];
 
 pub const DISCOVERY_COMMANDS: &[HelpRow] = &[

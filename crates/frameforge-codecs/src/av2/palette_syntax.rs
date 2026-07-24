@@ -504,10 +504,12 @@ fn palette_color_index_context(
         .take(color_count)
         .position(|&color| color == current_color)
         .unwrap_or_else(|| {
-            panic!(
+            debug_assert!(
+                false,
                 "palette color order missed color {} at ({}, {}) with stride {}",
                 current_color, col, row, stride
-            )
+            );
+            0
         });
     (color_index_ctx, color_token)
 }

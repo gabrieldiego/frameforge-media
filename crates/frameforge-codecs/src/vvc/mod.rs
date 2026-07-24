@@ -3249,11 +3249,13 @@ fn vvc_cabac_bits_with_luma_max_leaf_size(
     ) {
         return vvc_ctu_partition_cabac_bits(&params, slice_config);
     }
-    unimplemented!(
+    debug_assert!(
+        false,
         "VVC coding tree for coded geometry {}x{} must be generated from syntax parameters",
         geometry.coded_width(),
         geometry.coded_height()
     );
+    Vec::new()
 }
 
 fn vvc_frame_cabac_bits(
@@ -3268,21 +3270,22 @@ fn vvc_frame_cabac_bits(
     cabac.start();
     for (expected_slice_address, ctu) in ctus.iter().enumerate() {
         debug_assert_eq!(ctu.slice_address, expected_slice_address);
-        let params = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
+        let Some(params) = vvc_ctu_partition_params_with_luma_max_leaf_size_and_chroma(
             ctu.geometry,
             ctu.color.clone(),
             ctu.luma_max_leaf_size,
             slice_config.coding_tree.chroma_sampling,
             slice_config.coding_tree.dual_tree_intra,
-        )
-        .unwrap_or_else(|| {
-            panic!(
+        ) else {
+            debug_assert!(
+                false,
                 "VVC frame CABAC CTU {} has unsupported coded geometry {}x{}",
                 ctu.slice_address,
                 ctu.geometry.coded_width(),
                 ctu.geometry.coded_height()
-            )
-        });
+            );
+            return Vec::new();
+        };
         params_by_ctu.push(params);
     }
     encode_frame_partition_body_with_contexts(

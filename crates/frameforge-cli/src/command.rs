@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(any(feature = "codec-av2", feature = "codec-vvc")),
+    allow(dead_code)
+)]
+
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Write};

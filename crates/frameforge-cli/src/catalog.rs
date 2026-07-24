@@ -130,7 +130,7 @@ pub const FILTERS: &[StageInfo] = &[
         kind: StageKind::Filter,
         feature: "filter-identity",
         compiled: cfg!(feature = "filter-identity"),
-        summary: "no-op frame pass-through filter scaffold",
+        summary: "no-op frame pass-through transform",
         settings: NO_SETTINGS,
     },
     StageInfo {

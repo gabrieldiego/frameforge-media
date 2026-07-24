@@ -50,6 +50,15 @@ fn v_txb_skip_static_cdf_key(skip_ctx: u8) -> usize {
     AV2_STATIC_CDF_TXB_SKIP_V_BASE + usize::from(skip_ctx)
 }
 
+fn normalize_av2_context(context: u8, min: u8, max: u8, fallback: u8, label: &str) -> u8 {
+    if (min..=max).contains(&context) {
+        context
+    } else {
+        debug_assert!(false, "unsupported {label} context {context}");
+        fallback
+    }
+}
+
 fn tx4x4_coefficients_from_residual(
     residual: &[i32; TX4X4_SAMPLES],
     use_fsc: bool,
@@ -1318,6 +1327,7 @@ fn nonzero_dc_entropy_context(negative: bool) -> u8 {
 }
 
 fn write_y_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 1, 5, 5, "AV2 luma TXB skip");
     let (name, mut cdf) = match skip_ctx {
         1 => (
             "tile.coeff.y.txb_all_zero_tx4x4_ctx1",
@@ -1339,7 +1349,10 @@ fn write_y_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
             "tile.coeff.y.txb_all_zero_tx4x4_ctx5",
             DEFAULT_TXB_SKIP_Y_TX4X4_CTX5_CDF,
         ),
-        _ => panic!("unsupported AV2 luma TXB skip context {skip_ctx}"),
+        _ => (
+            "tile.coeff.y.txb_all_zero_tx4x4_ctx5",
+            DEFAULT_TXB_SKIP_Y_TX4X4_CTX5_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1352,6 +1365,7 @@ fn write_y_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 }
 
 fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 1, 5, 5, "AV2 luma TXB skip");
     let (name, mut cdf) = match skip_ctx {
         1 => (
             "tile.coeff.y.txb_nonzero_tx4x4_ctx1",
@@ -1373,7 +1387,10 @@ fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
             "tile.coeff.y.txb_nonzero_tx4x4_ctx5",
             DEFAULT_TXB_SKIP_Y_TX4X4_CTX5_CDF,
         ),
-        _ => panic!("unsupported AV2 luma TXB skip context {skip_ctx}"),
+        _ => (
+            "tile.coeff.y.txb_nonzero_tx4x4_ctx5",
+            DEFAULT_TXB_SKIP_Y_TX4X4_CTX5_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1386,6 +1403,7 @@ fn write_y_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 }
 
 fn write_y_inter_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 1, 5, 5, "AV2 inter luma TXB skip");
     let (name, mut cdf) = match skip_ctx {
         1 => (
             "tile.coeff.y.inter_txb_all_zero_tx4x4_ctx1",
@@ -1407,7 +1425,10 @@ fn write_y_inter_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
             "tile.coeff.y.inter_txb_all_zero_tx4x4_ctx5",
             DEFAULT_TXB_SKIP_Y_INTER_TX4X4_CTX5_CDF,
         ),
-        _ => panic!("unsupported AV2 inter luma TXB skip context {skip_ctx}"),
+        _ => (
+            "tile.coeff.y.inter_txb_all_zero_tx4x4_ctx5",
+            DEFAULT_TXB_SKIP_Y_INTER_TX4X4_CTX5_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1420,6 +1441,7 @@ fn write_y_inter_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 }
 
 fn write_y_inter_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 1, 5, 5, "AV2 inter luma TXB skip");
     let (name, mut cdf) = match skip_ctx {
         1 => (
             "tile.coeff.y.inter_txb_nonzero_tx4x4_ctx1",
@@ -1441,7 +1463,10 @@ fn write_y_inter_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
             "tile.coeff.y.inter_txb_nonzero_tx4x4_ctx5",
             DEFAULT_TXB_SKIP_Y_INTER_TX4X4_CTX5_CDF,
         ),
-        _ => panic!("unsupported AV2 inter luma TXB skip context {skip_ctx}"),
+        _ => (
+            "tile.coeff.y.inter_txb_nonzero_tx4x4_ctx5",
+            DEFAULT_TXB_SKIP_Y_INTER_TX4X4_CTX5_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1478,6 +1503,7 @@ fn write_y_fsc_txb_nonzero(writer: &mut Av2EntropyWriter) {
 }
 
 fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 6, 8, 8, "AV2 U TXB skip");
     let (name, mut cdf) = match skip_ctx {
         6 if use_fsc => (
             "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx6",
@@ -1503,7 +1529,14 @@ fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: boo
             "tile.coeff.u.txb_nonzero_tx4x4_ctx8",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
         ),
-        _ => panic!("unsupported AV2 U TXB skip context {skip_ctx}"),
+        _ if use_fsc => (
+            "tile.coeff.u.txb_nonzero_fsc_tx4x4_ctx8",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
+        ),
+        _ => (
+            "tile.coeff.u.txb_nonzero_tx4x4_ctx8",
+            DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1516,6 +1549,7 @@ fn write_u_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: boo
 }
 
 fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 0, 11, 11, "AV2 V TXB skip");
     let (name, mut cdf) = match skip_ctx {
         0 => (
             "tile.coeff.v.txb_nonzero_tx4x4_ctx0",
@@ -1565,7 +1599,10 @@ fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
             "tile.coeff.v.txb_nonzero_tx4x4_ctx11",
             DEFAULT_V_TXB_SKIP_TX4X4_CTX11_CDF,
         ),
-        _ => panic!("unsupported AV2 V TXB skip context {skip_ctx}"),
+        _ => (
+            "tile.coeff.v.txb_nonzero_tx4x4_ctx11",
+            DEFAULT_V_TXB_SKIP_TX4X4_CTX11_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1578,6 +1615,7 @@ fn write_v_txb_nonzero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
 }
 
 fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bool) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 6, 8, 8, "AV2 U TXB skip");
     let (name, mut cdf) = match skip_ctx {
         6 if use_fsc => (
             "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx6",
@@ -1603,7 +1641,14 @@ fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bo
             "tile.coeff.u.txb_all_zero_tx4x4_ctx8",
             DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
         ),
-        _ => panic!("unsupported AV2 U TXB skip context {skip_ctx}"),
+        _ if use_fsc => (
+            "tile.coeff.u.txb_all_zero_fsc_tx4x4_ctx8",
+            DEFAULT_TXB_SKIP_U_FSC_TX4X4_CTX8_CDF,
+        ),
+        _ => (
+            "tile.coeff.u.txb_all_zero_tx4x4_ctx8",
+            DEFAULT_TXB_SKIP_U_TX4X4_CTX8_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1616,6 +1661,7 @@ fn write_u_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8, use_fsc: bo
 }
 
 fn write_v_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
+    let skip_ctx = normalize_av2_context(skip_ctx, 0, 11, 11, "AV2 V TXB skip");
     let (name, mut cdf) = match skip_ctx {
         0 => (
             "tile.coeff.v.txb_all_zero_tx4x4_ctx0",
@@ -1665,7 +1711,10 @@ fn write_v_txb_all_zero(writer: &mut Av2EntropyWriter, skip_ctx: u8) {
             "tile.coeff.v.txb_all_zero_tx4x4_ctx11",
             DEFAULT_V_TXB_SKIP_TX4X4_CTX11_CDF,
         ),
-        _ => panic!("unsupported AV2 V TXB skip context {skip_ctx}"),
+        _ => (
+            "tile.coeff.v.txb_all_zero_tx4x4_ctx11",
+            DEFAULT_V_TXB_SKIP_TX4X4_CTX11_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1729,6 +1778,7 @@ fn write_y_negative_dc_sign(writer: &mut Av2EntropyWriter, dc_sign_ctx: u8) {
 }
 
 fn write_y_dc_sign(writer: &mut Av2EntropyWriter, negative: bool, dc_sign_ctx: u8) {
+    let dc_sign_ctx = normalize_av2_context(dc_sign_ctx, 0, 2, 0, "AV2 luma DC sign");
     let (name, mut cdf) = match dc_sign_ctx {
         0 => (
             "tile.coeff.y.dc_sign_negative_ctx0",
@@ -1742,7 +1792,10 @@ fn write_y_dc_sign(writer: &mut Av2EntropyWriter, negative: bool, dc_sign_ctx: u
             "tile.coeff.y.dc_sign_negative_ctx2",
             DEFAULT_DC_SIGN_Y_CTX2_CDF,
         ),
-        _ => panic!("unsupported AV2 luma DC sign context {dc_sign_ctx}"),
+        _ => (
+            "tile.coeff.y.dc_sign_negative_ctx0",
+            DEFAULT_DC_SIGN_Y_CTX0_CDF,
+        ),
     };
     writer.write_symbol_with_static_cdf_key(
         name,
@@ -1905,6 +1958,9 @@ fn entropy_context_dc_sign(context: u8) -> i8 {
         0 => 0,
         1 => -1,
         2 => 1,
-        _ => panic!("unsupported AV2 DC sign entropy context {context}"),
+        _ => {
+            debug_assert!(false, "unsupported AV2 DC sign entropy context {context}");
+            0
+        }
     }
 }

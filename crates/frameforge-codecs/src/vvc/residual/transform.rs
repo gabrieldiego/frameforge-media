@@ -162,10 +162,7 @@ pub(in crate::vvc) fn quantize_vvc_luma_residual_greedy_with_qp_and_mts(
     debug_assert!([4, 8, 16, 32].contains(&width));
     debug_assert!([4, 8, 16, 32].contains(&height));
     debug_assert!((0..=63).contains(&qp));
-    assert!(
-        vvc_luma_mts_index_supported(mts_index),
-        "unsupported VVC luma MTS index {mts_index}"
-    );
+    let mts_index = normalize_vvc_luma_mts_index(mts_index);
 
     let dc_level = quantize_vvc_luma_residual_dc_by_search_with_mts(
         residuals, width, height, bit_depth, qp, mts_index,
@@ -313,10 +310,7 @@ pub(in crate::vvc) fn inverse_transform_vvc_luma_quantized_block_into_with_qp_an
     qp: i32,
     mts_index: u8,
 ) {
-    assert!(
-        vvc_luma_mts_index_supported(mts_index),
-        "unsupported VVC luma MTS index {mts_index}"
-    );
+    let mts_index = normalize_vvc_luma_mts_index(mts_index);
     inverse_transform_vvc_quantized_block_into(
         residuals,
         scratch,
@@ -1288,9 +1282,16 @@ fn dct2_value(size: u16, k: usize, n: usize) -> i32 {
         16 if k <= 3 => VVC_DCT2_16_AC_ROWS_1_TO_3[k - 1][n],
         32 if k <= 3 => VVC_DCT2_32_AC_ROWS_1_TO_3[k - 1][n],
         16 | 32 => {
-            unimplemented!("DCT-II AC subset for size {size} is not wired for coefficient {k}")
+            debug_assert!(
+                false,
+                "DCT-II AC subset for size {size} is not wired for coefficient {k}"
+            );
+            0
         }
-        other => unimplemented!("DCT-II matrix size {other} is not wired yet"),
+        other => {
+            debug_assert!(false, "DCT-II matrix size {other} is not wired yet");
+            0
+        }
     }
 }
 
@@ -1316,12 +1317,27 @@ fn vvc_luma_mts_transform_pair(mts_index: u8) -> VvcLumaTransformPair {
             horizontal: VvcLumaTransformType::Dct8,
             vertical: VvcLumaTransformType::Dct8,
         },
-        _ => panic!("unsupported VVC luma MTS index {mts_index}"),
+        _ => {
+            debug_assert!(false, "unsupported VVC luma MTS index {mts_index}");
+            VvcLumaTransformPair {
+                horizontal: VvcLumaTransformType::Dct2,
+                vertical: VvcLumaTransformType::Dct2,
+            }
+        }
     }
 }
 
 fn vvc_luma_mts_index_supported(mts_index: u8) -> bool {
     matches!(mts_index, 0 | 2..=5)
+}
+
+fn normalize_vvc_luma_mts_index(mts_index: u8) -> u8 {
+    if vvc_luma_mts_index_supported(mts_index) {
+        mts_index
+    } else {
+        debug_assert!(false, "unsupported VVC luma MTS index {mts_index}");
+        0
+    }
 }
 
 fn vvc_luma_transform_value(transform: VvcLumaTransformType, size: u16, k: usize, n: usize) -> i32 {
@@ -1336,7 +1352,10 @@ fn dct8_value(size: u16, k: usize, n: usize) -> i32 {
     match size {
         4 => dct8_value_4(k, n),
         8 => dct8_value_8(k, n),
-        other => unimplemented!("DCT-VIII matrix size {other} is not wired yet"),
+        other => {
+            debug_assert!(false, "DCT-VIII matrix size {other} is not wired yet");
+            0
+        }
     }
 }
 
@@ -1344,7 +1363,10 @@ fn dst7_value(size: u16, k: usize, n: usize) -> i32 {
     match size {
         4 => dst7_value_4(k, n),
         8 => dst7_value_8(k, n),
-        other => unimplemented!("DST-VII matrix size {other} is not wired yet"),
+        other => {
+            debug_assert!(false, "DST-VII matrix size {other} is not wired yet");
+            0
+        }
     }
 }
 

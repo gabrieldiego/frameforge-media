@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(all(feature = "codec-av2", feature = "filter-identity")),
+    allow(unused_imports)
+)]
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;

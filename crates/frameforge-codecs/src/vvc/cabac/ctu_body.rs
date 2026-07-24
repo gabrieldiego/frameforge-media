@@ -1535,7 +1535,12 @@ impl<'a, 'p> VvcCtuCabacGenerator<'a, 'p> {
                 cabac.encode_bins_ep(u32::from(candidate_index), 2);
             }
             VvcChromaIntraPredictionMode::Cclm(_) => {
-                panic!("selected VVC CCLM mode for a node where CCLM is not signaled");
+                debug_assert!(
+                    false,
+                    "selected VVC CCLM mode for a node where CCLM is not signaled"
+                );
+                self.contexts
+                    .encode(cabac, VvcCabacContext::IntraChromaPredMode(0), false);
             }
         }
     }

@@ -56,7 +56,8 @@ pub(in crate::vvc) fn reconstruct_vvc_residual_frame_with_qp(
             )
         }
         other => {
-            unimplemented!("residual reconstruction is not wired for {other:?}")
+            debug_assert!(false, "residual reconstruction is not wired for {other:?}");
+            Vec::new()
         }
     }
 }

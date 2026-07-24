@@ -2087,7 +2087,13 @@ fn last_sig_coeff_group_index(position: u8) -> u8 {
         24..=31 => 9,
         32..=47 => 10,
         48..=63 => 11,
-        _ => unimplemented!("VVC last coefficient groups above 64 samples are not wired yet"),
+        _ => {
+            debug_assert!(
+                false,
+                "VVC last coefficient groups above 64 samples are not wired yet"
+            );
+            11
+        }
     }
 }
 
@@ -2101,7 +2107,13 @@ fn last_sig_coeff_group_min(group_idx: u8) -> u8 {
         9 => 24,
         10 => 32,
         11 => 48,
-        _ => unimplemented!("VVC last coefficient group minima above 64 samples are not wired yet"),
+        _ => {
+            debug_assert!(
+                false,
+                "VVC last coefficient group minima above 64 samples are not wired yet"
+            );
+            48
+        }
     }
 }
 
