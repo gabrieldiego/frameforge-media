@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use frameforge_core::{
-    convert_frame_format, planar_sample_sse, ChromaSampling, PixelFormat, SampleBitDepth, VERSION,
+    convert_frame_format, planar_sample_sse, run_frame_filter_pipeline, ChromaSampling, Filter,
+    Frame, FrameInfo, IdentityFilter, MediaError, PixelFormat, SampleBitDepth, Sink, Source,
+    VERSION,
 };
 
 use crate::args::{self, Command, EncodeArgs};
@@ -129,27 +131,13 @@ fn validate_filters(args: &EncodeArgs) -> Option<ExitCode> {
             return Some(ExitCode::from(3));
         }
     }
-    if filters.is_empty() {
-        return None;
+    match parse_filter_pipeline(args) {
+        Ok(_) => None,
+        Err(message) => {
+            eprintln!("error: {message}");
+            Some(ExitCode::from(4))
+        }
     }
-    if args.input.is_none() && is_pattern_source_pipeline(filters) {
-        return None;
-    }
-    if args.input.is_none() {
-        eprintln!("error: encode without an input requires a source filter such as --filter pattern=black");
-        return Some(ExitCode::from(4));
-    }
-    eprintln!(
-        "error: transform filters are parsed but execution is not implemented yet; only --filter pattern=<name> can source frames without input"
-    );
-    Some(ExitCode::from(4))
-}
-
-fn is_pattern_source_pipeline(filters: &[String]) -> bool {
-    if filters.len() != 1 {
-        return false;
-    }
-    args::filter_names(filters).next() == Some("pattern")
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +149,17 @@ enum EncodeInput {
 #[derive(Debug, Clone)]
 struct PatternSourceSpec {
     pattern: PatternKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransformFilterSpec {
+    Identity,
+}
+
+#[derive(Debug, Clone)]
+struct FilterPipelineSpec {
+    source: Option<PatternSourceSpec>,
+    transforms: Vec<TransformFilterSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,17 +206,51 @@ impl PatternKind {
     }
 }
 
-fn input_source_filter(args: &EncodeArgs) -> Result<PatternSourceSpec, String> {
-    if args.filters.is_empty() {
-        return Err("encode requires an input path or source filter".to_string());
+fn parse_filter_pipeline(args: &EncodeArgs) -> Result<FilterPipelineSpec, String> {
+    let mut source = None;
+    let mut transforms = Vec::new();
+    for (index, spec) in args.filters.iter().enumerate() {
+        let name = args::filter_names(std::slice::from_ref(spec))
+            .next()
+            .unwrap_or(spec.as_str());
+        match name {
+            "pattern" => {
+                if args.input.is_some() {
+                    return Err(
+                        "source filter 'pattern' cannot be used after an input path".to_string()
+                    );
+                }
+                if index != 0 {
+                    return Err("source filter 'pattern' must be the first filter".to_string());
+                }
+                if source.is_some() {
+                    return Err("encode accepts only one source filter".to_string());
+                }
+                source = Some(PatternSourceSpec::from_filter(spec)?);
+            }
+            "identity" => {
+                if spec.contains('=') || spec.contains(':') {
+                    return Err("identity filter does not accept options".to_string());
+                }
+                transforms.push(TransformFilterSpec::Identity);
+            }
+            "crop" | "scale" => {
+                return Err(format!(
+                    "filter '{name}' is compiled as a discovery scaffold but execution is not implemented yet"
+                ));
+            }
+            other => {
+                return Err(format!("filter '{other}' has no execution model wired yet"));
+            }
+        }
     }
-    if !is_pattern_source_pipeline(&args.filters) {
+    if args.input.is_none() && source.is_none() {
         return Err(
-            "encode without input currently supports only one source filter: --filter pattern=<name>"
+            "encode without an input requires a source filter such as --filter pattern=black"
                 .to_string(),
         );
     }
-    PatternSourceSpec::from_filter(&args.filters[0])
+    Ok(FilterPipelineSpec { source, transforms })
 }
 
 fn generated_pattern_input(job: &EncodeJob, source: &PatternSourceSpec) -> Result<Vec<u8>, String> {
@@ -599,6 +632,14 @@ fn pattern_sample(pattern: PatternKind, x: usize, y: usize, frame: usize) -> (u8
 }
 
 fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
+    let reader = open_unfiltered_job_reader(job)?;
+    if job.transform_filters.is_empty() {
+        return Ok(reader);
+    }
+    apply_transform_filters_to_reader(reader, job)
+}
+
+fn open_unfiltered_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
     match &job.input {
         EncodeInput::Path(path) => {
             let file = File::open(path)
@@ -617,6 +658,118 @@ fn open_job_reader(job: &EncodeJob) -> Result<Box<dyn Read>, String> {
         EncodeInput::Pattern(source) => {
             Ok(Box::new(Cursor::new(generated_pattern_input(job, source)?)))
         }
+    }
+}
+
+fn apply_transform_filters_to_reader(
+    reader: Box<dyn Read>,
+    job: &EncodeJob,
+) -> Result<Box<dyn Read>, String> {
+    let info = FrameInfo::new(job.width, job.height, job.format).map_err(|err| err.to_string())?;
+    let mut source = RawFrameReaderSource::new(reader, info, job.frames);
+    let mut sink = RawFrameVecSink::new(info);
+    let mut filters = job
+        .transform_filters
+        .iter()
+        .copied()
+        .map(build_transform_filter)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    let mut filter_refs = filters
+        .iter_mut()
+        .map(|filter| filter.as_mut() as &mut dyn Filter)
+        .collect::<Vec<_>>();
+    let stats = run_frame_filter_pipeline(&mut source, filter_refs.as_mut_slice(), &mut sink)
+        .map_err(|err| err.to_string())?;
+    if stats.input_frames != job.frames {
+        return Err(format!(
+            "filter pipeline consumed {} frame(s), expected {}",
+            stats.input_frames, job.frames
+        ));
+    }
+    Ok(Box::new(Cursor::new(sink.into_bytes())))
+}
+
+fn build_transform_filter(spec: TransformFilterSpec) -> frameforge_core::Result<Box<dyn Filter>> {
+    match spec {
+        TransformFilterSpec::Identity => Ok(Box::new(IdentityFilter)),
+    }
+}
+
+struct RawFrameReaderSource<R> {
+    inner: R,
+    info: FrameInfo,
+    frames_remaining: usize,
+    frame_index: usize,
+}
+
+impl<R: Read> RawFrameReaderSource<R> {
+    fn new(inner: R, info: FrameInfo, frames: usize) -> Self {
+        Self {
+            inner,
+            info,
+            frames_remaining: frames,
+            frame_index: 0,
+        }
+    }
+}
+
+impl<R: Read> Source for RawFrameReaderSource<R> {
+    type Output = Frame;
+
+    fn pull(&mut self) -> frameforge_core::Result<Option<Self::Output>> {
+        if self.frames_remaining == 0 {
+            return Ok(None);
+        }
+        let mut data = vec![0; self.info.expected_len()];
+        self.inner.read_exact(&mut data).map_err(|err| {
+            MediaError::Message(format!(
+                "failed to read frame {} for filter pipeline: {err}",
+                self.frame_index + 1
+            ))
+        })?;
+        self.frames_remaining -= 1;
+        self.frame_index += 1;
+        Frame::new(self.info, data).map(Some)
+    }
+}
+
+struct RawFrameVecSink {
+    info: FrameInfo,
+    data: Vec<u8>,
+}
+
+impl RawFrameVecSink {
+    fn new(info: FrameInfo) -> Self {
+        Self {
+            info,
+            data: Vec::new(),
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+}
+
+impl Sink<Frame> for RawFrameVecSink {
+    fn push(&mut self, input: Frame) -> frameforge_core::Result<()> {
+        if input.info() != self.info {
+            return Err(MediaError::Unsupported {
+                feature: "filter pipeline frame format change".to_string(),
+                reason: format!(
+                    "expected {}x{}:{}, got {}x{}:{}",
+                    self.info.width,
+                    self.info.height,
+                    self.info.format,
+                    input.info().width,
+                    input.info().height,
+                    input.info().format
+                ),
+            });
+        }
+        self.data.extend(input.into_data());
+        Ok(())
     }
 }
 
@@ -993,6 +1146,7 @@ struct EncodeJob {
     input: EncodeInput,
     output: PathBuf,
     recon: Option<PathBuf>,
+    transform_filters: Vec<TransformFilterSpec>,
     frames: usize,
     fps: Option<String>,
     validate_y4m_metadata: bool,
@@ -1053,9 +1207,15 @@ fn encode_with_model(codec_name: &str, job: EncodeJob) -> Result<(), String> {
 }
 
 fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
+    let filter_pipeline = parse_filter_pipeline(args)?;
     let input = match args.input.as_deref() {
         Some(path) => EncodeInput::Path(PathBuf::from(path)),
-        None => EncodeInput::Pattern(input_source_filter(args)?),
+        None => EncodeInput::Pattern(
+            filter_pipeline
+                .source
+                .clone()
+                .ok_or_else(|| "encode requires an input path or source filter".to_string())?,
+        ),
     };
     let output = PathBuf::from(args.output.as_deref().expect("parser requires output"));
     let recon = args.recon.as_deref().map(PathBuf::from);
@@ -1091,6 +1251,7 @@ fn encode_job(args: &EncodeArgs) -> Result<EncodeJob, String> {
         input,
         output,
         recon,
+        transform_filters: filter_pipeline.transforms,
         frames,
         fps: resolve_fps_metadata(args, y4m_metadata.as_ref()),
         validate_y4m_metadata: y4m_metadata.is_some() && !args.explicit_video,
@@ -2370,6 +2531,7 @@ mod tests {
             input: EncodeInput::Path(path.clone()),
             output: PathBuf::from("out.obu"),
             recon: None,
+            transform_filters: Vec::new(),
             frames: 1,
             fps: None,
             validate_y4m_metadata: false,
@@ -2390,6 +2552,100 @@ mod tests {
     }
 
     #[test]
+    fn encode_job_accepts_identity_filter_with_file_input() {
+        let path = temp_yuv_path("identity_filter_8x8");
+        let input = (0..PixelFormat::Yuv420p8.frame_len(8, 8).unwrap())
+            .map(|index| ((index * 17 + 3) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&input).expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            filters: vec!["identity".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("identity filter should be accepted");
+        assert_eq!(job.transform_filters, vec![TransformFilterSpec::Identity]);
+        let mut reader = open_job_reader(&job).expect("open filtered reader");
+        let mut filtered = Vec::new();
+        reader
+            .read_to_end(&mut filtered)
+            .expect("read identity-filtered input");
+        assert_eq!(filtered, input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encode_job_accepts_pattern_source_followed_by_identity_filter() {
+        let args = EncodeArgs {
+            input: None,
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            filters: vec!["pattern=black".to_string(), "identity".to_string()],
+            frames: Some(1),
+            ..EncodeArgs::default()
+        };
+
+        let job = encode_job(&args).expect("pattern plus identity should be accepted");
+        assert_eq!(job.transform_filters, vec![TransformFilterSpec::Identity]);
+        let mut reader = open_job_reader(&job).expect("open filtered pattern reader");
+        let mut filtered = Vec::new();
+        reader
+            .read_to_end(&mut filtered)
+            .expect("read filtered pattern input");
+        assert_eq!(
+            filtered,
+            vec![0; PixelFormat::Yuv420p8.frame_len(8, 8).unwrap()]
+        );
+    }
+
+    #[test]
+    fn encode_job_rejects_transform_filter_scaffolds() {
+        let path = temp_yuv_path("crop_filter_8x8");
+        let mut file = File::create(&path).expect("create temp yuv");
+        file.write_all(&vec![0; 8 * 8 * 3 / 2])
+            .expect("write temp yuv");
+        drop(file);
+
+        let args = EncodeArgs {
+            input: Some(path.to_string_lossy().to_string()),
+            output: Some("out.obu".to_string()),
+            codec: Some("av2".to_string()),
+            video: Some(args::VideoSpec {
+                width: 8,
+                height: 8,
+                pixel_format: Some("yuv420p8".to_string()),
+            }),
+            filters: vec!["crop=x=0:y=0:w=8:h=8".to_string()],
+            frames: None,
+            ..EncodeArgs::default()
+        };
+
+        let err = encode_job(&args).expect_err("crop execution should remain explicit");
+        assert!(
+            err.contains("discovery scaffold but execution is not implemented"),
+            "{err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn frame_psnr_reports_yuv422p8() {
         let job = EncodeJob {
             input: EncodeInput::Pattern(PatternSourceSpec {
@@ -2397,6 +2653,7 @@ mod tests {
             }),
             output: PathBuf::from("out.vvc"),
             recon: None,
+            transform_filters: Vec::new(),
             frames: 1,
             fps: None,
             validate_y4m_metadata: false,
@@ -2428,6 +2685,7 @@ mod tests {
             }),
             output: PathBuf::from("out.vvc"),
             recon: None,
+            transform_filters: Vec::new(),
             frames: 1,
             fps: None,
             validate_y4m_metadata: false,

@@ -16,6 +16,9 @@ pub use frame::{
     SampleBitDepth,
 };
 pub use packet::{Packet, StreamId, Timestamp};
-pub use pipeline::{Decoder, Encoder, Filter, Sink, Source};
+pub use pipeline::{
+    run_frame_encode_pipeline, run_frame_filter_pipeline, Decoder, EncodePipelineStats, Encoder,
+    Filter, FilterPipelineStats, IdentityFilter, Sink, Source,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

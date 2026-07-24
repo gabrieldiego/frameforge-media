@@ -11,8 +11,9 @@ Manifest format:
 
 ```text
 # description=Short description.
-name,width,height,frames,format,pattern,fps,lossless
-black_16x16,16,16,1,yuv420p8,black,30,false
+name,width,height,frames,format,pattern,fps,lossless,filters
+black_16x16,16,16,1,yuv420p8,black,30,false,
+identity_16x16,16,16,1,yuv420p8,checker,30,true,identity
 ```
 
 `fps` may be an integer, decimal, or fraction such as `30000/1001`.
@@ -23,6 +24,10 @@ against the generated source bytes.
 as `av2|vvc` to enable a row only for selected codec validation and compression
 comparison runs, or `none` to keep the vector generateable while no codec path
 currently claims support for it.
+`filters` is optional and uses the same `|`-separated style. Validation appends
+each listed transform filter to the `ff encode` command. The committed portable
+manifests currently use this for the executable `identity` filter; `crop` and
+`scale` remain discovery scaffolds until their frame transforms are implemented.
 Local manifests may use `pattern=source_file` with a `path` column. Raw YUV
 and raw RGB-family sources require explicit width, height, format, and frame count. Y4M source
 rows may leave width, height, format, and fps empty; the generator reads those

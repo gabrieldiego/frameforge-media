@@ -163,6 +163,7 @@ def run_file_case(
     ]
     if vector.fps is not None:
         command.extend(["--fps", vector.fps])
+    append_vector_filters(command, vector)
     command.extend(
         [
             "--encode",
@@ -184,7 +185,11 @@ def run_file_case(
         command,
         args,
         vector,
-        lossless_source=vector_path if effective_lossless(vector, args) else None,
+        lossless_source=(
+            vector_path
+            if effective_lossless(vector, args) and filters_preserve_source(vector)
+            else None
+        ),
     )
 
 
@@ -203,6 +208,7 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
     ]
     if vector.fps is not None:
         command.extend(["--fps", vector.fps])
+    append_vector_filters(command, vector)
     command.extend(["--encode", f"{args.codec}:{output}", "--recon", str(recon)])
     if effective_lossless(vector, args):
         command.extend(["--set", "lossless"])
@@ -217,12 +223,28 @@ def run_source_case(vector: generate_test_vectors.TestVector, args: argparse.Nam
         command,
         args,
         vector,
-        lossless_source=vector if effective_lossless(vector, args) else None,
+        lossless_source=(
+            vector
+            if effective_lossless(vector, args) and filters_preserve_source(vector)
+            else None
+        ),
     )
 
 
 def effective_lossless(vector: generate_test_vectors.TestVector, args: argparse.Namespace) -> bool:
     return vector.lossless and not args.force_lossy and args.qp is None
+
+
+def append_vector_filters(command: list[str], vector: generate_test_vectors.TestVector) -> None:
+    for filter_spec in vector.filters:
+        command.extend(["--filter", filter_spec])
+
+
+def filters_preserve_source(vector: generate_test_vectors.TestVector) -> bool:
+    return all(
+        filter_spec.split("=", 1)[0].split(":", 1)[0] == "identity"
+        for filter_spec in vector.filters
+    )
 
 
 def parse_qp(value: str) -> int:

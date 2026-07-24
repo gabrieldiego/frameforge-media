@@ -45,6 +45,7 @@ class TestVector:
     crop_y: int | None
     lossless: bool
     codecs: frozenset[str] | None
+    filters: tuple[str, ...]
 
     @property
     def filename(self) -> str:
@@ -239,6 +240,7 @@ def parse_vector(row: dict[str, str], path: Path) -> TestVector:
         crop_y=parse_optional_non_negative_int(row.get("crop_y", ""), "crop_y"),
         lossless=parse_optional_bool(row.get("lossless", ""), "lossless"),
         codecs=parse_optional_codecs(row.get("codecs", "")),
+        filters=parse_optional_filters(row.get("filters", "")),
     )
 
 
@@ -313,6 +315,18 @@ def parse_optional_codecs(value: str | None) -> frozenset[str] | None:
     if not codecs:
         return None
     return frozenset(codecs)
+
+
+def parse_optional_filters(value: str | None) -> tuple[str, ...]:
+    stripped = optional_field(value)
+    if stripped is None:
+        return ()
+    filters = tuple(
+        item.strip()
+        for item in stripped.replace(";", "|").split("|")
+        if item.strip()
+    )
+    return filters
 
 
 def parse_optional_path(value: str | None) -> Path | None:

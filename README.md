@@ -121,8 +121,9 @@ make build CARGO_FEATURES=
 `CARGO_FEATURES=all` means all normal product features. The `codec-av2` and
 `codec-vvc` features enable the imported experimental software models. The
 `filter-pattern` feature enables input-free generated pattern sources for
-fixtures. Other filter features are discovery placeholders for now; parsed
-transform filters are not executed yet. Analysis-only features, such as AV2
+fixtures. `filter-identity` enables the no-op transform filter used to exercise
+the executable frame pipeline. Other filter features are discovery placeholders
+for now. Analysis-only features, such as AV2
 superblock bit accounting, are enabled through dedicated Makefile switches like
 `AV2_SB_BITS=1` so the normal product build is not slowed by instrumentation.
 
@@ -176,7 +177,10 @@ key-frame path.
 The positional input is optional when the first filter is a source. The initial
 source filter is `pattern=<name>`, with `black`, `checker`, `gradient`, and
 `color_blocks` patterns. Source filters require explicit `--video` metadata
-because there is no filename to infer dimensions or pixel format from.
+because there is no filename to infer dimensions or pixel format from. The
+`identity` transform filter is executable for file inputs and source-filter
+inputs; `crop` and `scale` remain listed as future stage scaffolds and are
+rejected until their frame transforms are implemented.
 
 Raw video metadata uses a compact `WxH:pixfmt` spelling when it cannot be
 inferred from the input filename or Y4M header, or when it needs to be

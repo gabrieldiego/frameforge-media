@@ -33,6 +33,7 @@ make test-vectors TEST_VECTOR_SET=smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke
 make validate-set CODEC=vvc VALIDATION_SET=smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SOURCE_FILTERS=1
+make validate-set CODEC=av2 VALIDATION_SET=pipeline-smoke
 make validate-set CODEC=av2 VALIDATION_SET=smoke VALIDATION_SETTINGS=lossless
 make regression
 ```
@@ -57,6 +58,9 @@ When `VALIDATION_REFERENCE_MODE` is `auto` or `required` and a reference decoder
 is used, the reference reconstruction must also match the internal
 reconstruction. A lossless stream should only be enabled for a codec when both
 checks are expected to pass.
+Rows may also set `filters=<spec>|<spec>` to append executable transform
+filters to the `ff encode` command. The committed `pipeline-smoke` set uses
+this for `identity` coverage while mutating filters are still unavailable.
 For `rgb24` lossless vectors, FrameForge writes packed RGB reconstruction bytes
 while reference raw decoder output may be planar identity GBR. The validation
 runner normalizes that reference output back to packed `rgb24` before comparing

@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, MediaError>;
 pub enum MediaError {
     InvalidDimensions { width: usize, height: usize },
     IncompatibleFormat { format: String, reason: String },
+    Unsupported { feature: String, reason: String },
     LengthOverflow,
     BufferLength { expected: usize, actual: usize },
     Message(String),
@@ -20,6 +21,9 @@ impl fmt::Display for MediaError {
             }
             Self::IncompatibleFormat { format, reason } => {
                 write!(f, "incompatible {format} frame: {reason}")
+            }
+            Self::Unsupported { feature, reason } => {
+                write!(f, "unsupported {feature}: {reason}")
             }
             Self::LengthOverflow => f.write_str("frame length overflowed addressable memory"),
             Self::BufferLength { expected, actual } => {

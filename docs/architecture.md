@@ -49,6 +49,11 @@ Initial command families:
   Input-only options belong after the input path; output-only options belong
   after `--encode codec:path`.
 
+The first executable transform filter is `identity`, which is intentionally
+simple so the shared frame pipeline can be validated before adding mutating
+filters. `crop` and `scale` remain discovery scaffolds until their frame
+transforms are implemented and covered by validation manifests.
+
 Raw video metadata should use the compact `WxH:pixfmt` form, for example
 `--video 1920x1080:yuv444p`, when it cannot be inferred from the input
 filename or Y4M header, or when it needs to be overridden. Explicit `--video`,
